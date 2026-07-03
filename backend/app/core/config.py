@@ -12,6 +12,7 @@ class NinaEnvironment(BaseModel):
     profiles_dir: str
     sequence_template: str
     logs_dir: str
+    plugins_dir: str
 
 
 class NetworkSettings(BaseModel):
