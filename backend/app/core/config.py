@@ -11,6 +11,7 @@ class NinaEnvironment(BaseModel):
     masters_root: str
     profiles_dir: str
     sequence_template: str
+    logs_dir: str
 
 
 class NetworkSettings(BaseModel):

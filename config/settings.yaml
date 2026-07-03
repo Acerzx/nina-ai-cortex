@@ -11,6 +11,8 @@ nina_environment:
   profiles_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Profiles"
   sequence_template: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\ПО\\N.I.N.A\\Set templates\\Sequence.json"
 
+  logs_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Logs"
+
 network:
   nina_api_host: "http://localhost:18888" 
   nina_ws_url: "ws://localhost:18888/ws/events"
