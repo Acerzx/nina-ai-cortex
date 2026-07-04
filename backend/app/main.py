@@ -2,13 +2,13 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import logging
 import asyncio
-import sys
-
 from app.core.config import get_settings
 from app.core.discovery import PluginDiscovery
 from app.ingestion.log_tailer import NinaLogTailer
 from app.ingestion.session_watcher import SessionWatcher
-from app.shadow_engine.sequence_parser import SequenceParser  # НОВЫЙ ИМПОРТ
+from app.ingestion.nina_ws_client import NinaWebSocketClient  # ИСПОЛЬЗУЕМ НОВЫЙ КЛИЕНТ
+from app.shadow_engine.sequence_parser import SequenceParser
+from app.shadow_engine.state_tracker import SequenceStateTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,23 +29,36 @@ async def lifespan(app: FastAPI):
     discovery.run()
     app.state.discovery = discovery
 
-    # 2. Shadow Sequence Parser (НОВОЕ)
+    # 2. Shadow Sequence Parser
     seq_parser = SequenceParser()
-    app.state.sequence_shadow = seq_parser.parse()
+    shadow_graph = seq_parser.parse()
+    app.state.sequence_shadow = shadow_graph
 
-    # 3. Background Ingestion
+    # 3. State Tracker
+    state_tracker = SequenceStateTracker(shadow_graph)
+    app.state.state_tracker = state_tracker
+
+    # 4. Background Ingestion
     loop = asyncio.get_running_loop()
     log_tailer = NinaLogTailer()
     session_watcher = SessionWatcher(loop)
 
+    # WebSocket клиент с callback для State Tracker
+    ws_client = NinaWebSocketClient(on_event=state_tracker.process_event)
+
     task1 = asyncio.create_task(log_tailer.start())
     task2 = asyncio.create_task(session_watcher.start())
-    background_tasks.extend([task1, task2])
+    task3 = asyncio.create_task(ws_client.start())
 
-    logger.info("✅ Background Ingestion Services started")
+    background_tasks.extend([task1, task2, task3])
+    logger.info(
+        "✅ Background Ingestion Services started (LogTailer, SessionWatcher, WebSocket)"
+    )
+
     yield
 
     logger.info("👋 Shutting down N.I.N.A. AI Cortex...")
+    ws_client.stop()
     for task in background_tasks:
         task.cancel()
 
@@ -53,7 +66,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="N.I.N.A. AI Cortex",
     description="Cognitive Overlay for N.I.N.A.",
-    version="0.2.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -64,7 +77,7 @@ async def root():
         "status": "online",
         "message": "N.I.N.A. AI Cortex is listening...",
         "plugins_found": len(app.state.discovery.discovered_plugins),
-        "sequence_variables": app.state.sequence_shadow.global_variables,
+        "mode": "WebSocket + REST API",
     }
 
 
@@ -73,8 +86,12 @@ async def get_plugins():
     return app.state.discovery.discovered_plugins
 
 
-# НОВЫЙ ЭНДПОИНТ: Состояние секвенсора
 @app.get("/api/v1/sequence/shadow")
 async def get_sequence_shadow():
-    """Возвращает полный Context-Aware Shadow Graph"""
     return app.state.sequence_shadow
+
+
+@app.get("/api/v1/sequence/state")
+async def get_sequence_state():
+    """Возвращает текущее состояние выполнения секвенсора."""
+    return app.state.state_tracker.get_current_state()

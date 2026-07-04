@@ -1,6 +1,6 @@
 """
 Shadow Sequence State Tracker
-Сопоставляет WebSocket события с теневым графом секвенсора.
+Сопоставляет WebSocket события ninaAPI v2 с теневым графом секвенсора.
 """
 
 import logging
@@ -11,102 +11,65 @@ logger = logging.getLogger(__name__)
 
 
 class SequenceStateTracker:
-    """
-    Отслеживает текущее состояние выполнения секвенсора,
-    сопоставляя WebSocket события с теневым графом.
-    """
-
     def __init__(self, shadow_graph: Dict[str, Any]):
         self.shadow_graph = shadow_graph
         self.current_item_id: Optional[str] = None
         self.current_item_name: Optional[str] = None
-        self.current_container_path: List[str] = []
-        self.sequence_started: bool = False
+        self.sequence_running: bool = False
         self.last_event_time: Optional[datetime] = None
-
-        # Индекс для быстрого поиска элементов по ID
-        self.item_index: Dict[str, Dict[str, Any]] = {}
-        self._build_index()
-
-    def _build_index(self):
-        """Строит индекс всех элементов графа для быстрого поиска."""
-        self._index_node(self.shadow_graph.get("graph", {}))
-        logger.info(f"📊 Built index with {len(self.item_index)} items")
-
-    def _index_node(self, node: Any, path: List[str] = None):
-        """Рекурсивно индексирует узел графа."""
-        if path is None:
-            path = []
-
-        if isinstance(node, dict):
-            item_id = node.get("id")
-            if item_id:
-                self.item_index[item_id] = {"node": node, "path": path.copy()}
-
-            # Рекурсивно обходим children и instructions
-            for child in node.get("children", []):
-                self._index_node(child, path + [node.get("name", "Unknown")])
-
-            for instruction in node.get("instructions", []):
-                self._index_node(instruction, path + [node.get("name", "Unknown")])
-
-        elif isinstance(node, list):
-            for item in node:
-                self._index_node(item, path)
+        self.latest_image_stats: Optional[Dict[str, Any]] = None
+        self.safety_status: bool = True  # По умолчанию безопасно
 
     async def process_event(self, event: Dict[str, Any]):
-        """Обрабатывает WebSocket событие и обновляет состояние."""
-        event_type = event.get("type")
+        """Обрабатывает событие от ninaAPI v2."""
+        event_type = event.get("Event")
         self.last_event_time = datetime.now()
 
-        if event_type == "SequenceStarted":
-            self.sequence_started = True
+        if event_type == "SEQUENCE-STARTING":
+            self.sequence_running = True
             logger.info("▶️ Sequence started")
 
-        elif event_type == "SequenceStopped":
-            self.sequence_started = False
-            self.current_item_id = None
-            self.current_item_name = None
-            self.current_container_path = []
-            logger.info("⏹️ Sequence stopped")
+        elif event_type == "SEQUENCE-FINISHED":
+            self.sequence_running = False
+            logger.info("⏹️ Sequence finished")
 
-        elif event_type == "SequenceItemStarted":
-            item_id = event.get("itemId")
-            if item_id and item_id in self.item_index:
-                item_data = self.item_index[item_id]
-                self.current_item_id = item_id
-                self.current_item_name = item_data["node"].get(
-                    "name", item_data["node"].get("type", "Unknown")
-                )
-                self.current_container_path = item_data["path"]
+        elif event_type == "IMAGE-SAVE":
+            # Сохраняем статистику последнего кадра
+            self.latest_image_stats = event.get("ImageStatistics", {})
+            target = self.latest_image_stats.get("TargetName", "Unknown")
+            hfr = self.latest_image_stats.get("HFR", "N/A")
+            logger.debug(f"📊 Frame stats updated for {target} (HFR: {hfr})")
 
-                logger.info(f"🎯 Executing: {self.current_item_name}")
-                logger.debug(f"   Path: {' > '.join(self.current_container_path)}")
+        elif event_type == "SAFETY-CHANGED":
+            self.safety_status = event.get("IsSafe", True)
+            status = "SAFE" if self.safety_status else "UNSAFE"
+            logger.warning(f"🛡️ Safety status: {status}")
 
-        elif event_type == "SequenceItemCompleted":
-            item_id = event.get("itemId")
-            if item_id == self.current_item_id:
-                logger.info(f"✅ Completed: {self.current_item_name}")
-                self.current_item_id = None
-                self.current_item_name = None
+        elif event_type == "SEQUENCE-ENTITY-FAILED":
+            entity = event.get("Entity", "Unknown")
+            error = event.get("Error", "Unknown error")
+            logger.error(f"🚨 Sequence entity failed: {entity} - {error}")
 
-        elif event_type == "MeridianFlipStarted":
-            logger.info("🔄 Meridian Flip started")
+        elif event_type == "MOUNT-BEFORE-FLIP":
+            logger.info("🔄 Meridian Flip starting...")
 
-        elif event_type == "MeridianFlipCompleted":
-            logger.info("✅ Meridian Flip completed")
+        elif event_type == "MOUNT-AFTER-FLIP":
+            logger.info("✅ Meridian flip completed")
 
-        elif event_type == "Error":
-            error_msg = event.get("message", "Unknown error")
-            logger.error(f"🚨 Sequence Error: {error_msg}")
+        elif event_type == "TS-NEWTARGETSTART":
+            # Target Scheduler выбрал новую цель
+            target_name = event.get("TargetName", "Unknown")
+            project_name = event.get("ProjectName", "Unknown")
+            logger.info(
+                f"🎯 New target selected by scheduler: {target_name} (Project: {project_name})"
+            )
 
     def get_current_state(self) -> Dict[str, Any]:
-        """Возвращает текущее состояние секвенсора."""
+        """Возвращает текущее состояние системы."""
         return {
-            "sequence_running": self.sequence_started,
-            "current_item_id": self.current_item_id,
-            "current_item_name": self.current_item_name,
-            "current_container_path": self.current_container_path,
+            "sequence_running": self.sequence_running,
+            "safety_status": self.safety_status,
+            "latest_image": self.latest_image_stats,
             "last_event_time": self.last_event_time.isoformat()
             if self.last_event_time
             else None,
