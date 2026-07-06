@@ -389,9 +389,18 @@ class SequenceParser:
         return result
 
     def _parse_instruction(self, node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Парсит инструкцию со всеми параметрами."""
         node_type = node.get("$type", "")
         clean_type = self._clean_type(node_type)
+        if "TriggerRunner" in node_type:
+            return None
+
+        self.stats["total_instructions"] += 1
+        result = {
+            "id": node.get("$id"),
+            "type": clean_type,
+            "error_behavior": node.get("ErrorBehavior", 0),
+            "attempts": node.get("Attempts", 1),
+        }
 
         # Пропускаем TriggerRunner
         if "TriggerRunner" in node_type:
@@ -612,6 +621,37 @@ class SequenceParser:
             result["is_critical_shutdown"] = True
             return result
 
+        # === ДОБАВЛЕНО: Специфичные инструкции плагинов ===
+        if clean_type == "OagManualFocusInstruction":
+            result["plugin"] = "OagFocusAssist"
+            return result
+
+        if clean_type == "FilterSelectorInstruction":
+            result["plugin"] = "FilterSelector"
+            return result
+
+        if clean_type in ("StartLivestacking", "StopLivestacking"):
+            result["plugin"] = "LiveStack"
+            result["action"] = "start" if "Start" in clean_type else "stop"
+            return result
+
+        if clean_type in ("NightSummaryInstruction", "NightSummaryEndInstruction"):
+            result["plugin"] = "NightSummary"
+            return result
+
+        if clean_type == "Phd2SettleInstruction":
+            result["plugin"] = "PHD2Tools"
+            return result
+
+        if clean_type == "ShutdownPcInstruction":
+            result["shutdown_mode"] = node.get("ShutdownMode")
+            result["is_critical_shutdown"] = True
+            return result
+
+        if clean_type == "ShutdownNina":
+            result["is_critical_shutdown"] = True
+            return result
+
         # Все остальные инструкции - возвращаем базовые поля
         return result
 
@@ -626,6 +666,11 @@ class SequenceParser:
             "id": node.get("$id"),
             "name": clean_type,
         }
+
+        # === ДОБАВЛЕНО: Специфичные триггеры ===
+        if clean_type == "FlexureCompensatorTrigger":
+            result["plugin"] = "FlexureCompensator"
+            result["params"] = {"after_exposures": node.get("AfterExposures")}
 
         # Parent ref
         parent_node = node.get("Parent")

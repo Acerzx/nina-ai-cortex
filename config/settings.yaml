@@ -1,29 +1,44 @@
 nina_environment:
-  # Базовые пути (Адаптируйте под вашего пользователя)
   appdata_root: "C:\\Users\\istep\\AppData\\Local\\NINA"
-  user_profile: "C:\\Users\\istep"
-
-  # Корневые папки данных
   sessions_root: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\Фото\\Сессии"
   masters_root: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\Фото\\Данные\\MASTER FILE\\Masters"
-
-  # Пути к шаблонам и профилям
   profiles_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Profiles"
   sequence_template: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\ПО\\N.I.N.A\\Set templates\\Sequence.json"
-
-  plugins_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Plugins\\3.0.0"
   logs_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Logs"
+  plugins_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Plugins\\3.0.0"
 
 network:
-  # Базовый URL для REST API (ninaAPI v2)
-  nina_api_host: "http://localhost:1888/v2/api"
-  # URL для WebSocket событий
+  nina_api_host: "http://localhost:1888"
   nina_ws_url: "ws://localhost:1888/v2/socket"
-  prometheus_url: "http://127.0.0.1:9876/metrics"
+  prometheus_url: "http://localhost:9876"
+
+influxdb:
+  url: "http://localhost:8086"
+  token: "${INFLUXDB_TOKEN}"
+  org: "observatory"
+  bucket: "nina_telemetry"
 
 ai_settings:
   ollama_host: "http://localhost:11434"
   model_name: "qwen2.5:14b"
+  rag_db_path: "./data/vector_db"
+
+home_assistant:
+  enabled: false
+  url: "http://homeassistant.local:8123"
+  token: "${HA_TOKEN}"
+
+hal:
+  enabled: true
+  min_altitude_limit: 15.0 # Жесткий лимит высоты для HAL
+
+watchers:
+  debounce_seconds: 1.5
+  ai_weather_status_file: "C:\\Users\\istep\\AppData\\Local\\NINA\\AIWeather\\status.json"
+
+plugins_status:
+  dither_inject: "NOT_INSTALLED"
+  guider_calibration: "NOT_INSTALLED"
 
 logging:
   level: "INFO"

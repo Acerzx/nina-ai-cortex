@@ -1,77 +1,67 @@
-"""
-Shadow Sequence State Tracker
-Сопоставляет WebSocket события ninaAPI v2 с теневым графом секвенсора.
-"""
-
 import logging
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("StateTracker")
 
 
-class SequenceStateTracker:
-    def __init__(self, shadow_graph: Dict[str, Any]):
-        self.shadow_graph = shadow_graph
-        self.current_item_id: Optional[str] = None
-        self.current_item_name: Optional[str] = None
-        self.sequence_running: bool = False
-        self.last_event_time: Optional[datetime] = None
-        self.latest_image_stats: Optional[Dict[str, Any]] = None
-        self.safety_status: bool = True  # По умолчанию безопасно
+class SequenceState(BaseModel):
+    is_running: bool = False
+    current_item_id: Optional[str] = None
+    current_item_name: Optional[str] = None
+    current_item_type: Optional[str] = None
+    container_path: List[str] = []  # Путь контейнеров для Safety Interceptor
+    global_variables: Dict[str, Any] = {}
+    is_message_box_active: bool = False
+    is_approaching_shutdown: bool = False
+    is_flat_mode: bool = False  # Раннее обнаружение
 
-    async def process_event(self, event: Dict[str, Any]):
-        """Обрабатывает событие от ninaAPI v2."""
-        event_type = event.get("Event")
-        self.last_event_time = datetime.now()
 
-        if event_type == "SEQUENCE-STARTING":
-            self.sequence_running = True
-            logger.info("▶️ Sequence started")
+class StateTracker:
+    def __init__(self):
+        self.state = SequenceState()
+        self._shadow_graph = None
 
-        elif event_type == "SEQUENCE-FINISHED":
-            self.sequence_running = False
-            logger.info("⏹️ Sequence finished")
+    def set_shadow_graph(self, graph: Dict):
+        self._shadow_graph = graph
+        if graph and "global_variables" in graph:
+            self.state.global_variables = graph["global_variables"]
 
-        elif event_type == "IMAGE-SAVE":
-            # Сохраняем статистику последнего кадра
-            self.latest_image_stats = event.get("ImageStatistics", {})
-            target = self.latest_image_stats.get("TargetName", "Unknown")
-            hfr = self.latest_image_stats.get("HFR", "N/A")
-            logger.debug(f"📊 Frame stats updated for {target} (HFR: {hfr})")
+    async def handle_sequence_item_started(self, data: Dict):
+        item_name = data.get("Name", "")
+        item_type = data.get("Type", "")
 
-        elif event_type == "SAFETY-CHANGED":
-            self.safety_status = event.get("IsSafe", True)
-            status = "SAFE" if self.safety_status else "UNSAFE"
-            logger.warning(f"🛡️ Safety status: {status}")
+        self.state.current_item_name = item_name
+        self.state.current_item_type = item_type
+        self.state.is_running = True
 
-        elif event_type == "SEQUENCE-ENTITY-FAILED":
-            entity = event.get("Entity", "Unknown")
-            error = event.get("Error", "Unknown error")
-            logger.error(f"🚨 Sequence entity failed: {entity} - {error}")
+        # Обновление пути контейнеров (упрощенно, на основе имени)
+        if "Container" in item_type:
+            self.state.container_path.append(item_name)
 
-        elif event_type == "MOUNT-BEFORE-FLIP":
-            logger.info("🔄 Meridian Flip starting...")
+        # Раннее обнаружение FLAT_MODE (до появления FITS/JSON)
+        if "Перемещение для съемки FLAT" in item_name or "FLAT" in item_name.upper():
+            if not self.state.is_flat_mode:
+                self.state.is_flat_mode = True
+                logger.info("🟦 FLAT_MODE pre-activated via Shadow Engine")
 
-        elif event_type == "MOUNT-AFTER-FLIP":
-            logger.info("✅ Meridian flip completed")
+        if "Shutdown" in item_type:
+            self.state.is_approaching_shutdown = True
 
-        elif event_type == "TS-NEWTARGETSTART":
-            # Target Scheduler выбрал новую цель
-            target_name = event.get("TargetName", "Unknown")
-            project_name = event.get("ProjectName", "Unknown")
-            logger.info(
-                f"🎯 New target selected by scheduler: {target_name} (Project: {project_name})"
-            )
+    async def handle_sequence_item_completed(self, data: Dict):
+        item_name = data.get("Name", "")
+        if (
+            "Container" in data.get("Type", "")
+            and self.state.container_path
+            and self.state.container_path[-1] == item_name
+        ):
+            self.state.container_path.pop()
 
-    def get_current_state(self) -> Dict[str, Any]:
-        """Возвращает текущее состояние системы."""
-        return {
-            "sequence_running": self.sequence_running,
-            "safety_status": self.safety_status,
-            "latest_image": self.latest_image_stats,
-            "last_event_time": self.last_event_time.isoformat()
-            if self.last_event_time
-            else None,
-            "global_variables": self.shadow_graph.get("global_variables", {}),
-        }
+        if "Перемещение для съемки FLAT" in item_name:
+            pass  # Сбросится при появлении LIGHT кадров или явном окончании
+
+    def get_state(self) -> Dict:
+        return self.state.model_dump()
+
+
+state_tracker = StateTracker()
