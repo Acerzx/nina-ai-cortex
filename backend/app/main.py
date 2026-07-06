@@ -50,14 +50,6 @@ async def lifespan(app: FastAPI):
         # 1. Запуск всех компонентов Ingestion, Shadow Engine и Execution
         await watcher_manager.start()
 
-        # 2. Принудительный парсинг Sequence.json (если еще не спарсен в manager)
-        # Это нужно, чтобы API сразу мог отдать теневой граф
-        if not state_tracker._shadow_graph:
-            logger.info("Parsing Sequence.json for Shadow Engine...")
-            parser = SequenceParser()
-            graph_data = parser.parse()
-            state_tracker.set_shadow_graph(graph_data)
-
         logger.info("✅ Cortex is fully operational and ready to accept connections.")
         logger.info(f"🌐 API Docs available at: http://localhost:8000/docs")
 
