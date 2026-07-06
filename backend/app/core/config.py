@@ -44,6 +44,21 @@ class InfluxDBConfig(BaseModel):
     bucket: str
 
 
+class QdrantConfig(BaseModel):
+    """Настройки Qdrant для RAG-системы."""
+
+    url: str = "http://localhost:6333"
+    collection_name: str = "nina_sessions"
+    embedding_model: str = "nomic-embed-text"
+
+
+class WSBroadcastConfig(BaseModel):
+    """Настройки WebSocket Broadcasting для Frontend."""
+
+    enabled: bool = True
+    path: str = "/ws"
+
+
 class AISettings(BaseModel):
     """Настройки AI (Ollama, RAG)."""
 
@@ -97,6 +112,8 @@ class Settings(BaseSettings):
     nina_environment: NinaEnvironment
     network: NetworkConfig
     influxdb: InfluxDBConfig
+    qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
+    ws_broadcast: WSBroadcastConfig = Field(default_factory=WSBroadcastConfig)
     ai_settings: AISettings
     home_assistant: HomeAssistantConfig = Field(default_factory=HomeAssistantConfig)
     hal: HALConfig = Field(default_factory=HALConfig)
