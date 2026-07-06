@@ -1,13 +1,22 @@
+"""
+Night Summary Watcher
+Мониторит итоговые отчеты за ночь (NightSummary.json).
+Устраняет Упрощение #7.
+"""
+
 import json, logging
 from pathlib import Path
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
+from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
 
 logger = logging.getLogger("NightSummaryWatcher")
 
 
 class NightSummaryWatcher(BaseFileWatcher):
-    def __init__(self, registry):
+    """Мониторит NightSummary.json в папках сессий."""
+
+    def __init__(self, registry: CapabilityRegistry):
         super().__init__(
             settings.nina_environment.sessions_root, ["NightSummary.json"], registry
         )

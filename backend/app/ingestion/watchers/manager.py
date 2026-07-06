@@ -1,9 +1,17 @@
-import asyncio, logging
-from app.core.events import event_bus
+"""
+Watcher Manager — централизованный хаб для управления всеми watchers, pollers и subscribers.
+Устраняет проблему дублирования инициализации и обеспечивает единый lifecycle management.
+"""
+
+import asyncio
+import logging
+from pathlib import Path
+
 from app.core.config import settings
+from app.core.events import event_bus
 from app.core.capability_registry import CapabilityRegistry
 
-# Watchers
+# Ingestion Watchers
 from app.ingestion.watchers.session_watcher import SessionWatcher
 from app.ingestion.watchers.hocus_focus_watcher import HocusFocusWatcher
 from app.ingestion.watchers.fits_header_scanner import FITSHeaderScanner
@@ -21,17 +29,24 @@ from app.ingestion.watchers.ai_weather_watcher import AIWeatherWatcher
 from app.ingestion.watchers.websocket_client import NinaWebSocketClient
 from app.ingestion.subscribers.influxdb_subscriber import InfluxDBSubscriber
 
-# Shadow & Execution
+# Shadow Engine & Execution
 from app.shadow_engine.state_tracker import state_tracker
 from app.shadow_engine.sequence_parser import SequenceParser
 from app.execution.safety_interceptor import safety_interceptor
 from app.execution.hal import hal
+
+# Multi-Agent Swarm Foundation
 from app.agents.observatory_state import observatory_state
 
 logger = logging.getLogger("WatcherManager")
 
 
 class WatcherManager:
+    """
+    Централизованный менеджер для всех watchers, pollers и subscribers.
+    Обеспечивает единый lifecycle management и Dependency Injection.
+    """
+
     def __init__(self):
         self.watchers = []
         self.pollers = []
@@ -40,22 +55,40 @@ class WatcherManager:
         self.registry = None
 
     async def start(self):
+        """
+        Запускает все компоненты системы в правильном порядке:
+        1. EventBus
+        2. Capability Registry (DI)
+        3. Foundation (ObservatoryState, HAL)
+        4. Shadow Engine (Sequence Parser)
+        5. File Watchers
+        6. Pollers (Prometheus, LogTailer)
+        7. Subscribers (InfluxDB)
+        8. Masters Library Audit (background)
+        9. WebSocket Client (to N.I.N.A.)
+        10. Safety Interceptor
+        """
         logger.info("🚀 Initializing N.I.N.A. AI Cortex...")
+
+        # 1. EventBus
         await event_bus.start()
 
-        # 1. DI: Инициализация Registry
+        # 2. DI: Инициализация Capability Registry
+        logger.info("📋 Loading Capability Registry from XML profile...")
         self.registry = CapabilityRegistry(settings.nina_environment.profiles_dir)
 
-        # 2. Foundation
+        # 3. Foundation (ObservatoryState, HAL)
+        logger.info("🧠 Initializing ObservatoryState and HAL...")
         await observatory_state.start()
         await hal.start()
 
-        # 3. Shadow Engine
+        # 4. Shadow Engine (парсинг Sequence.json)
+        logger.info("📖 Parsing Sequence.json for Shadow Engine...")
         parser = SequenceParser()
         graph = parser.parse()
         state_tracker.set_shadow_graph(graph)
 
-        # 4. File Watchers (Передаем registry через DI)
+        # 5. File Watchers (Передаем registry через DI)
         logger.info("📂 Starting File Watchers...")
         self.watchers.extend(
             [
@@ -70,10 +103,15 @@ class WatcherManager:
                 AIWeatherWatcher(self.registry),
             ]
         )
-        for w in self.watchers:
-            w.start()
 
-        # 5. Pollers & Subscribers
+        for watcher in self.watchers:
+            watcher.start()
+
+        logger.info(f"   ✅ {len(self.watchers)} File Watchers started")
+
+        # 6. Pollers (Prometheus, LogTailer)
+        logger.info("🔄 Starting Pollers...")
+
         prometheus = PrometheusScraper()
         await prometheus.start()
         self.pollers.append(prometheus)
@@ -82,27 +120,74 @@ class WatcherManager:
         await log_tailer.start()
         self.pollers.append(log_tailer)
 
+        logger.info(f"   ✅ {len(self.pollers)} Pollers started")
+
+        # 7. Subscribers (InfluxDB)
+        logger.info("📊 Starting InfluxDB Subscriber...")
         self.influx = InfluxDBSubscriber()
         await self.influx.start()
 
-        # 6. Masters Audit
-        asyncio.create_task(MastersLibraryAuditor(self.registry).scan_library())
+        # 8. Masters Library Audit (background task)
+        # MastersLibraryAuditor использует settings.nina_environment.masters_root напрямую
+        # НЕ требует registry через DI
+        logger.info("📚 Starting Masters Library Audit in background...")
+        masters_auditor = MastersLibraryAuditor()
+        asyncio.create_task(masters_auditor.scan_library())
 
-        # 7. WebSocket & Safety
+        # 9. WebSocket Client (к N.I.N.A.)
+        logger.info("📡 Starting WebSocket Client to N.I.N.A....")
         self.ws_client = NinaWebSocketClient(url=settings.network.nina_ws_url)
         await self.ws_client.start()
+
+        # 10. Safety Interceptor
+        logger.info("🛡️ Starting Safety Interceptor...")
         await safety_interceptor.start()
 
+        logger.info("=" * 70)
         logger.info("✅ Cortex fully initialized with Dependency Injection.")
+        logger.info("=" * 70)
 
     async def stop(self):
-        for w in self.watchers:
-            w.stop()
-        for p in self.pollers:
-            await p.stop()
+        """
+        Корректно останавливает все компоненты в обратном порядке.
+        """
+        logger.info("🛑 Stopping all Cortex components...")
+
+        # Останавливаем watchers
+        for watcher in self.watchers:
+            try:
+                watcher.stop()
+            except Exception as e:
+                logger.error(f"Error stopping watcher: {e}")
+
+        # Останавливаем pollers
+        for poller in self.pollers:
+            try:
+                await poller.stop()
+            except Exception as e:
+                logger.error(f"Error stopping poller: {e}")
+
+        # Останавливаем WebSocket client
         if self.ws_client:
-            await self.ws_client.stop()
+            try:
+                await self.ws_client.stop()
+            except Exception as e:
+                logger.error(f"Error stopping WebSocket client: {e}")
+
+        # Останавливаем InfluxDB subscriber
         if self.influx:
-            await self.influx.stop()
-        await safety_interceptor.stop()
+            try:
+                await self.influx.stop()
+            except Exception as e:
+                logger.error(f"Error stopping InfluxDB subscriber: {e}")
+
+        # Останавливаем Safety Interceptor
+        try:
+            await safety_interceptor.stop()
+        except Exception as e:
+            logger.error(f"Error stopping Safety Interceptor: {e}")
+
+        # Останавливаем EventBus
         await event_bus.stop()
+
+        logger.info("✅ All Cortex components stopped gracefully.")

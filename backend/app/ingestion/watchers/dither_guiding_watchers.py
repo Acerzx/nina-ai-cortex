@@ -1,9 +1,16 @@
+"""
+Dither Statistics & Guiding Analyzer Watchers
+Мониторят экспорты качества дизеринга и FFT-анализа гидирования.
+Устраняют Упрощения #4 и #5.
+"""
+
 import logging
 import json
 import csv
 import aiofiles
 from pathlib import Path
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
+from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
 
 logger = logging.getLogger("DitherGuidingWatcher")
@@ -12,15 +19,16 @@ logger = logging.getLogger("DitherGuidingWatcher")
 class DitherStatisticsWatcher(BaseFileWatcher):
     """Мониторит экспорты Dither Statistics (CD, GFM, Voronoi CV)."""
 
-    def __init__(self):
-        # Путь берется из settings.yaml или дефолтный
+    def __init__(self, registry: CapabilityRegistry):
         path_str = getattr(settings.watchers, "dither_statistics_path", None)
         path = (
             Path(path_str)
             if path_str
             else Path.home() / "Documents" / "NINA" / "DitherStatistics"
         )
-        super().__init__(watch_path=path, target_files=[".csv", ".json"])
+        super().__init__(
+            watch_path=path, target_files=[".csv", ".json"], registry=registry
+        )
 
     async def process_file(self, path: Path) -> None:
         if path.suffix.lower() not in [".csv", ".json"]:
@@ -53,14 +61,16 @@ class DitherStatisticsWatcher(BaseFileWatcher):
 class GuidingAnalyzerWatcher(BaseFileWatcher):
     """Мониторит экспорты Guiding Analyzer (FFT, PE, Backlash)."""
 
-    def __init__(self):
+    def __init__(self, registry: CapabilityRegistry):
         path_str = getattr(settings.watchers, "guiding_analyzer_path", None)
         path = (
             Path(path_str)
             if path_str
             else Path.home() / "Documents" / "NINA" / "GuidingAnalyzer"
         )
-        super().__init__(watch_path=path, target_files=[".csv", ".json"])
+        super().__init__(
+            watch_path=path, target_files=[".csv", ".json"], registry=registry
+        )
 
     async def process_file(self, path: Path) -> None:
         if path.suffix.lower() not in [".csv", ".json"]:

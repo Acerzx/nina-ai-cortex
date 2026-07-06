@@ -1,21 +1,27 @@
+"""
+LiveStack Watcher
+Мониторит рабочую папку LiveStack (stack_status.json, history.csv).
+Устраняет Упрощение #3.
+"""
+
 import json
 import logging
 import aiofiles
 from pathlib import Path
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
-from app.core.capability_registry import capability_registry
+from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
 
 logger = logging.getLogger("LiveStackWatcher")
 
 
 class LiveStackWatcher(BaseFileWatcher):
+    """Мониторит рабочую папку LiveStack."""
+
     LIVESTACK_GUID = "10bc1716-54af-425e-b307-c0ca1ce10600"
 
-    def __init__(self):
-        working_dir = capability_registry.get_plugin_path(
-            self.LIVESTACK_GUID, "WorkingDirectory"
-        )
+    def __init__(self, registry: CapabilityRegistry):
+        working_dir = registry.get_plugin_path(self.LIVESTACK_GUID, "WorkingDirectory")
         if not working_dir:
             logger.warning(
                 "LiveStack WorkingDirectory not found in profile. Using fallback."
@@ -23,15 +29,14 @@ class LiveStackWatcher(BaseFileWatcher):
             working_dir = Path(settings.nina_environment.sessions_root) / "Live"
 
         super().__init__(
-            watch_path=working_dir,
-            target_files=["stack_status.json", "history.csv", ".json", ".csv"],
+            watch_path=working_dir, target_files=[".json", ".csv"], registry=registry
         )
 
     async def process_file(self, path: Path) -> None:
         if path.suffix.lower() not in [".json", ".csv"]:
             return
 
-        # Игнорируем сами FITS-файлы (калиброванные и стек)
+        # Игнорируем FITS-файлы (калиброванные и стек)
         if "calibrated" in path.name.lower() or "stacked" in path.name.lower():
             return
 

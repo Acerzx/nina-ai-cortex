@@ -1,7 +1,14 @@
+"""
+ObservatoryState — единое состояние обсерватории.
+Агрегирует данные из всех источников (EventBus, Prometheus, InfluxDB, Shadow Engine)
+и предоставляет API для Multi-Agent Swarm (LangGraph).
+Устраняет Упрощение #17.
+"""
+
 import logging
 import asyncio
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, ClassVar
+from datetime import datetime
 from collections import deque
 from pydantic import BaseModel, Field
 
@@ -22,8 +29,8 @@ class MetricsHistory(BaseModel):
     wind_speed: List[float] = Field(default_factory=list)
     humidity: List[float] = Field(default_factory=list)
 
-    # Максимум 100 точек для каждой метрики
-    MAX_POINTS = 100
+    # ИСПРАВЛЕНО: ClassVar указывает Pydantic, что это константа класса, а не поле модели
+    MAX_POINTS: ClassVar[int] = 100
 
 
 class AIAction(BaseModel):
@@ -39,8 +46,6 @@ class AIAction(BaseModel):
 class ObservatoryState:
     """
     Единое состояние обсерватории.
-    Устраняет Упрощение #17.
-
     Все AI-агенты обращаются к этому объекту для получения актуальных данных.
     """
 
@@ -86,9 +91,6 @@ class ObservatoryState:
         # === История трендов ===
         self.history = MetricsHistory()
 
-        # === Состояние секвенсора (из Shadow Engine) ===
-        # Делегируем к state_tracker.state
-
         # === Активные алерты ===
         self.active_alerts: List[Dict[str, Any]] = []
 
@@ -129,10 +131,10 @@ class ObservatoryState:
         event_bus.subscribe("ALERT", self._on_alert)
 
         # Режимы
-        event_bus.subscribe("FLAT_MODE_START", self._on_flat_mode_start)
-        event_bus.subscribe("FLAT_MODE_END", self._on_flat_mode_end)
+        event_bus.subscribe("FLAT_MODE_CONFIRMED", self._on_flat_mode_start)
+        event_bus.subscribe("FLAT_MODE_ENDED", self._on_flat_mode_end)
 
-        # События гида
+        # События гида и безопасности из логов
         event_bus.subscribe("LOG_EVENT", self._on_log_event)
 
         self._subscribed = True
@@ -219,7 +221,7 @@ class ObservatoryState:
 
         if event_type == "guiding_start":
             self.is_guiding_active = True
-        elif event_type == "guiding_lost" or event_type == "guiding_stop":
+        elif event_type in ("guiding_lost", "guiding_stop", "stop_guiding"):
             self.is_guiding_active = False
         elif event_type == "autofocus_start":
             self.is_autofocus_running = True
@@ -236,8 +238,9 @@ class ObservatoryState:
             return
 
         history_list = getattr(self.history, metric, None)
-        if history_list is not None:
-            history_list.append(value)
+        if history_list is not None and isinstance(history_list, list):
+            history_list.append(float(value))
+            # Обрезаем историю до MAX_POINTS
             if len(history_list) > self.history.MAX_POINTS:
                 history_list.pop(0)
 
@@ -276,7 +279,7 @@ class ObservatoryState:
         return numerator / denominator
 
     def get_full_state(self) -> Dict[str, Any]:
-        """Возвращает полное состояние для AI-агентов."""
+        """Возвращает полное состояние для AI-агентов и Frontend."""
         return {
             "metrics": self.current_metrics,
             "weather": self.weather,
@@ -294,4 +297,5 @@ class ObservatoryState:
         }
 
 
+# Singleton instance
 observatory_state = ObservatoryState()

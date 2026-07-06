@@ -1,13 +1,22 @@
+"""
+AI Weather Status File Watcher
+Мониторит статусный файл от AI Weather плагина (Safe/Unsafe).
+Устраняет Упрощение #13.
+"""
+
 import json, logging
 from pathlib import Path
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
+from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
 
 logger = logging.getLogger("AIWeatherWatcher")
 
 
 class AIWeatherWatcher(BaseFileWatcher):
-    def __init__(self, registry):
+    """Мониторит статусный файл AI Weather."""
+
+    def __init__(self, registry: CapabilityRegistry):
         status_file = settings.watchers.ai_weather_status_file
         path = (
             Path(status_file).parent
