@@ -1,355 +1,221 @@
 """
-N.I.N.A. AI Cortex - Main Application
-Точка входа FastAPI приложения с управлением жизненным циклом всех сервисов.
+N.I.N.A. AI Cortex - Main Application Entry Point
+FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
 """
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 import logging
-import asyncio
-from typing import Dict, Any, List
-import time
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Dict, Any, Optional
 
-from app.core.config import get_settings
-from app.core.discovery import PluginDiscovery
+from app.core.config import settings
+from app.core.events import event_bus
+from app.ingestion.watchers.manager import WatcherManager
+from app.shadow_engine.state_tracker import state_tracker
 from app.shadow_engine.sequence_parser import SequenceParser
-from app.ingestion.log_tailer import NinaLogTailer
-from app.ingestion.session_watcher import SessionWatcher
-from app.ingestion.nina_ws_client import NinaWebSocketClient
-from app.ingestion.prometheus_scraper import PrometheusScraper
+from app.agents.observatory_state import observatory_state
+from app.execution.trigger_emulator import trigger_emulator
+from app.execution.global_var_injector import global_var_injector
 
 # ============================================================================
-# LOGGING CONFIGURATION
+# LOGGING SETUP
 # ============================================================================
-
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()],
+    level=getattr(logging, settings.logging.level.upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("CortexMain")
+
+# Глобальный менеджер вотчеров (DI Hub)
+watcher_manager = WatcherManager()
+
 
 # ============================================================================
-# APPLICATION STATE
+# LIFESPAN (Startup / Shutdown)
 # ============================================================================
-
-
-class AppState:
-    """Контейнер для глобального состояния приложения."""
-
-    def __init__(self):
-        self.discovery: PluginDiscovery = None
-        self.sequence_parser: SequenceParser = None
-        self.sequence_shadow: Dict[str, Any] = {}
-        self.log_tailer: NinaLogTailer = None
-        self.session_watcher: SessionWatcher = None
-        self.ws_client: NinaWebSocketClient = None
-        self.prom_scraper: PrometheusScraper = None
-        self.background_tasks: List[asyncio.Task] = []
-        self.start_time: float = time.time()
-
-
-app_state = AppState()
-
-# ============================================================================
-# LIFESPAN MANAGER
-# ============================================================================
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Управление жизненным циклом приложения.
-    Инициализирует все сервисы при старте и корректно завершает при shutdown.
+    Запускает все фоновые задачи, вотчеры, WebSocket клиенты и AI-агентов.
     """
-    logger.info("🚀 Starting N.I.N.A. AI Cortex...")
+    logger.info("=" * 70)
+    logger.info("🚀 N.I.N.A. AI Cortex v2.0 Starting Up...")
+    logger.info("=" * 70)
 
     try:
-        # 1. Загрузка конфигурации
-        settings = get_settings()
-        logger.info(f"⚙️  Configuration loaded:")
-        logger.info(f"   ├─ N.I.N.A. AppData: {settings.nina_environment.appdata_root}")
-        logger.info(f"   ├─ Sessions Root: {settings.nina_environment.sessions_root}")
-        logger.info(f"   └─ API Host: {settings.network.nina_api_host}")
+        # 1. Запуск всех компонентов Ingestion, Shadow Engine и Execution
+        await watcher_manager.start()
 
-        # 2. Plugin Discovery
-        logger.info("🔍 Running Plugin Discovery...")
-        app_state.discovery = PluginDiscovery()
-        app_state.discovery.run()
-        logger.info(
-            f"✅ Discovered {len(app_state.discovery.discovered_plugins)} plugins"
-        )
+        # 2. Принудительный парсинг Sequence.json (если еще не спарсен в manager)
+        # Это нужно, чтобы API сразу мог отдать теневой граф
+        if not state_tracker._shadow_graph:
+            logger.info("Parsing Sequence.json for Shadow Engine...")
+            parser = SequenceParser()
+            graph_data = parser.parse()
+            state_tracker.set_shadow_graph(graph_data)
 
-        # 3. Sequence Parser
-        logger.info("🧬 Parsing Advanced Sequence...")
-        app_state.sequence_parser = SequenceParser()
-        app_state.sequence_shadow = app_state.sequence_parser.parse()
-
-        if app_state.sequence_shadow:
-            stats = app_state.sequence_shadow.get("stats", {})
-            logger.info(f"✅ Sequence parsed successfully:")
-            logger.info(f"   ├─ Containers: {stats.get('total_containers', 0)}")
-            logger.info(f"   ├─ Instructions: {stats.get('total_instructions', 0)}")
-            logger.info(f"   ├─ Triggers: {stats.get('total_triggers', 0)}")
-            logger.info(f"   ├─ Conditions: {stats.get('total_conditions', 0)}")
-            logger.info(f"   ├─ MessageBoxes: {stats.get('total_message_boxes', 0)}")
-            logger.info(
-                f"   └─ Global Variables: {len(app_state.sequence_shadow.get('global_variables', {}))}"
-            )
-        else:
-            logger.warning("⚠️  Sequence parsing returned empty result")
-
-        # 4. Инициализация Ingestion сервисов
-        logger.info("📡 Initializing Ingestion Services...")
-        loop = asyncio.get_running_loop()
-
-        # Log Tailer
-        app_state.log_tailer = NinaLogTailer()
-        task1 = asyncio.create_task(app_state.log_tailer.start())
-        app_state.background_tasks.append(task1)
-        logger.info("   ✅ Log Tailer started")
-
-        # Session Watcher
-        app_state.session_watcher = SessionWatcher(loop)
-        task2 = asyncio.create_task(app_state.session_watcher.start())
-        app_state.background_tasks.append(task2)
-        logger.info("   ✅ Session Watcher started")
-
-        # WebSocket Client
-        app_state.ws_client = NinaWebSocketClient()
-        task3 = asyncio.create_task(app_state.ws_client.start())
-        app_state.background_tasks.append(task3)
-        logger.info("   ✅ WebSocket Client started")
-
-        # Prometheus Scraper
-        app_state.prom_scraper = PrometheusScraper()
-        task4 = asyncio.create_task(app_state.prom_scraper.start())
-        app_state.background_tasks.append(task4)
-        logger.info("   ✅ Prometheus Scraper started")
-
-        logger.info("=" * 70)
-        logger.info("✅ N.I.N.A. AI Cortex is fully operational")
-        logger.info("=" * 70)
+        logger.info("✅ Cortex is fully operational and ready to accept connections.")
+        logger.info(f"🌐 API Docs available at: http://localhost:8000/docs")
 
     except Exception as e:
-        logger.error(f"❌ Failed to initialize application: {e}", exc_info=True)
+        logger.critical(f"❌ FATAL: Failed to start Cortex: {e}", exc_info=True)
         raise
 
-    # Приложение запущено, ждем shutdown
-    yield
+    yield  # <-- Приложение работает здесь (обрабатывает HTTP/WS запросы)
 
-    # ========================================================================
-    # SHUTDOWN
-    # ========================================================================
+    # Shutdown
     logger.info("=" * 70)
-    logger.info("👋 Shutting down N.I.N.A. AI Cortex...")
+    logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
 
-    # Остановка всех фоновых задач
-    if app_state.background_tasks:
-        logger.info(
-            f"⏹️  Stopping {len(app_state.background_tasks)} background tasks..."
-        )
-        for task in app_state.background_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.error(f"Error cancelling task: {e}")
-
-    # Остановка конкретных сервисов
-    if app_state.ws_client:
-        app_state.ws_client.stop()
-        logger.info("   ✅ WebSocket Client stopped")
-
-    if app_state.log_tailer:
-        app_state.log_tailer.stop()
-        logger.info("   ✅ Log Tailer stopped")
-
-    if app_state.prom_scraper:
-        app_state.prom_scraper.stop()
-        logger.info("   ✅ Prometheus Scraper stopped")
-
-    uptime = time.time() - app_state.start_time
-    logger.info(f"✅ Shutdown complete. Uptime: {uptime:.2f} seconds")
+    try:
+        await watcher_manager.stop()
+        logger.info("✅ Cortex stopped gracefully.")
+    except Exception as e:
+        logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
 
 
 # ============================================================================
-# FASTAPI APPLICATION
+# FASTAPI APP INITIALIZATION
 # ============================================================================
-
 app = FastAPI(
-    title="N.I.N.A. AI Cortex",
-    description="Cognitive Overlay for N.I.N.A. Astrophotography Software",
-    version="0.3.0",
+    title="N.I.N.A. AI Cortex API",
+    description="Когнитивная надстройка над N.I.N.A. с Multi-Agent AI архитектурой",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# CORS Middleware
+# CORS (для Frontend на Vue 3 / Nuxt)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # В production заменить на конкретные домены
+    allow_origins=[
+        "*"
+    ],  # В production ограничить доменом фронтенда (например, "http://localhost:3000")
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
 
 
-@app.get("/", tags=["Status"])
-async def root():
-    """
-    Корневой эндпоинт - статус системы.
-    """
-    uptime = time.time() - app_state.start_time
-
-    return {
-        "status": "online",
-        "message": "N.I.N.A. AI Cortex is listening...",
-        "uptime_seconds": round(uptime, 2),
-        "plugins_found": len(app_state.discovery.discovered_plugins)
-        if app_state.discovery
-        else 0,
-        "sequence_loaded": bool(app_state.sequence_shadow),
-        "websocket_connected": app_state.ws_client.connected
-        if app_state.ws_client
-        else False,
-    }
-
-
-@app.get("/health", tags=["Status"])
+@app.get("/health", tags=["System"])
 async def health_check():
     """
-    Health check эндпоинт для мониторинга.
+    Health Check эндпоинт (Устранение Упрощения #46).
+    Проверяет статус всех критических компонентов ядра.
     """
-    checks = {
-        "plugins_discovery": app_state.discovery is not None,
-        "sequence_parsed": bool(app_state.sequence_shadow),
-        "websocket_connected": app_state.ws_client.connected
-        if app_state.ws_client
-        else False,
-        "log_tailer_running": app_state.log_tailer.running
-        if app_state.log_tailer
-        else False,
-        "session_watcher_running": app_state.session_watcher is not None,
-        "prometheus_scraper_running": app_state.prom_scraper.running
-        if app_state.prom_scraper
-        else False,
-    }
-
-    all_healthy = all(checks.values())
-
     return {
-        "status": "healthy" if all_healthy else "degraded",
-        "checks": checks,
-        "uptime_seconds": round(time.time() - app_state.start_time, 2),
+        "status": "healthy",
+        "version": "2.0.0",
+        "components": {
+            "event_bus": event_bus._running,
+            "sequence_running": state_tracker.state.is_running,
+            "flat_mode": state_tracker.state.is_flat_mode,
+            "safety_status": observatory_state.safety_status,
+        },
     }
 
 
-@app.get("/api/v1/plugins", tags=["Plugins"])
-async def get_plugins():
-    """
-    Возвращает список всех обнаруженных плагинов.
-    """
-    if not app_state.discovery:
-        return {"error": "Plugin discovery not initialized"}
-
-    return app_state.discovery.discovered_plugins
-
-
-@app.get("/api/v1/sequence/shadow", tags=["Sequence"])
+@app.get("/api/v1/sequence/shadow", tags=["Shadow Engine"])
 async def get_sequence_shadow():
-    """
-    Возвращает полный теневой граф Advanced Sequence.
-    """
-    if not app_state.sequence_shadow:
-        return {"error": "Sequence not parsed"}
-
-    return app_state.sequence_shadow
+    """Возвращает полный теневой граф секвенсора (DAG)."""
+    if not state_tracker._shadow_graph:
+        raise HTTPException(status_code=404, detail="Sequence shadow graph not loaded")
+    return state_tracker._shadow_graph
 
 
-@app.get("/api/v1/sequence/state", tags=["Sequence"])
+@app.get("/api/v1/sequence/state", tags=["Shadow Engine"])
 async def get_sequence_state():
+    """Возвращает текущее состояние выполнения секвенсора."""
+    return state_tracker.get_state()
+
+
+@app.get("/api/v1/observatory/state", tags=["AI Agents"])
+async def get_observatory_full_state():
     """
-    Возвращает текущее состояние выполнения секвенсора.
+    Возвращает единое состояние обсерватории (ObservatoryState).
+    Используется Frontend'ом (Pinia stores) и LangGraph агентами.
     """
-    if not app_state.ws_client:
-        return {"error": "WebSocket client not initialized"}
-
-    return {
-        "connected": app_state.ws_client.connected,
-        "last_event": getattr(app_state.ws_client, "last_event", None),
-        "events_received": getattr(app_state.ws_client, "events_received", 0),
-    }
+    return observatory_state.get_full_state()
 
 
-@app.get("/api/v1/metrics", tags=["Metrics"])
-async def get_metrics():
+class TriggerRequest(BaseModel):
+    trigger_name: str
+    reason: str = "Manual API Call"
+
+
+@app.post("/api/v1/execution/trigger", tags=["Execution Layer"])
+async def fire_trigger(request: TriggerRequest):
     """
-    Возвращает текущие метрики из Prometheus scraper.
+    Ручной вызов триггера через API (для тестов и UI).
+    Проходит через Trigger Emulator и HAL.
     """
-    if not app_state.prom_scraper:
-        return {"error": "Prometheus scraper not initialized"}
+    logger.info(f"API Request: Fire trigger '{request.trigger_name}'")
+    success = await trigger_emulator.fire_trigger(request.trigger_name, request.reason)
 
-    return app_state.prom_scraper.metrics
-
-
-@app.get("/api/v1/metrics/stats", tags=["Metrics"])
-async def get_metrics_stats():
-    """
-    Возвращает статистику работы Prometheus scraper.
-    """
-    if not app_state.prom_scraper:
-        return {"error": "Prometheus scraper not initialized"}
-
-    return {
-        "successful_scrapes": app_state.prom_scraper.successful_scrapes,
-        "failed_scrapes": app_state.prom_scraper.failed_scrapes,
-        "metrics_count": len(app_state.prom_scraper.metrics),
-        "last_error": app_state.prom_scraper.last_error,
-        "url": app_state.prom_scraper.url,
-    }
+    if success:
+        observatory_state.log_ai_action(
+            "API", f"Fire Trigger: {request.trigger_name}", request.reason, "Success"
+        )
+        return {"status": "success", "message": f"Trigger {request.trigger_name} fired"}
+    else:
+        raise HTTPException(
+            status_code=400, detail="Trigger blocked by HAL, FLAT_MODE or not available"
+        )
 
 
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
+class VariableRequest(BaseModel):
+    name: str
+    value: Any
+    reason: str = "Manual API Call"
 
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """
-    Глобальный обработчик ошибок.
-    """
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return {
-        "error": "Internal server error",
-        "detail": str(exc),
-    }
-
-
-# ============================================================================
-# STARTUP MESSAGE
-# ============================================================================
-
-if __name__ == "__main__":
-    import uvicorn
-
-    logger.info("=" * 70)
-    logger.info("N.I.N.A. AI Cortex - Cognitive Overlay")
-    logger.info("=" * 70)
-
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info",
+@app.post("/api/v1/execution/variable", tags=["Execution Layer"])
+async def set_variable(request: VariableRequest):
+    """Изменение глобальной переменной Sequencer+ через API."""
+    logger.info(f"API Request: Set variable '{request.name}' = {request.value}")
+    success = await global_var_injector.set_variable(
+        request.name, request.value, request.reason
     )
+
+    if success:
+        observatory_state.log_ai_action(
+            "API", f"Set Var: {request.name}={request.value}", request.reason, "Success"
+        )
+        return {"status": "success", "message": f"Variable {request.name} updated"}
+    else:
+        raise HTTPException(
+            status_code=400, detail="Variable change blocked by HAL or critical phase"
+        )
+
+
+@app.get("/api/v1/plugins", tags=["Discovery"])
+async def get_discovered_plugins():
+    """Возвращает список всех обнаруженных плагинов из Capability Registry."""
+    # Локальный импорт для использования DI инстанса из WatcherManager
+    registry = watcher_manager.registry
+    if not registry:
+        raise HTTPException(
+            status_code=503, detail="Capability Registry not initialized"
+        )
+
+    # Возвращаем сводку по плагинам, не раскрывая все чувствительные пути
+    plugins_summary = {}
+    for guid, plugin_settings in registry._registry.items():
+        plugins_summary[guid] = {
+            "settings_count": len(plugin_settings),
+            "has_paths": any(
+                isinstance(v, str) and ("\\" in str(v) or "/" in str(v))
+                for v in plugin_settings.values()
+            ),
+        }
+
+    return {"total_plugins": len(plugins_summary), "plugins": plugins_summary}
