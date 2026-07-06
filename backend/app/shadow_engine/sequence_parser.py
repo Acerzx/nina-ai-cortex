@@ -36,7 +36,6 @@ class SequenceParser:
     def parse(self) -> Dict[str, Any]:
         """
         Парсит Sequence.json и возвращает теневой граф.
-
         Returns:
             Dict с полной структурой секвенсора
         """
@@ -48,7 +47,7 @@ class SequenceParser:
             with open(self.sequence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            logger.info(f"🧬 Parsing sequence: {self.sequence_path.name}")
+            logger.info(f"📖 Parsing sequence: {self.sequence_path.name}")
 
             # Строим карту ID для разрешения $ref
             self._build_id_map(data)
@@ -73,7 +72,6 @@ class SequenceParser:
                 "global_variables": global_vars,
                 "stats": self.stats,
             }
-
         except Exception as e:
             logger.error(f"❌ Failed to parse sequence: {e}")
             import traceback
@@ -175,7 +173,6 @@ class SequenceParser:
     def _parse_container(self, node: Dict[str, Any]) -> Dict[str, Any]:
         """Парсит контейнер со всеми параметрами."""
         self.stats["total_containers"] += 1
-
         node_type = node.get("$type", "")
         clean_type = self._clean_type(node_type)
 
@@ -198,22 +195,17 @@ class SequenceParser:
         if clean_type == "DeepSkyObjectContainer":
             target_node = node.get("Target")
             if target_node and isinstance(target_node, dict):
-                # Разрешаем $ref если есть
                 if "$ref" in target_node:
                     target_node = self._resolve_ref(target_node)
-
                 if target_node and isinstance(target_node, dict):
                     target_info = {
                         "name": target_node.get("TargetName", ""),
                         "position_angle": target_node.get("PositionAngle", 0.0),
                     }
-
-                    # Координаты
                     coords_node = target_node.get("InputCoordinates")
                     if coords_node and isinstance(coords_node, dict):
                         if "$ref" in coords_node:
                             coords_node = self._resolve_ref(coords_node)
-
                         if coords_node and isinstance(coords_node, dict):
                             target_info["coordinates"] = {
                                 "ra_hours": coords_node.get("RAHours", 0),
@@ -224,7 +216,6 @@ class SequenceParser:
                                 "dec_seconds": coords_node.get("DecSeconds", 0.0),
                                 "negative_dec": coords_node.get("NegativeDec", False),
                             }
-
                     result["target"] = target_info
 
         # Conditions
@@ -283,7 +274,6 @@ class SequenceParser:
                                 "attempts": item_node.get("Attempts", 1),
                             }
                         )
-
                     # Annotation
                     elif "Annotation" in item_type:
                         self.stats["total_annotations"] += 1
@@ -297,19 +287,16 @@ class SequenceParser:
                                 .strip(),
                             }
                         )
-
                     # SmartExposure
                     elif "SmartExposure" in item_type:
                         parsed = self._parse_smart_exposure(item_node)
                         if parsed:
                             instructions.append(parsed)
-
                     # Контейнер
                     elif "Container" in item_type and "TriggerRunner" not in item_type:
                         parsed = self._parse_container(item_node)
                         if parsed:
                             children.append(parsed)
-
                     # Инструкция
                     else:
                         parsed = self._parse_instruction(item_node)
@@ -328,7 +315,6 @@ class SequenceParser:
     def _parse_smart_exposure(self, node: Dict[str, Any]) -> Dict[str, Any]:
         """Парсит SmartExposure со всеми параметрами."""
         self.stats["total_instructions"] += 1
-
         result = {
             "id": node.get("$id"),
             "type": "SmartExposure",
@@ -389,31 +375,23 @@ class SequenceParser:
         return result
 
     def _parse_instruction(self, node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Парсит инструкцию со всеми параметрами."""
         node_type = node.get("$type", "")
         clean_type = self._clean_type(node_type)
-        if "TriggerRunner" in node_type:
-            return None
-
-        self.stats["total_instructions"] += 1
-        result = {
-            "id": node.get("$id"),
-            "type": clean_type,
-            "error_behavior": node.get("ErrorBehavior", 0),
-            "attempts": node.get("Attempts", 1),
-        }
 
         # Пропускаем TriggerRunner
         if "TriggerRunner" in node_type:
             return None
 
         self.stats["total_instructions"] += 1
-
         result = {
             "id": node.get("$id"),
             "type": clean_type,
             "error_behavior": node.get("ErrorBehavior", 0),
             "attempts": node.get("Attempts", 1),
         }
+
+        # ===== БАЗОВЫЕ ИНСТРУКЦИИ N.I.N.A. =====
 
         # GlobalVariable
         if clean_type == "GlobalVariable":
@@ -435,14 +413,12 @@ class SequenceParser:
             result["time"] = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             result["offset_minutes"] = node.get("MinutesOffset")
 
-            # Provider
             provider_node = node.get("SelectedProvider")
             if provider_node and isinstance(provider_node, dict):
                 if "$ref" in provider_node:
                     provider_node = self._resolve_ref(provider_node)
                 if provider_node and "$type" in provider_node:
                     result["provider"] = self._clean_type(provider_node["$type"])
-
             return result
 
         # WaitForAltitude
@@ -450,7 +426,6 @@ class SequenceParser:
             result["offset_expr"] = self._get_expr(node, "OffsetExpression")
             result["above_or_below"] = node.get("AboveOrBelow")
 
-            # Data объект (содержит offset и comparator)
             data_node = node.get("Data")
             if data_node and isinstance(data_node, dict):
                 if "$ref" in data_node:
@@ -459,7 +434,6 @@ class SequenceParser:
                     result["offset"] = data_node.get("Offset")
                     result["comparator"] = data_node.get("Comparator")
 
-            # Coordinates
             coords_node = node.get("Coordinates")
             if coords_node and isinstance(coords_node, dict):
                 if "$ref" in coords_node:
@@ -474,7 +448,6 @@ class SequenceParser:
                         "dec_seconds": coords_node.get("DecSeconds", 0.0),
                         "negative_dec": coords_node.get("NegativeDec", False),
                     }
-
             return result
 
         # Center
@@ -483,7 +456,6 @@ class SequenceParser:
             result["uses_rotation"] = node.get("usesRotation", False)
             result["inherited"] = node.get("Inherited", False)
 
-            # Coordinates
             coords_node = node.get("Coordinates")
             if coords_node and isinstance(coords_node, dict):
                 if "$ref" in coords_node:
@@ -498,7 +470,6 @@ class SequenceParser:
                         "dec_seconds": coords_node.get("DecSeconds", 0.0),
                         "negative_dec": coords_node.get("NegativeDec", False),
                     }
-
             return result
 
         # SlewScopeToAltAz
@@ -509,7 +480,6 @@ class SequenceParser:
             result["az"] = node.get("Az")
             result["tracking"] = node.get("Tracking", True)
 
-            # Coordinates
             coords_node = node.get("Coordinates")
             if coords_node and isinstance(coords_node, dict):
                 if "$ref" in coords_node:
@@ -523,12 +493,16 @@ class SequenceParser:
                         "alt_minutes": coords_node.get("AltMinutes", 0),
                         "alt_seconds": coords_node.get("AltSeconds", 0.0),
                     }
-
             return result
 
         # ConnectEquipment
         if clean_type == "ConnectEquipment":
             result["device"] = node.get("SelectedDevice")
+            return result
+
+        # DisconnectAllEquipment
+        if clean_type == "DisconnectAllEquipment":
+            result["action"] = "disconnect_all"
             return result
 
         # MoveFocuserAbsolute
@@ -561,6 +535,16 @@ class SequenceParser:
             result["force_calibration"] = node.get("ForceCalibration", False)
             return result
 
+        # StopGuiding
+        if clean_type == "StopGuiding":
+            result["action"] = "stop_guiding"
+            return result
+
+        # Dither
+        if clean_type == "Dither":
+            result["action"] = "dither"
+            return result
+
         # SwitchProfile
         if clean_type == "SwitchProfile":
             result["profile_id"] = node.get("SelectedProfileId")
@@ -570,6 +554,26 @@ class SequenceParser:
         # SwitchFilter
         if clean_type == "SwitchFilter":
             result["filter"] = node.get("ComboBoxText")
+            return result
+
+        # SolveAndSync
+        if clean_type == "SolveAndSync":
+            result["action"] = "plate_solve_and_sync"
+            return result
+
+        # RunAutofocus
+        if clean_type == "RunAutofocus":
+            result["action"] = "autofocus"
+            return result
+
+        # UnparkScope
+        if clean_type == "UnparkScope":
+            result["action"] = "unpark"
+            return result
+
+        # ParkScope
+        if clean_type == "ParkScope":
+            result["action"] = "park"
             return result
 
         # TakeExposure
@@ -582,7 +586,6 @@ class SequenceParser:
             result["gain"] = node.get("Gain")
             result["offset"] = node.get("Offset")
 
-            # Binning
             binning_node = node.get("Binning")
             if binning_node and isinstance(binning_node, dict):
                 if "$ref" in binning_node:
@@ -591,11 +594,13 @@ class SequenceParser:
                     x = binning_node.get("X", 1)
                     y = binning_node.get("Y", 1)
                     result["binning"] = f"{x}x{y}"
-
             return result
 
-        # TwoPointPolarAlignmentSequenceItem
+        # ===== СПЕЦИФИЧНЫЕ ИНСТРУКЦИИ ПЛАГИНОВ =====
+
+        # TwoPointPolarAlignmentSequenceItem (2PA)
         if clean_type == "TwoPointPolarAlignmentSequenceItem":
+            result["plugin"] = "TwoPointPolarAlignment"
             result["exposure_time"] = node.get("ExposureTime")
             result["gain"] = node.get("Gain")
             result["rotation_amount"] = node.get("RotationAmount")
@@ -610,45 +615,52 @@ class SequenceParser:
             result["exposures_per_point"] = node.get("ExposuresPerPoint")
             return result
 
-        # ShutdownPcInstruction
-        if clean_type == "ShutdownPcInstruction":
-            result["shutdown_mode"] = node.get("ShutdownMode")
-            result["is_critical_shutdown"] = True
-            return result
-
-        # ShutdownNina
-        if clean_type == "ShutdownNina":
-            result["is_critical_shutdown"] = True
-            return result
-
-        # === ДОБАВЛЕНО: Специфичные инструкции плагинов ===
+        # OagManualFocusInstruction (OagFocusAssist)
         if clean_type == "OagManualFocusInstruction":
             result["plugin"] = "OagFocusAssist"
+            result["is_manual_focus"] = True
             return result
 
+        # FilterSelectorInstruction (FilterSelector)
         if clean_type == "FilterSelectorInstruction":
             result["plugin"] = "FilterSelector"
+            result["is_interactive_filter_selection"] = True
             return result
 
+        # StartLivestacking / StopLivestacking (LiveStack)
         if clean_type in ("StartLivestacking", "StopLivestacking"):
             result["plugin"] = "LiveStack"
             result["action"] = "start" if "Start" in clean_type else "stop"
             return result
 
+        # NightSummaryInstruction / NightSummaryEndInstruction (Night Summary)
         if clean_type in ("NightSummaryInstruction", "NightSummaryEndInstruction"):
             result["plugin"] = "NightSummary"
+            result["action"] = "start" if "End" not in clean_type else "end"
             return result
 
+        # Phd2SettleInstruction (PHD2 Tools)
         if clean_type == "Phd2SettleInstruction":
             result["plugin"] = "PHD2Tools"
+            result["action"] = "settle"
             return result
 
+        # ShutdownPhd2Instruction (PHD2 Tools)
+        if clean_type == "ShutdownPhd2Instruction":
+            result["plugin"] = "PHD2Tools"
+            result["action"] = "shutdown_phd2"
+            return result
+
+        # ShutdownPcInstruction (Shutdown PC) - КРИТИЧЕСКАЯ
         if clean_type == "ShutdownPcInstruction":
+            result["plugin"] = "ShutdownPC"
             result["shutdown_mode"] = node.get("ShutdownMode")
             result["is_critical_shutdown"] = True
             return result
 
+        # ShutdownNina (Shutdown PC) - КРИТИЧЕСКАЯ
         if clean_type == "ShutdownNina":
+            result["plugin"] = "ShutdownPC"
             result["is_critical_shutdown"] = True
             return result
 
@@ -661,16 +673,10 @@ class SequenceParser:
         clean_type = self._clean_type(node_type)
 
         self.stats["total_triggers"] += 1
-
         result = {
             "id": node.get("$id"),
             "name": clean_type,
         }
-
-        # === ДОБАВЛЕНО: Специфичные триггеры ===
-        if clean_type == "FlexureCompensatorTrigger":
-            result["plugin"] = "FlexureCompensator"
-            result["params"] = {"after_exposures": node.get("AfterExposures")}
 
         # Parent ref
         parent_node = node.get("Parent")
@@ -698,7 +704,6 @@ class SequenceParser:
             "PlateSolvingExposureDuration",
             "DeltaT",
         ]
-
         for key in param_keys:
             if key in node and node[key] is not None:
                 snake_key = self._to_snake_case(key)
@@ -711,7 +716,6 @@ class SequenceParser:
             "DistanceArcMinutesExpression",
             "SampleSizeExpression",
         ]
-
         for key in expr_keys:
             expr_val = self._get_expr(node, key)
             if expr_val:
@@ -721,12 +725,34 @@ class SequenceParser:
         if params:
             result["params"] = params
 
+        # ===== СПЕЦИФИЧНЫЕ ТРИГГЕРЫ ПЛАГИНОВ =====
+
+        # FlexureCompensatorTrigger
+        if clean_type == "FlexureCompensatorTrigger":
+            result["plugin"] = "FlexureCompensator"
+            result["trigger_type"] = "flexure_compensation"
+
+        # InjectAutofocusTrigger
+        if clean_type == "InjectAutofocusTrigger":
+            result["plugin"] = "InjectAutofocus"
+            result["trigger_type"] = "inject_autofocus"
+
+        # PHD2 Tools triggers
+        if clean_type == "RestartWhenSaturated":
+            result["plugin"] = "PHD2Tools"
+            result["trigger_type"] = "restart_when_saturated"
+        elif clean_type == "InterruptWhenRMSAbove":
+            result["plugin"] = "PHD2Tools"
+            result["trigger_type"] = "interrupt_when_rms_above"
+        elif clean_type == "Phd2SettleTrigger":
+            result["plugin"] = "PHD2Tools"
+            result["trigger_type"] = "phd2_settle"
+
         # TriggerRunner actions
         trigger_runner = node.get("TriggerRunner")
         if trigger_runner and isinstance(trigger_runner, dict):
             if "$ref" in trigger_runner:
                 trigger_runner = self._resolve_ref(trigger_runner)
-
             if trigger_runner and isinstance(trigger_runner, dict):
                 items_node = trigger_runner.get("Items")
                 if items_node and isinstance(items_node, dict):
@@ -749,7 +775,6 @@ class SequenceParser:
         clean_type = self._clean_type(node_type)
 
         self.stats["total_conditions"] += 1
-
         result = {
             "type": clean_type,
         }
@@ -763,7 +788,6 @@ class SequenceParser:
         if clean_type == "AboveHorizonCondition":
             result["offset_expr"] = self._get_expr(node, "OffsetExpression")
 
-            # Data объект
             data_node = node.get("Data")
             if data_node and isinstance(data_node, dict):
                 if "$ref" in data_node:
@@ -780,7 +804,6 @@ class SequenceParser:
             result["time"] = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             result["offset_minutes"] = node.get("MinutesOffset")
 
-            # Provider
             provider_node = node.get("SelectedProvider")
             if provider_node and isinstance(provider_node, dict):
                 if "$ref" in provider_node:
