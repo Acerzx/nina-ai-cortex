@@ -14,7 +14,7 @@ network:
 
 influxdb:
   url: "http://localhost:8086"
-  token: "${INFLUXDB_TOKEN}"
+  token: "UVvJCtl-ihRqop4tsoXMlUcCcPAKnIHfoGzQRcuAp2LXhD_cTJMLN0Iy2l3_4aReWB_kdFEKezLhkv5ioQFu-A=="
   org: "observatory"
   bucket: "nina_telemetry"
 
