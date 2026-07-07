@@ -2,20 +2,22 @@
 N.I.N.A. AI Cortex - Main Application Entry Point
 FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
 
-ИСПРАВЛЕНО (аудит v2):
+ИСПРАВЛЕНО (audit v2):
+- 11.2: Добавлены Prometheus метрики через middleware и EventBus подписки
+- 11.1: Маскирование чувствительных данных в логах (global_var_injector)
 - C4: JWT-аутентификация и авторизация по ролям
 - C5: Обязательный мастер-пароль Vault в production
 - F2: CORS whitelist из settings.yaml
 - F3: Rate limiting через slowapi
-- 11.2: /metrics endpoint для Prometheus
 """
 
 import asyncio
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -40,6 +42,7 @@ from app.core.config import settings
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
 from app.core.ws_broadcast import ws_broadcast_manager
+from app.core.metrics import cortex_metrics  # ← НОВОЕ (audit 11.2)
 from app.ingestion.watchers.manager import WatcherManager
 from app.shadow_engine.state_tracker import state_tracker
 from app.agents.observatory_state import observatory_state
@@ -89,7 +92,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-# ИСПРАВЛЕНО: Включаем DEBUG для WatcherAgent для отладки детекции аномалий
 logging.getLogger("WatcherAgent").setLevel(logging.DEBUG)
 logger = logging.getLogger("CortexMain")
 
@@ -115,9 +117,55 @@ credential_vault: Optional[CredentialVault] = None
 
 
 # ============================================================================
-# RATE LIMITER (audit F3)
+# EVENT BUS METRICS SUBSCRIBERS (audit 11.2)
 # ============================================================================
-limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+async def _on_event_bus_event(event_type: str, data: Dict[str, Any]):
+    """
+    Автоматический сбор метрик из EventBus.
+    Вызывается для каждого опубликованного события.
+    """
+    cortex_metrics.events_total.labels(event_type=event_type).inc()
+
+
+async def _on_decision_made(data: Dict[str, Any]):
+    """Сбор метрик о решениях агентов."""
+    agent = data.get("agent", "unknown")
+    decision_type = data.get("decision_type", "unknown")
+    confidence = data.get("confidence", 0.5)
+
+    cortex_metrics.decisions_total.labels(
+        agent=agent, decision_type=decision_type, outcome="pending"
+    ).inc()
+    cortex_metrics.decision_confidence.labels(agent=agent).observe(confidence)
+
+
+async def _on_trigger_fired(data: Dict[str, Any]):
+    """Сбор метрик о срабатывании триггеров."""
+    trigger_name = data.get("trigger", "unknown")
+    status = data.get("status", "unknown")
+    duration = data.get("duration_seconds", 0.0)
+
+    cortex_metrics.triggers_fired.labels(trigger_name=trigger_name, status=status).inc()
+    if duration > 0:
+        cortex_metrics.trigger_duration.labels(trigger_name=trigger_name).observe(
+            duration
+        )
+
+
+async def _on_llm_response(data: Dict[str, Any]):
+    """Сбор метрик о LLM запросах."""
+    model = data.get("model", "unknown")
+    status = data.get("status", "success")
+    fallback = "true" if data.get("from_fallback", False) else "false"
+    duration = data.get("duration_seconds", 0.0)
+    tokens = data.get("tokens_used", 0)
+
+    cortex_metrics.llm_requests_total.labels(
+        model=model, status=status, fallback=fallback
+    ).inc()
+    cortex_metrics.llm_request_duration.labels(model=model).observe(duration)
+    if tokens > 0:
+        cortex_metrics.llm_tokens_used.labels(model=model).inc(tokens)
 
 
 # ============================================================================
@@ -162,30 +210,20 @@ async def lifespan(app: FastAPI):
 
         if not master_password:
             if is_production:
-                # В production — фатальная ошибка
                 raise RuntimeError(
                     "❌ FATAL: VAULT_MASTER_PASSWORD environment variable "
-                    "MUST be set in production. "
-                    "Generate a strong password and set it via environment."
+                    "MUST be set in production."
                 )
             else:
                 logger.warning(
-                    "⚠️ VAULT_MASTER_PASSWORD not set — using development default. "
-                    "DO NOT use this in production!"
+                    "⚠️ VAULT_MASTER_PASSWORD not set — using development default."
                 )
                 master_password = "dev-master-password-DO-NOT-USE-IN-PROD"
         else:
-            # Проверка силы пароля
             if len(master_password) < 16:
-                logger.warning(
-                    "⚠️ VAULT_MASTER_PASSWORD is shorter than 16 chars — "
-                    "consider using a stronger password."
-                )
+                logger.warning("⚠️ VAULT_MASTER_PASSWORD is shorter than 16 chars")
             if master_password == "dev-master-password-change-me":
-                logger.warning(
-                    "⚠️ Using known default master password! "
-                    "Change VAULT_MASTER_PASSWORD immediately."
-                )
+                logger.warning("⚠️ Using known default master password!")
 
         credential_vault = CredentialVault(
             master_password=master_password, vault_path=vault_path
@@ -222,10 +260,42 @@ async def lifespan(app: FastAPI):
         # 10. Запуск Orchestrator
         await orchestrator.start()
 
+        # 11. ИСПРАВЛЕНО (audit 11.2): Подписка на события для сбора метрик
+        logger.info("📊 Subscribing to EventBus for metrics collection...")
+
+        # Подписываемся на все события для общего счётчика
+        for event_type in [
+            "SEQUENCE_STARTED",
+            "SEQUENCE_STOPPED",
+            "SEQUENCE_ITEM_STARTED",
+            "SEQUENCE_ITEM_COMPLETED",
+            "NEW_FRAME",
+            "ALERT",
+            "LOG_EVENT",
+            "PROMETHEUS_UPDATE",
+            "INFLUXDB_UPDATE",
+            "WEATHER_UPDATE",
+            "MODE_CHANGED",
+            "TRIGGER_FIRED",
+            "DECISION_MADE",
+            "LLM_RESPONSE",
+            "RAG_SEARCH",
+            "MASTERS_INDEXED",
+        ]:
+            event_bus.subscribe(
+                event_type, lambda data, et=event_type: _on_event_bus_event(et, data)
+            )
+
+        # Специальные подписки для детальных метрик
+        event_bus.subscribe("DECISION_MADE", _on_decision_made)
+        event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
+        event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
+
         logger.info("=" * 70)
         logger.info("✅ All AI Agents initialized and registered")
         logger.info("✅ Cortex is fully operational and ready to accept connections.")
         logger.info(f"🌐 API Docs available at: http://localhost:8000/docs")
+        logger.info(f"📊 Metrics endpoint: http://localhost:8000/metrics")
         logger.info(
             f"🔌 WebSocket endpoint: ws://localhost:8000{settings.ws_broadcast.path}"
         )
@@ -245,6 +315,41 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
 
     try:
+        # 1. Отписка от событий метрик (audit 11.2)
+        for event_type in [
+            "SEQUENCE_STARTED",
+            "SEQUENCE_STOPPED",
+            "SEQUENCE_ITEM_STARTED",
+            "SEQUENCE_ITEM_COMPLETED",
+            "NEW_FRAME",
+            "ALERT",
+            "LOG_EVENT",
+            "PROMETHEUS_UPDATE",
+            "INFLUXDB_UPDATE",
+            "WEATHER_UPDATE",
+            "MODE_CHANGED",
+            "TRIGGER_FIRED",
+            "DECISION_MADE",
+            "LLM_RESPONSE",
+            "RAG_SEARCH",
+            "MASTERS_INDEXED",
+        ]:
+            try:
+                event_bus.unsubscribe(
+                    event_type,
+                    lambda data, et=event_type: _on_event_bus_event(et, data),
+                )
+            except Exception:
+                pass
+
+        try:
+            event_bus.unsubscribe("DECISION_MADE", _on_decision_made)
+            event_bus.unsubscribe("TRIGGER_FIRED", _on_trigger_fired)
+            event_bus.unsubscribe("LLM_RESPONSE", _on_llm_response)
+        except Exception:
+            pass
+
+        # 2. Останавливаем агентов
         await orchestrator.stop()
         await memory_manager_agent.shutdown()
         await copilot_agent.shutdown()
@@ -257,11 +362,20 @@ async def lifespan(app: FastAPI):
         await guardian_agent.shutdown()
         await watcher_agent.shutdown()
 
+        # 3. Останавливаем менеджеры
         await mode_manager.stop()
+
+        # 4. Закрываем broadcast и RAG
         await ws_broadcast_manager.stop()
         await rag_engine.close()
+
+        # 5. Останавливаем watchers
         await watcher_manager.stop()
+
+        # 6. Закрываем LLM клиент
         await llm_client.close()
+
+        # 7. Даем время на закрытие всех соединений
         await asyncio.sleep(0.5)
         logger.info("✅ Cortex stopped gracefully.")
     except Exception as e:
@@ -289,7 +403,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ============================================================================
 # CORS MIDDLEWARE — ИСПРАВЛЕНО (audit F2)
-# Используем whitelist из settings.cors вместо allow_origins=["*"]
 # ============================================================================
 if settings.cors.enabled:
     app.add_middleware(
@@ -305,6 +418,38 @@ if settings.cors.enabled:
     )
 else:
     logger.warning("⚠️ CORS is disabled in configuration")
+
+
+# ============================================================================
+# METRICS MIDDLEWARE (audit 11.2)
+# ============================================================================
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """
+    Middleware для сбора метрик API запросов.
+    Считает количество запросов, время ответа, статусы.
+    """
+    start_time = time.time()
+
+    # Выполняем запрос
+    response = await call_next(request)
+
+    # Считаем метрики
+    duration = time.time() - start_time
+    method = request.method
+    path = request.url.path
+    status_code = response.status_code
+
+    # Обновляем метрики
+    cortex_metrics.api_requests_total.labels(
+        method=method, path=path, status_code=str(status_code)
+    ).inc()
+
+    cortex_metrics.api_request_duration.labels(method=method, path=path).observe(
+        duration
+    )
+
+    return response
 
 
 # ============================================================================
@@ -340,16 +485,12 @@ class SecretRequest(BaseModel):
 
 
 class TokenRequest(BaseModel):
-    """Запрос на выпуск токена (admin endpoint)."""
-
     subject: str
     role: str = "readonly"
     expires_minutes: int = 60 * 24
 
 
 class APIKeyRequest(BaseModel):
-    """Запрос на регистрацию API-ключа (admin endpoint)."""
-
     name: str
     role: str = "readonly"
     scopes: List[str] = []
@@ -364,12 +505,17 @@ async def health_check(request: Request):
     """
     Health Check эндпоинт (public).
     Проверяет статус всех критических компонентов ядра.
+
+    ИСПРАВЛЕНО (audit 11.2): Добавлены метрики компонентов.
     """
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
+    metrics_summary = cortex_metrics.get_summary()
+
     return {
         "status": "healthy",
         "version": "2.0.0",
+        "timestamp": datetime.now().isoformat(),
         "components": {
             "event_bus": event_bus._running,
             "sequence_running": state_tracker.state.is_running,
@@ -381,6 +527,8 @@ async def health_check(request: Request):
             "operation_mode": mode_manager.current_mode.value,
             "auth_enabled": settings.auth.enabled,
         },
+        "metrics": metrics_summary,
+        "uptime_seconds": time.time() - cortex_metrics._start_time,
     }
 
 
@@ -410,7 +558,6 @@ async def api_root():
 
 # ============================================================================
 # PROMETHEUS /metrics ENDPOINT — ИСПРАВЛЕНО (audit 11.2)
-# Public endpoint для scraping внешним Prometheus сервером
 # ============================================================================
 @app.get("/metrics", tags=["Observability"], include_in_schema=False)
 @limiter.limit("30/minute")
@@ -418,39 +565,48 @@ async def prometheus_metrics(request: Request):
     """
     Prometheus exposition format endpoint.
     Экспортирует метрики самого Cortex для мониторинга.
+
+    ИСПРАВЛЕНО (audit 11.2): Использует cortex_metrics.expose() для
+    генерации полного набора метрик в Prometheus формате.
     """
+    # Обновляем динамические метрики перед экспортом
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
-    audit_stats = await decision_audit.get_stats()
 
-    lines = []
-    lines.append("# HELP cortex_up Cortex process is alive")
-    lines.append("# TYPE cortex_up gauge")
-    lines.append("cortex_up 1")
-
-    lines.append("# HELP cortex_websocket_connections Active WS connections")
-    lines.append("# TYPE cortex_websocket_connections gauge")
-    lines.append(f"cortex_websocket_connections {ws_stats.get('total_connections', 0)}")
-
-    lines.append("# HELP cortex_rag_documents RAG documents count")
-    lines.append("# TYPE cortex_rag_documents gauge")
-    lines.append(f"cortex_rag_documents {rag_stats.get('points_count', 0)}")
-
-    lines.append("# HELP cortex_decisions_total Total AI decisions logged")
-    lines.append("# TYPE cortex_decisions_total counter")
-    lines.append(f"cortex_decisions_total {audit_stats.get('total_decisions', 0)}")
-
-    lines.append("# HELP cortex_sequence_running Sequence currently running")
-    lines.append("# TYPE cortex_sequence_running gauge")
-    lines.append(
-        f"cortex_sequence_running {1 if state_tracker.state.is_running else 0}"
+    # Обновляем gauge метрики
+    cortex_metrics.active_ws_connections.set(ws_stats.get("total_connections", 0))
+    cortex_metrics.sequence_running.set(1 if state_tracker.state.is_running else 0)
+    cortex_metrics.flat_mode_active.set(1 if state_tracker.state.is_flat_mode else 0)
+    cortex_metrics.llm_available.labels(model="primary").set(
+        1 if llm_client.is_available() else 0
     )
 
-    lines.append("# HELP cortex_llm_available LLM provider available")
-    lines.append("# TYPE cortex_llm_available gauge")
-    lines.append(f"cortex_llm_available {1 if llm_client.is_available() else 0}")
+    # Обновляем RAG метрики
+    if "points_count" in rag_stats:
+        cortex_metrics.rag_documents_total.set(rag_stats["points_count"])
 
-    return Response(content="\n".join(lines) + "\n", media_type="text/plain")
+    # Обновляем operation_mode
+    mode_value = {"manual": 0, "safe": 1, "full_ai": 2, "simulation": 3}.get(
+        mode_manager.current_mode.value, -1
+    )
+    cortex_metrics.operation_mode.set(mode_value)
+
+    # Обновляем safety_status
+    safety_value = {"SAFE": 0, "UNSAFE": 1, "UNKNOWN": -1}.get(
+        observatory_state.safety_status, -1
+    )
+    cortex_metrics.safety_status.set(safety_value)
+
+    # Обновляем количество активных watchers
+    cortex_metrics.watchers_active.set(len(watcher_manager.watchers))
+
+    # Обновляем количество активных агентов
+    cortex_metrics.agents_active.set(len(orchestrator.agents))
+
+    # Генерируем Prometheus exposition
+    output = cortex_metrics.expose()
+
+    return Response(content=output, media_type="text/plain; version=0.0.4")
 
 
 # ============================================================================
@@ -498,10 +654,7 @@ async def issue_token(
     body: TokenRequest,
     _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
 ):
-    """
-    🔒 ADMIN ONLY: Выпускает JWT access token.
-    В production интегрируйте с внешним IdP (Keycloak/Auth0).
-    """
+    """🔒 ADMIN ONLY: Выпускает JWT access token."""
     try:
         role = UserRole(body.role)
     except ValueError:
@@ -529,10 +682,7 @@ async def create_api_key(
     body: APIKeyRequest,
     _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
 ):
-    """
-    🔒 ADMIN ONLY: Создаёт API-ключ для machine-to-machine.
-    Ключ показывается ОДИН РАЗ — сохраните его.
-    """
+    """🔒 ADMIN ONLY: Создаёт API-ключ для machine-to-machine."""
     try:
         role = UserRole(body.role)
     except ValueError:
@@ -541,7 +691,7 @@ async def create_api_key(
     raw_key = register_api_key(name=body.name, role=role, scopes=body.scopes)
     return {
         "name": body.name,
-        "api_key": raw_key,  # Показываем только здесь!
+        "api_key": raw_key,
         "role": role.value,
         "warning": "⚠️ Save this key now — it will NOT be shown again.",
     }
@@ -645,9 +795,7 @@ async def set_operation_mode(
     mode: str,
     _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
 ):
-    """
-    🔒 OPERATOR+: Устанавливает режим работы системы.
-    """
+    """🔒 OPERATOR+: Устанавливает режим работы системы."""
     try:
         operation_mode = OperationMode(mode)
         await mode_manager.set_mode(operation_mode, reason="Manual API call")
@@ -709,8 +857,6 @@ async def test_llm_generation(
 @limiter.limit("120/minute")
 async def get_metrics(request: Request, _user: TokenData = AuthDep):
     """Возвращает текущие метрики обсерватории."""
-    from datetime import datetime as _dt
-
     metrics = observatory_state.current_metrics
     weather = observatory_state.weather
     astronomy = observatory_state.astronomy
@@ -733,7 +879,7 @@ async def get_metrics(request: Request, _user: TokenData = AuthDep):
             }
 
     return {
-        "timestamp": _dt.now().isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "metrics": metrics,
         "weather": weather,
         "astronomy": astronomy,
@@ -757,23 +903,21 @@ async def get_metrics_history(
     _user: TokenData = AuthDep,
 ):
     """Возвращает историю конкретной метрики."""
-    from datetime import datetime as _dt, timedelta as _td
-
     history_list = getattr(observatory_state.history, metric, None)
     if history_list is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Metric '{metric}' not found. "
-            "Available: hfr, fwhm, rms_ra, rms_dec, temperature, wind_speed, humidity",
+            detail=f"Metric '{metric}' not found. Available: hfr, fwhm, rms_ra, rms_dec, temperature, wind_speed, humidity",
         )
 
     limited_history = (
         history_list[-limit:] if len(history_list) > limit else history_list
     )
+
     timestamps = []
-    now = _dt.now()
+    now = datetime.now()
     for i in range(len(limited_history)):
-        timestamp = now - _td(seconds=(len(limited_history) - i) * 3)
+        timestamp = now - timedelta(seconds=(len(limited_history) - i) * 3)
         timestamps.append(timestamp.isoformat())
 
     return {
@@ -1014,7 +1158,9 @@ async def store_secret(
     if not credential_vault:
         raise HTTPException(status_code=503, detail="Credential Vault not initialized")
     success = credential_vault.store_secret(
-        name=body.name, value=body.value, description=body.description
+        name=body.name,
+        value=body.value,
+        description=body.description,
     )
     if success:
         return {"status": "success", "message": f"Secret '{body.name}' stored"}
