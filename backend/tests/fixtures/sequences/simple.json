@@ -1,0 +1,18 @@
+{
+  "$type": "NINA.Legacy.SequenceItem, NINA.Legacy",
+  "Name": "Test Sequence",
+  "Items": {
+    "$values": [
+      {
+        "$type": "NINA.Legacy.Instructions.TakeExposure, NINA.Legacy",
+        "ImageType": "LIGHT",
+        "ExposureTime": 60.0,
+        "Gain": 85,
+        "Offset": 10
+      },
+      {
+        "$type": "NINA.Legacy.Instructions.RunAutofocus, NINA.Legacy"
+      }
+    ]
+  }
+}

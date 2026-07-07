@@ -349,6 +349,66 @@ async def get_discovered_plugins():
 
 
 # ============================================================================
+# MASTERS LIBRARY ENDPOINTS
+# ============================================================================
+@app.get("/api/v1/masters/catalog", tags=["Masters Library"])
+async def get_masters_catalog():
+    """
+    Возвращает каталог доступных мастер-кадров (Bias/Dark/Flat).
+    Используется AI-агентами для подбора калибровок и Frontend для отображения библиотек.
+    """
+    if not watcher_manager.masters_auditor:
+        raise HTTPException(
+            status_code=503, detail="Masters Auditor not initialized yet"
+        )
+
+    return {
+        "summary": watcher_manager.masters_auditor.get_summary_by_category(),
+        "stats": watcher_manager.masters_auditor.get_stats(),
+    }
+
+
+@app.get("/api/v1/masters/find", tags=["Masters Library"])
+async def find_matching_master(
+    image_type: str = Query(..., description="Тип кадра: BIAS, DARK, FLAT"),
+    temperature: float = Query(..., description="Температура сенсора"),
+    exposure: Optional[float] = Query(
+        None, description="Время экспозиции (только для DARK)"
+    ),
+    gain: Optional[int] = Query(None, description="Gain"),
+    offset: Optional[int] = Query(None, description="Offset"),
+    filter_name: Optional[str] = Query(None, description="Имя фильтра (для FLAT)"),
+    temp_tolerance: float = Query(2.0, description="Допуск по температуре"),
+):
+    """
+    Ищет наиболее подходящий мастер-кадр по параметрам.
+    Используется Calibrator Agent для подбора калибровок.
+    """
+    if not watcher_manager.masters_auditor:
+        raise HTTPException(
+            status_code=503, detail="Masters Auditor not initialized yet"
+        )
+
+    master = watcher_manager.masters_auditor.find_matching_master(
+        image_type=image_type,
+        temperature=temperature,
+        exposure=exposure,
+        gain=gain,
+        offset=offset,
+        filter_name=filter_name,
+        temp_tolerance=temp_tolerance,
+    )
+
+    if not master:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No matching {image_type} master found for the given parameters",
+        )
+
+    return master
+
+
+# ============================================================================
 # WEBSOCKET BROADCAST STATS
 # ============================================================================
 

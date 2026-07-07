@@ -3,14 +3,12 @@ WebSocket Broadcast Manager
 Пушит события Cortex на Frontend в реальном времени через WebSocket.
 Устраняет Упрощение #30 (WebSocket Broadcasting).
 """
-
 import asyncio
 import json
 import logging
-from typing import Dict, Set, List, Optional, Any
+from typing import Dict, Set, List, Optional, Any, Callable
 from fastapi import WebSocket, WebSocketDisconnect
 from datetime import datetime
-
 from app.core.events import event_bus
 from app.core.config import settings
 
@@ -24,9 +22,7 @@ class WebSocketConnection:
         self.websocket = websocket
         self.client_id = client_id
         self.connected_at = datetime.now()
-        self.subscribed_channels: Set[str] = {
-            "all"
-        }  # По умолчанию подписан на все каналы
+        self.subscribed_channels: Set[str] = {"all"}  # По умолчанию подписан на все каналы
         self._send_lock = asyncio.Lock()
 
     async def send_json(self, data: Dict[str, Any]) -> bool:
@@ -100,21 +96,25 @@ class WebSocketBroadcastManager:
         self._lock = asyncio.Lock()
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._running = False
+        self._handlers_map: Dict[str, Callable] = {}  # Хранение ссылок на обработчики для корректной отписки
 
     async def start(self):
         """Запускает менеджер и подписывается на события EventBus."""
         if self._running:
             return
-
         self._running = True
 
-        # Подписываемся на все интересующие события
-        for event_type in self.EVENT_CHANNEL_MAP.keys():
-            event_bus.subscribe(event_type, self._handle_event)
+        # ИСПРАВЛЕНО: Создаем замыкание для каждого event_type, чтобы зафиксировать event_type и channel
+        for event_type, channel in self.EVENT_CHANNEL_MAP.items():
+            async def event_handler(data: Dict[str, Any], et: str = event_type, ch: str = channel):
+                """Обработчик с зафиксированными event_type и channel через closure."""
+                await self.broadcast(et, data, channel=ch)
+
+            event_bus.subscribe(event_type, event_handler)
+            self._handlers_map[event_type] = event_handler
 
         # Запускаем heartbeat task
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-
         logger.info(
             f"🔌 WebSocket Broadcast Manager started ({len(self.EVENT_CHANNEL_MAP)} event types monitored)"
         )
@@ -130,9 +130,10 @@ class WebSocketBroadcastManager:
             except asyncio.CancelledError:
                 pass
 
-        # Отписываемся от событий
-        for event_type in self.EVENT_CHANNEL_MAP.keys():
-            event_bus.unsubscribe(event_type, self._handle_event)
+        # ИСПРАВЛЕНО: Корректная отписка с использованием сохраненных ссылок
+        for event_type, handler in self._handlers_map.items():
+            event_bus.unsubscribe(event_type, handler)
+        self._handlers_map.clear()
 
         # Закрываем все подключения
         async with self._lock:
@@ -145,12 +146,9 @@ class WebSocketBroadcastManager:
 
         logger.info("WebSocket Broadcast Manager stopped")
 
-    async def connect(
-        self, websocket: WebSocket, client_id: str
-    ) -> WebSocketConnection:
+    async def connect(self, websocket: WebSocket, client_id: str) -> WebSocketConnection:
         """Регистрирует новое WebSocket подключение."""
         await websocket.accept()
-
         conn = WebSocketConnection(websocket, client_id)
 
         async with self._lock:
@@ -161,15 +159,12 @@ class WebSocketBroadcastManager:
         )
 
         # Отправляем приветственное сообщение
-        await conn.send_json(
-            {
-                "type": "connection_established",
-                "client_id": client_id,
-                "timestamp": datetime.now().isoformat(),
-                "available_channels": list(set(self.EVENT_CHANNEL_MAP.values()))
-                + ["all"],
-            }
-        )
+        await conn.send_json({
+            "type": "connection_established",
+            "client_id": client_id,
+            "timestamp": datetime.now().isoformat(),
+            "available_channels": list(set(self.EVENT_CHANNEL_MAP.values())) + ["all"],
+        })
 
         return conn
 
@@ -178,9 +173,9 @@ class WebSocketBroadcastManager:
         async with self._lock:
             if client_id in self._connections:
                 del self._connections[client_id]
-                logger.info(
-                    f"❌ WebSocket client disconnected: {client_id} (total: {len(self._connections)})"
-                )
+        logger.info(
+            f"❌ WebSocket client disconnected: {client_id} (total: {len(self._connections)})"
+        )
 
     async def handle_client_message(self, client_id: str, message: Dict[str, Any]):
         """Обрабатывает входящие сообщения от клиента (например, подписка на каналы)."""
@@ -194,24 +189,16 @@ class WebSocketBroadcastManager:
             channels = message.get("channels", [])
             if isinstance(channels, list):
                 conn.subscribed_channels = set(channels) if channels else {"all"}
-                await conn.send_json(
-                    {
-                        "type": "subscription_confirmed",
-                        "channels": list(conn.subscribed_channels),
-                    }
-                )
-                logger.debug(
-                    f"Client {client_id} subscribed to: {conn.subscribed_channels}"
-                )
+            await conn.send_json({
+                "type": "subscription_confirmed",
+                "channels": list(conn.subscribed_channels),
+            })
+            logger.debug(f"Client {client_id} subscribed to: {conn.subscribed_channels}")
 
         elif msg_type == "ping":
-            await conn.send_json(
-                {"type": "pong", "timestamp": datetime.now().isoformat()}
-            )
+            await conn.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
 
-    async def broadcast(
-        self, event_type: str, data: Dict[str, Any], channel: Optional[str] = None
-    ):
+    async def broadcast(self, event_type: str, data: Dict[str, Any], channel: Optional[str] = None):
         """
         Рассылает событие всем подписанным клиентам.
         """
@@ -233,7 +220,6 @@ class WebSocketBroadcastManager:
 
         # Рассылаем всем подписанным клиентам
         disconnected = []
-
         async with self._lock:
             connections_snapshot = list(self._connections.values())
 
@@ -249,28 +235,6 @@ class WebSocketBroadcastManager:
                 for client_id in disconnected:
                     self._connections.pop(client_id, None)
             logger.debug(f"Cleaned up {len(disconnected)} dead connections")
-
-    async def _handle_event(self, data: Dict[str, Any]):
-        """
-        Обработчик событий EventBus.
-        Определяет тип события и рассылает его по соответствующему каналу.
-        """
-        # Определяем event_type из контекста (передается через замыкание)
-        # В реальности EventBus передает event_type как первый аргумент,
-        # но для простоты мы используем маппинг
-        # Этот метод вызывается через subscribe, поэтому нам нужно знать event_type
-
-        # Для упрощения: ищем event_type по data (или используем универсальный канал)
-        # В production-версии лучше передавать event_type явно
-
-        # Универсальная рассылка: отправляем во все каналы, где это событие зарегистрировано
-        for event_type, channel in self.EVENT_CHANNEL_MAP.items():
-            # Проверяем, соответствует ли data этому событию
-            # (В реальности EventBus вызывает этот callback с конкретным event_type)
-            pass
-
-        # Упрощенная версия: рассылаем как "state" событие
-        await self.broadcast("STATE_UPDATE", data, channel="state")
 
     async def _heartbeat_loop(self):
         """Периодически отправляет heartbeat всем клиентам."""
@@ -288,7 +252,6 @@ class WebSocketBroadcastManager:
                 }
 
                 disconnected = []
-
                 async with self._lock:
                     connections_snapshot = list(self._connections.values())
 
@@ -302,9 +265,7 @@ class WebSocketBroadcastManager:
                     async with self._lock:
                         for client_id in disconnected:
                             self._connections.pop(client_id, None)
-                    logger.debug(
-                        f"Heartbeat: cleaned up {len(disconnected)} dead connections"
-                    )
+                    logger.debug(f"Heartbeat: cleaned up {len(disconnected)} dead connections")
 
             except asyncio.CancelledError:
                 break
