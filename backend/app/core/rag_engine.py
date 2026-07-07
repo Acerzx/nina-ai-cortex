@@ -1,6 +1,5 @@
 """
 RAG Engine (Retrieval-Augmented Generation)
-
 Предоставляет AI-агентам доступ к документации и истории сессий через векторный поиск.
 
 Архитектура embeddings (гибридный подход):
@@ -9,16 +8,23 @@ RAG Engine (Retrieval-Augmented Generation)
 
 Автоматический fallback обеспечивает работоспособность RAG даже если
 sentence-transformers не установлен (например, на Python 3.14).
+
+ИСПРАВЛЕНО (audit 6.2):
+- Внедрён LRU-кэш эмбеддингов на основе OrderedDict
+- Ограничение размера кэша: 10000 записей
+- Хеш SHA-256 используется как ключ для детерминированного доступа
+- Добавлена статистика hit/miss для мониторинга эффективности кэша
+- Автоматическое вытеснение старых записей при достижении лимита
 """
 
 import asyncio
 import logging
 import hashlib
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, OrderedDict as OrderedDictType
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-
 import httpx
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
@@ -29,11 +35,137 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
 )
-
 from app.core.config import settings
 from app.core.events import event_bus
 
 logger = logging.getLogger("RAGEngine")
+
+
+class EmbeddingCache:
+    """
+    LRU-кэш для эмбеддингов.
+
+    Использует OrderedDict для эффективной реализации LRU-eviction:
+    - При доступе к элементу он перемещается в конец (MRU)
+    - При превышении лимита удаляется первый элемент (LRU)
+    - Все операции O(1)
+
+    Потокобезопасность обеспечивается asyncio.Lock.
+    """
+
+    def __init__(self, max_size: int = 10000):
+        """
+        Args:
+            max_size: Максимальное количество записей в кэше
+        """
+        self.max_size = max_size
+        self._cache: OrderedDictType[str, List[float]] = OrderedDict()
+        self._lock = asyncio.Lock()
+
+        # Статистика
+        self._stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "total_requests": 0,
+        }
+
+    @staticmethod
+    def _make_key(text: str) -> str:
+        """
+        Создаёт детерминированный ключ для текста.
+
+        Используется SHA-256 для:
+        - Фиксированной длины ключа (64 hex символа)
+        - Минимизации коллизий
+        - Детерминированности (одинаковые тексты → одинаковые ключи)
+        """
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    async def get(self, text: str) -> Optional[List[float]]:
+        """
+        Получает эмбеддинг из кэша.
+
+        Args:
+            text: Текст для поиска
+
+        Returns:
+            Вектор эмбеддинга или None если не найден
+        """
+        self._stats["total_requests"] += 1
+        key = self._make_key(text)
+
+        async with self._lock:
+            if key in self._cache:
+                # Перемещаем в конец (MRU)
+                self._cache.move_to_end(key)
+                self._stats["hits"] += 1
+                return self._cache[key]
+
+        self._stats["misses"] += 1
+        return None
+
+    async def put(self, text: str, embedding: List[float]) -> None:
+        """
+        Сохраняет эмбеддинг в кэш.
+
+        При превышении лимита автоматически удаляет самую старую запись (LRU).
+
+        Args:
+            text: Текст (используется для создания ключа)
+            embedding: Вектор эмбеддинга
+        """
+        key = self._make_key(text)
+
+        async with self._lock:
+            # Если ключ уже есть — обновляем и перемещаем в конец
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self._cache[key] = embedding
+                return
+
+            # Добавляем новую запись
+            self._cache[key] = embedding
+
+            # Проверяем лимит и вытесняем LRU при необходимости
+            while len(self._cache) > self.max_size:
+                # popitem(last=False) удаляет первый (самый старый) элемент
+                self._cache.popitem(last=False)
+                self._stats["evictions"] += 1
+
+    async def clear(self) -> int:
+        """
+        Очищает весь кэш.
+
+        Returns:
+            Количество удалённых записей
+        """
+        async with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            return count
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Возвращает статистику кэша.
+
+        Включает:
+        - Количество записей
+        - Hit/miss ratio
+        - Количество evictions
+        """
+        total = self._stats["total_requests"]
+        hit_rate = round(self._stats["hits"] / max(total, 1) * 100, 2)
+
+        return {
+            "size": len(self._cache),
+            "max_size": self.max_size,
+            "utilization_percent": round(
+                len(self._cache) / max(self.max_size, 1) * 100, 2
+            ),
+            **self._stats,
+            "hit_rate_percent": hit_rate,
+        }
 
 
 class RAGEngine:
@@ -47,6 +179,11 @@ class RAGEngine:
     - Qdrant для хранения векторов и метаданных
     - Гибридные embeddings (sentence-transformers → Ollama fallback)
     - Автоматическое пополнение через EventBus
+    - LRU-кэш эмбеддингов (10000 записей)
+
+    ИСПРАВЛЕНО (audit 6.2):
+    - Добавлен EmbeddingCache для оптимизации повторных запросов
+    - Статистика кэша доступна через get_stats()
     """
 
     CHUNK_SIZES = {
@@ -54,6 +191,9 @@ class RAGEngine:
         "session": 500,
         "error_log": 300,
     }
+
+    # Максимальный размер кэша эмбеддингов
+    EMBEDDING_CACHE_MAX_SIZE: int = 10000
 
     def __init__(self):
         self.qdrant_url = settings.qdrant.url
@@ -69,12 +209,17 @@ class RAGEngine:
         # Бэкенд embeddings
         self._embedding_backend: str = "unknown"
 
+        # ИСПРАВЛЕНО (audit 6.2): LRU-кэш эмбеддингов
+        self._embedding_cache = EmbeddingCache(max_size=self.EMBEDDING_CACHE_MAX_SIZE)
+
         # Статистика
         self._stats = {
             "documents_added": 0,
             "chunks_added": 0,
             "searches_performed": 0,
+            "embedding_calls": 0,
             "embedding_failures": 0,
+            "embedding_cache_hits": 0,
         }
 
     async def initialize(self):
@@ -125,7 +270,8 @@ class RAGEngine:
                 if existing_size != self._vector_size:
                     logger.warning(
                         f"⚠️ Collection {self.collection_name} has dimension "
-                        f"{existing_size}, but embeddings produce {self._vector_size}. "
+                        f"{existing_size}, but embeddings produce "
+                        f"{self._vector_size}. "
                         f"Recreating collection..."
                     )
                     # Удаляем коллекцию и создаём заново
@@ -157,16 +303,15 @@ class RAGEngine:
                 f"✅ RAG Engine initialized "
                 f"(Qdrant: {self.qdrant_url}, "
                 f"Backend: {self._embedding_backend}, "
-                f"Dim: {self._vector_size})"
+                f"Dim: {self._vector_size}, "
+                f"Cache: {self.EMBEDDING_CACHE_MAX_SIZE} entries)"
             )
 
         except Exception as e:
             logger.error(f"❌ Failed to initialize RAG Engine: {e}")
 
     async def close(self):
-        """
-        Корректно закрывает все подключения.
-        """
+        """Корректно закрывает все подключения и очищает кэш."""
         # 1. Отписка от событий
         try:
             event_bus.unsubscribe("SESSION_COMPLETED", self._on_session_completed)
@@ -192,21 +337,60 @@ class RAGEngine:
             finally:
                 self._client = None
 
+        # 4. Очистка кэша эмбеддингов
+        cleared = await self._embedding_cache.clear()
+        if cleared > 0:
+            logger.debug(f"Cleared {cleared} entries from embedding cache")
+
         self._initialized = False
         logger.info("🛑 RAG Engine closed")
 
     async def _get_embedding(self, text: str) -> Optional[List[float]]:
         """
-        Получает embedding вектор для текста.
+        Получает embedding вектор для текста с использованием LRU-кэша.
+
+        ИСПРАВЛЕНО (audit 6.2): Сначала проверяет кэш, и только при
+        промахе выполняет реальное вычисление. Результат сохраняется
+        в кэш для повторного использования.
 
         Стратегия (приоритет):
-        1. LocalEmbeddings (sentence-transformers или Ollama через него)
-        2. Прямой HTTP запрос к Ollama (fallback)
+        1. Проверка LRU-кэша (O(1))
+        2. LocalEmbeddings (sentence-transformers или Ollama через него)
+        3. Прямой HTTP запрос к Ollama (fallback)
+
+        Args:
+            text: Текст для получения эмбеддинга
+
+        Returns:
+            Вектор эмбеддинга или None при ошибке
         """
         if not self._initialized:
             logger.warning("RAG Engine not initialized")
             return None
 
+        # ИСПРАВЛЕНО (audit 6.2): Проверка кэша
+        cached = await self._embedding_cache.get(text)
+        if cached is not None:
+            self._stats["embedding_cache_hits"] += 1
+            return cached
+
+        # Кэш не сработал — вычисляем эмбеддинг
+        self._stats["embedding_calls"] += 1
+
+        embedding = await self._compute_embedding(text)
+
+        # Сохраняем в кэш при успешном вычислении
+        if embedding is not None:
+            await self._embedding_cache.put(text, embedding)
+
+        return embedding
+
+    async def _compute_embedding(self, text: str) -> Optional[List[float]]:
+        """
+        Вычисляет эмбеддинг для текста (без кэширования).
+
+        Внутренний метод, вызывается из _get_embedding() при cache miss.
+        """
         # === Попытка 1: LocalEmbeddings ===
         try:
             from app.core.embeddings import local_embeddings
@@ -218,7 +402,8 @@ class RAGEngine:
                     if len(embedding) != self._vector_size:
                         logger.warning(
                             f"Embedding dimension mismatch: "
-                            f"got {len(embedding)}, expected {self._vector_size}"
+                            f"got {len(embedding)}, "
+                            f"expected {self._vector_size}"
                         )
                         return None
                     return embedding
@@ -245,7 +430,6 @@ class RAGEngine:
                     if use_input
                     else {"model": self.embedding_model, "prompt": text}
                 )
-
                 response = await self._http_client.post(endpoint, json=payload)
                 response.raise_for_status()
                 data = response.json()
@@ -260,7 +444,8 @@ class RAGEngine:
                     if len(embedding) != self._vector_size:
                         logger.warning(
                             f"Ollama embedding dimension mismatch: "
-                            f"got {len(embedding)}, expected {self._vector_size}"
+                            f"got {len(embedding)}, "
+                            f"expected {self._vector_size}"
                         )
                         continue
                     return embedding
@@ -273,7 +458,8 @@ class RAGEngine:
             except httpx.ConnectError:
                 logger.warning(
                     f"Cannot connect to Ollama for embeddings. "
-                    f"Make sure Ollama is running: ollama pull {self.embedding_model}"
+                    f"Make sure Ollama is running: "
+                    f"ollama pull {self.embedding_model}"
                 )
                 break
             except Exception as e:
@@ -305,6 +491,7 @@ class RAGEngine:
 
             if current_length + sentence_length > chunk_size and current_chunk:
                 chunks.append("".join(current_chunk))
+
                 overlap_text = "".join(current_chunk)
                 if len(overlap_text) > overlap:
                     current_chunk = [overlap_text[-overlap:]]
@@ -327,7 +514,17 @@ class RAGEngine:
         metadata: Dict[str, Any],
         chunk_type: str = "documentation",
     ) -> int:
-        """Добавляет документ в векторную базу."""
+        """
+        Добавляет документ в векторную базу.
+
+        Args:
+            text: Текст документа
+            metadata: Метаданные
+            chunk_type: Тип чанкинга (documentation/session/error_log)
+
+        Returns:
+            Количество добавленных чанков
+        """
         if not self._initialized:
             logger.warning("RAG Engine not initialized")
             return 0
@@ -351,8 +548,8 @@ class RAGEngine:
                 "chunk_type": chunk_type,
                 "added_at": datetime.now().isoformat(),
             }
-            point_id = self._generate_point_id(chunk, chunk_metadata)
 
+            point_id = self._generate_point_id(chunk, chunk_metadata)
             points.append(
                 PointStruct(
                     id=point_id,
@@ -369,15 +566,13 @@ class RAGEngine:
             return 0
 
         try:
-            # ИСПРАВЛЕНО: поддержка обоих API
+            # Поддержка обоих API Qdrant
             try:
-                # Новый API: upsert принимает points
                 await self._client.upsert(
                     collection_name=self.collection_name,
                     points=points,
                 )
             except TypeError:
-                # Старый API мог требовать другие параметры
                 await self._client.upsert(
                     collection_name=self.collection_name,
                     points=points,
@@ -386,7 +581,6 @@ class RAGEngine:
 
             self._stats["documents_added"] += 1
             self._stats["chunks_added"] += len(points)
-
             logger.info(
                 f"✅ Added {len(points)} chunks from "
                 f"{metadata.get('source', 'unknown')}"
@@ -401,12 +595,12 @@ class RAGEngine:
         """Добавляет Session_Digest в базу знаний."""
         digest_text = f"""
 Сессия {session_data.get("date")}: {session_data.get("target")}
-Параметры: Фильтр {session_data.get("filter")}, 
+Параметры: Фильтр {session_data.get("filter")},
 Экспозиция {session_data.get("exposure_time")}s,
 Gain {session_data.get("gain")}, Температура {session_data.get("temperature")}°C
-Результаты: Отснято {session_data.get("frames_total")} кадров, 
+Результаты: Отснято {session_data.get("frames_total")} кадров,
 принято {session_data.get("frames_accepted")}
-Средний HFR: {session_data.get("avg_hfr")}px, 
+Средний HFR: {session_data.get("avg_hfr")}px,
 RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" (Dec)
 """
 
@@ -446,18 +640,32 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Семантический поиск по базе знаний."""
+        """
+        Семантический поиск по базе знаний.
+
+        Args:
+            query: Поисковый запрос
+            top_k: Количество результатов
+            filters: Фильтры по метаданным
+
+        Returns:
+            Список результатов поиска
+        """
         if not self._initialized:
             return []
 
         if not query or not query.strip():
             return []
 
+        self._stats["searches_performed"] += 1
+
+        # Получаем эмбеддинг запроса (с кэшированием)
         query_embedding = await self._get_embedding(query)
         if not query_embedding:
             logger.warning(f"Failed to get embedding for query: {query[:50]}")
             return []
 
+        # Строим фильтр
         query_filter = None
         if filters:
             conditions = []
@@ -466,18 +674,14 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
                     conditions.append(
                         FieldCondition(key=key, match=MatchValue(value=value))
                     )
-
             if conditions:
                 query_filter = Filter(must=conditions)
 
         try:
-            # ИСПРАВЛЕНО: поддержка обоих API qdrant-client
-            # Новый API (>= 1.7.0): query_points
-            # Старый API: search
+            # Поддержка обоих API qdrant-client
             results = []
-
             try:
-                # Пытаемся новый API
+                # Новый API (>= 1.7.0)
                 response = await self._client.query_points(
                     collection_name=self.collection_name,
                     query=query_embedding,
@@ -485,19 +689,15 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
                     query_filter=query_filter,
                     with_payload=True,
                 )
-                # Новый API возвращает QueryResponse с полем points
                 results = response.points if hasattr(response, "points") else []
-
             except AttributeError:
-                # Fallback на старый API
+                # Старый API
                 results = await self._client.search(
                     collection_name=self.collection_name,
                     query_vector=query_embedding,
                     limit=top_k,
                     query_filter=query_filter,
                 )
-
-            self._stats["searches_performed"] += 1
 
             # Форматируем результаты
             formatted_results = []
@@ -507,7 +707,7 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
                 formatted_results.append(
                     {
                         "text": payload.get("text", ""),
-                        "score": result.score if hasattr(result, "score") else 0.0,
+                        "score": (result.score if hasattr(result, "score") else 0.0),
                         "metadata": {k: v for k, v in payload.items() if k != "text"},
                     }
                 )
@@ -580,10 +780,8 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
                 "quality_score": data.get("quality_score"),
                 "detailed_report": data.get("detailed_report"),
             }
-
             await self.add_session_digest(session_digest)
             logger.info(f"Session {session_digest['session_id']} indexed in RAG")
-
         except Exception as e:
             logger.error(f"Failed to index session in RAG: {e}")
 
@@ -601,36 +799,64 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
             logger.error(f"Failed to index night summary in RAG: {e}")
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Возвращает статистику RAG-базы."""
+        """
+        Возвращает полную статистику RAG-системы.
+
+        Включает:
+        - Статистику коллекции Qdrant
+        - Статистику эмбеддингов (успешные/неуспешные)
+        - Статистику LRU-кэша (hit rate, размер, evictions)
+        - Информацию о бэкенде и размерности
+        """
         if not self._initialized:
             return {
                 "status": "not_initialized",
                 "backend": self._embedding_backend,
             }
 
+        # Статистика от Qdrant
         try:
             collection_info = await self._client.get_collection(self.collection_name)
-            return {
-                "status": "active",
-                "collection": self.collection_name,
+            qdrant_stats = {
                 "points_count": collection_info.points_count,
                 "vectors_count": collection_info.vectors_count,
-                "embedding_backend": self._embedding_backend,
-                "embedding_model": (
-                    "sentence-transformers/all-MiniLM-L6-v2"
-                    if self._embedding_backend == "local"
-                    else self.embedding_model
-                ),
-                "vector_dimension": self._vector_size,
-                "operations": self._stats,
             }
         except Exception as e:
-            return {
-                "status": "error",
-                "message": str(e),
-                "backend": self._embedding_backend,
-                "operations": self._stats,
-            }
+            qdrant_stats = {"error": str(e)}
+
+        # Статистика кэша эмбеддингов
+        cache_stats = self._embedding_cache.get_stats()
+
+        # Hit rate для эмбеддингов (с учётом кэша)
+        total_embedding_requests = (
+            self._stats["embedding_calls"] + self._stats["embedding_cache_hits"]
+        )
+        embedding_hit_rate = round(
+            self._stats["embedding_cache_hits"]
+            / max(total_embedding_requests, 1)
+            * 100,
+            2,
+        )
+
+        return {
+            "status": "active",
+            "collection": self.collection_name,
+            **qdrant_stats,
+            "embedding_backend": self._embedding_backend,
+            "embedding_model": (
+                "sentence-transformers/all-MiniLM-L6-v2"
+                if self._embedding_backend == "local"
+                else self.embedding_model
+            ),
+            "vector_dimension": self._vector_size,
+            "operations": self._stats,
+            "embedding_cache": cache_stats,
+            "embedding_effective_hit_rate_percent": embedding_hit_rate,
+            "cache_config": {
+                "max_size": self.EMBEDDING_CACHE_MAX_SIZE,
+                "enabled": True,
+            },
+        }
 
 
 # Singleton instance
