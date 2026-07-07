@@ -1,8 +1,16 @@
+"""
+Home Assistant Bridge — интеграция с Home Assistant для управления умным домом
+обсерватории.
+
+ИСПРАВЛЕНО (audit 3.2): settings.home_assistant — это объект HomeAssistantConfig
+(Pydantic BaseModel), а не dict. Заменили getattr(...).get(...) на прямой доступ
+через атрибуты .url и .token.
+"""
+
 import logging
 import asyncio
 from typing import Dict, Any, Optional
 import httpx
-
 from app.core.config import settings
 
 logger = logging.getLogger("HomeAssistantBridge")
@@ -15,24 +23,53 @@ class HomeAssistantBridge:
     """
 
     def __init__(self):
-        # Настройки из settings.yaml (добавить в конфиг!)
-        self.ha_url = getattr(settings, "home_assistant", {}).get(
-            "url", "http://homeassistant.local:8123"
-        )
-        self.ha_token = getattr(settings, "home_assistant", {}).get("token", "")
-        self.enabled = bool(self.ha_token)
+        # ИСПРАВЛЕНО (audit 3.2): прямой доступ к атрибутам Pydantic-модели.
+        # settings.home_assistant — это HomeAssistantConfig с полями
+        # enabled, url, token.
+        self.ha_url = settings.home_assistant.url
+        self.ha_token = settings.home_assistant.token
+        # Интеграция активна, только если:
+        # 1. В конфиге явно включена (settings.home_assistant.enabled)
+        # 2. Задан непустой токен аутентификации
+        self.enabled = settings.home_assistant.enabled and bool(self.ha_token)
+
+        if not self.enabled:
+            logger.info(
+                "ℹ️ Home Assistant integration disabled (enabled=%s, token_present=%s)",
+                settings.home_assistant.enabled,
+                bool(self.ha_token),
+            )
+        else:
+            logger.info(
+                "🏠 Home Assistant Bridge initialized (url=%s)",
+                self.ha_url,
+            )
+
         self._client: Optional[httpx.AsyncClient] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
+        """Возвращает (или создаёт) HTTP-клиент с заголовком авторизации."""
         if self._client is None or self._client.is_closed:
             headers = {
                 "Authorization": f"Bearer {self.ha_token}",
                 "Content-Type": "application/json",
             }
             self._client = httpx.AsyncClient(
-                base_url=self.ha_url, headers=headers, timeout=10.0
+                base_url=self.ha_url,
+                headers=headers,
+                timeout=10.0,
             )
         return self._client
+
+    async def close(self):
+        """Корректное закрытие HTTP-клиента."""
+        if self._client and not self._client.is_closed:
+            try:
+                await self._client.aclose()
+            except Exception as e:
+                logger.debug(f"Error closing HA client: {e}")
+            finally:
+                self._client = None
 
     async def call_service(
         self,
@@ -55,16 +92,20 @@ class HomeAssistantBridge:
         try:
             client = await self._get_client()
             payload = {"entity_id": entity_id, **(service_data or {})}
-
             response = await client.post(
                 f"/api/services/{domain}/{service}", json=payload
             )
             response.raise_for_status()
-
             logger.info(f"✅ HA service called successfully")
             return True
         except httpx.ConnectError:
             logger.error("❌ Cannot connect to Home Assistant")
+            return False
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"❌ HA service returned {e.response.status_code}: "
+                f"{e.response.text[:200]}"
+            )
             return False
         except Exception as e:
             logger.error(f"❌ HA service call failed: {e}")
@@ -80,6 +121,12 @@ class HomeAssistantBridge:
             response = await client.get(f"/api/states/{entity_id}")
             response.raise_for_status()
             return response.json()
+        except httpx.ConnectError:
+            logger.error("❌ Cannot connect to Home Assistant")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HA get_state returned {e.response.status_code}")
+            return None
         except Exception as e:
             logger.error(f"Failed to get HA entity state: {e}")
             return None
@@ -112,6 +159,15 @@ class HomeAssistantBridge:
             "turn_on",
             "switch.observatory_dew_heater",
             reason="Humidity above threshold",
+        )
+
+    async def turn_off_dew_heater(self) -> bool:
+        """Выключает обогреватель."""
+        return await self.call_service(
+            "switch",
+            "turn_off",
+            "switch.observatory_dew_heater",
+            reason="Humidity normalized",
         )
 
     async def power_off_observatory(self) -> bool:

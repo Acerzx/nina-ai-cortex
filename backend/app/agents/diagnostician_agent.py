@@ -1,8 +1,12 @@
 """
 Diagnostician Agent — диагностирует причины проблем (не просто "HFR растет", а "почему").
 Анализирует корреляции между метриками, ищет похожие кейсы в RAG, предлагает решения.
+
+ИСПРАВЛЕНО (audit 3.1): добавлен import asyncio для корректной работы
+с asyncio.TimeoutError в методе _determine_root_cause.
 """
 
+import asyncio  # ← ДОБАВЛЕНО для asyncio.TimeoutError
 import logging
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple
@@ -58,24 +62,20 @@ class DiagnosticianAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(name="Diagnostician", role="Root Cause Analysis")
-
         # Пороговые значения для корреляций
         self.correlation_thresholds = {
             "strong": 0.7,  # |r| > 0.7 = сильная корреляция
             "moderate": 0.5,  # |r| > 0.5 = умеренная корреляция
             "weak": 0.3,  # |r| > 0.3 = слабая корреляция
         }
-
         # Минимальный размер выборки для статистической значимости
         self.min_sample_size = 10
 
     async def initialize(self):
         """Инициализация агента диагностики."""
         await super().initialize()
-
         # Подписываемся на алерты от Watcher
         event_bus.subscribe("ALERT", self._on_alert)
-
         logger.info("✅ Diagnostician Agent initialized")
 
     async def shutdown(self):
@@ -90,7 +90,6 @@ class DiagnosticianAgent(BaseAgent):
         """
         # Получаем активные алерты
         active_alerts = observatory_state.active_alerts
-
         if not active_alerts:
             return None
 
@@ -119,7 +118,6 @@ class DiagnosticianAgent(BaseAgent):
             )
             self.log_decision(decision)
             return decision
-
         return None
 
     async def execute(self, decision: AgentDecision) -> bool:
@@ -138,18 +136,14 @@ class DiagnosticianAgent(BaseAgent):
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-
             logger.info(f"🔍 Diagnostic recommendation: {root_cause}")
             logger.info(f"   Recommended actions: {recommended_actions}")
-
             return True
-
         return False
 
     async def _on_alert(self, data: Dict[str, Any]) -> None:
         """Обработка алерта от Watcher."""
         level = data.get("level", "INFO")
-
         # Анализируем только WARNING и CRITICAL алерты
         if level in ("WARNING", "CRITICAL"):
             await self.analyze(
@@ -167,7 +161,6 @@ class DiagnosticianAgent(BaseAgent):
         self, problem: str, context: Dict[str, Any]
     ) -> Optional[RootCauseAnalysis]:
         """Выполняет полный root cause analysis."""
-
         # 1. Анализ корреляций между метриками
         correlations = await self._analyze_correlations(problem, context)
 
@@ -201,7 +194,6 @@ class DiagnosticianAgent(BaseAgent):
 
         # Определяем проблемную метрику из контекста
         problem_metric = context.get("metric", "")
-
         if not problem_metric:
             # Если метрика не указана, анализируем все пары
             metrics_to_analyze = [
@@ -231,25 +223,21 @@ class DiagnosticianAgent(BaseAgent):
             for metric2 in all_metrics:
                 if metric1 == metric2:
                     continue
-
                 correlation = await self._calculate_correlation(metric1, metric2)
                 if correlation:
                     correlations.append(correlation)
 
         # Сортируем по силе корреляции
         correlations.sort(key=lambda c: abs(c.correlation_coefficient), reverse=True)
-
         return correlations
 
     async def _calculate_correlation(
         self, metric1: str, metric2: str
     ) -> Optional[CorrelationResult]:
         """Вычисляет корреляцию Пирсона между двумя метриками."""
-
         # Получаем историю метрик
         history1 = getattr(observatory_state.history, metric1, None)
         history2 = getattr(observatory_state.history, metric2, None)
-
         if not history1 or not history2:
             return None
 
@@ -293,7 +281,6 @@ class DiagnosticianAgent(BaseAgent):
                 interpretation=interpretation,
                 sample_size=min_len,
             )
-
         except Exception as e:
             logger.debug(f"Failed to calculate correlation {metric1} vs {metric2}: {e}")
             return None
@@ -321,9 +308,7 @@ class DiagnosticianAgent(BaseAgent):
                         "metadata": result["metadata"],
                     }
                 )
-
             return similar_cases
-
         except Exception as e:
             logger.error(f"Failed to search similar cases: {e}")
             return []
@@ -352,24 +337,26 @@ class DiagnosticianAgent(BaseAgent):
 
         if strong_correlations:
             top_correlation = strong_correlations[0]
-
             if "temperature" in [top_correlation.metric1, top_correlation.metric2]:
                 root_cause = "Температурный дрейф фокуса"
                 confidence = 0.85
                 evidence.append(
-                    f"Сильная корреляция с температурой (r={top_correlation.correlation_coefficient:.2f})"
+                    f"Сильная корреляция с температурой "
+                    f"(r={top_correlation.correlation_coefficient:.2f})"
                 )
             elif "wind" in [top_correlation.metric1, top_correlation.metric2]:
                 root_cause = "Ветровая нагрузка на монтировку"
                 confidence = 0.80
                 evidence.append(
-                    f"Сильная корреляция с ветром (r={top_correlation.correlation_coefficient:.2f})"
+                    f"Сильная корреляция с ветром "
+                    f"(r={top_correlation.correlation_coefficient:.2f})"
                 )
             elif "rms" in [top_correlation.metric1, top_correlation.metric2]:
                 root_cause = "Проблема с гидированием"
                 confidence = 0.75
                 evidence.append(
-                    f"Сильная корреляция с RMS гидирования (r={top_correlation.correlation_coefficient:.2f})"
+                    f"Сильная корреляция с RMS гидирования "
+                    f"(r={top_correlation.correlation_coefficient:.2f})"
                 )
 
         # === 2. LLM АНАЛИЗ (gemma4:31b-cloud → gemma4:e4b) ===
@@ -384,12 +371,12 @@ class DiagnosticianAgent(BaseAgent):
                 context_parts.append(
                     "Обнаруженные корреляции:\n"
                     + "\n".join(
-                        f"- {c.metric1} vs {c.metric2}: r={c.correlation_coefficient:.2f}"
+                        f"- {c.metric1} vs {c.metric2}: "
+                        f"r={c.correlation_coefficient:.2f}"
                         for c in strong_correlations
                     )
                 )
-
-            context = "\n\n".join(context_parts)
+            context = "\n".join(context_parts)
 
             prompt = f"""Проблема: {problem}
 Текущие метрики: HFR={observatory_state.current_metrics.get("hfr")},
@@ -406,7 +393,10 @@ class DiagnosticianAgent(BaseAgent):
 
             response = await llm_provider.generate(
                 prompt=prompt,
-                system_prompt="Ты — агент диагностики проблем обсерватории. Отвечай кратко и по делу на русском языке.",
+                system_prompt=(
+                    "Ты — агент диагностики проблем обсерватории. "
+                    "Отвечай кратко и по делу на русском языке."
+                ),
                 max_tokens=400,
                 temperature=0.2,
             )
@@ -424,13 +414,14 @@ class DiagnosticianAgent(BaseAgent):
                         f"{'FALLBACK' if response.from_fallback else 'PRIMARY'})"
                     )
                     confidence = min(0.95, confidence + 0.15)
-
                     logger.info(
                         f"🤖 LLM root cause: {root_cause} "
-                        f"(model: {response.model}, latency: {response.latency_ms:.0f}ms)"
+                        f"(model: {response.model}, "
+                        f"latency: {response.latency_ms:.0f}ms)"
                     )
 
         except asyncio.TimeoutError:
+            # ← Теперь asyncio корректно импортирован (audit 3.1)
             logger.warning("⚠️ LLM timeout, using heuristic root cause")
             evidence.append("LLM timeout — использована эвристика")
         except Exception as e:
@@ -467,7 +458,6 @@ class DiagnosticianAgent(BaseAgent):
                     "Проверить температурный коэффициент в настройках фокусера",
                 ]
             )
-
         elif "ветровая" in root_cause.lower():
             recommendations.extend(
                 [
@@ -476,7 +466,6 @@ class DiagnosticianAgent(BaseAgent):
                     "Рассмотреть возможность паузы до снижения ветра",
                 ]
             )
-
         elif "гидирование" in root_cause.lower():
             recommendations.extend(
                 [
@@ -485,7 +474,6 @@ class DiagnosticianAgent(BaseAgent):
                     "Увеличить частоту дизеринга",
                 ]
             )
-
         elif "дрейф фокуса" in root_cause.lower():
             recommendations.extend(
                 [
@@ -498,7 +486,6 @@ class DiagnosticianAgent(BaseAgent):
         # Добавляем рекомендации из похожих кейсов
         if similar_cases:
             for case in similar_cases[:2]:  # Берем топ-2 кейса
-                # Извлекаем рекомендации из текста кейса
                 text = case["text"]
                 if "рекомендация" in text.lower() or "решение" in text.lower():
                     recommendations.append(f"Из истории: {text[:100]}...")
