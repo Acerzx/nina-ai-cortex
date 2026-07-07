@@ -1,11 +1,15 @@
 """
 N.I.N.A. Shadow Engine State Tracker
 Отслеживает текущее состояние секвенсора на основе WebSocket событий и теневого графа.
-Устраняет Упрощение #15.
+
+ИСПРАВЛЕНО (audit 4.3, 12.4):
+- FLAT_MODE теперь детектится по ImageType из графа, а не по ключевым словам
+- Пути контейнеров кэшируются в _container_path_cache для производительности
+- Устранены ложные срабатывания при смене фильтра
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -19,14 +23,15 @@ class SequenceState(BaseModel):
     current_item_id: Optional[str] = None
     current_item_name: Optional[str] = None
     current_item_type: Optional[str] = None
-    container_path: List[str] = Field(default_factory=list)  # Путь контейнеров (имена)
-    container_path_ids: List[str] = Field(default_factory=list)  # Путь контейнеров (ID)
+    current_image_type: Optional[str] = None  # ИСПРАВЛЕНО (4.3): LIGHT/FLAT/DARK/BIAS
+    container_path: List[str] = Field(default_factory=list)
+    container_path_ids: List[str] = Field(default_factory=list)
     global_variables: Dict[str, Any] = Field(default_factory=dict)
     active_triggers: List[str] = Field(default_factory=list)
     is_message_box_active: bool = False
     message_box_text: Optional[str] = None
     is_approaching_shutdown: bool = False
-    is_flat_mode: bool = False  # Раннее обнаружение FLAT_MODE
+    is_flat_mode: bool = False
     sequence_start_time: Optional[str] = None
     last_update: Optional[str] = None
 
@@ -34,26 +39,43 @@ class SequenceState(BaseModel):
 class StateTracker:
     """
     Отслеживает состояние секвенсора на основе WebSocket событий и Shadow Graph.
-    Устраняет Упрощение #15: полное состояние секвенсора.
 
-    Ключевое улучшение: использует теневой граф для корректного управления container_path,
-    предотвращая утечку памяти и обеспечивая точное отслеживание вложенности.
+    ИСПРАВЛЕНО (audit 4.3, 12.4):
+    - FLAT_MODE детектится по ImageType из Shadow Graph (надёжно)
+    - Пути контейнеров кэшируются в _container_path_cache (O(1) доступ)
     """
 
     def __init__(self):
         self.state = SequenceState()
         self._shadow_graph: Optional[Dict] = None
-        self._node_map: Dict[str, Dict] = {}  # id -> node
-        self._parent_map: Dict[str, str] = {}  # child_id -> parent_id
-        self._container_children: Dict[
-            str, List[str]
-        ] = {}  # container_id -> [child_ids]
+        self._node_map: Dict[str, Dict] = {}
+        self._parent_map: Dict[str, str] = {}
+        self._container_children: Dict[str, List[str]] = {}
+
+        # ИСПРАВЛЕНО (audit 12.4): кэш путей контейнеров для каждого узла
+        # key: item_id, value: (container_names, container_ids)
+        self._container_path_cache: Dict[str, Tuple[List[str], List[str]]] = {}
+
+        # Ключевые слова для fallback-детекции FLAT_MODE (если ImageType недоступен)
+        self._flat_keywords = [
+            "перемещение для съемки flat",
+            "flat",
+            "take trained flats",
+            "flatwizard",
+            "flat panel",
+        ]
 
     def set_shadow_graph(self, graph: Dict):
         """
-        Устанавливает теневой граф секвенсора и строит индексы для быстрого поиска.
+        Устанавливает теневой граф секвенсора и строит индексы.
+
+        При установке нового графа кэш путей сбрасывается.
         """
         self._shadow_graph = graph
+
+        # ИСПРАВЛЕНО (audit 12.4): сбрасываем кэш при смене графа
+        self._container_path_cache.clear()
+
         if not graph:
             logger.warning("Empty shadow graph provided")
             return
@@ -70,9 +92,13 @@ class StateTracker:
         if "graph" in graph:
             self._build_node_map(graph["graph"], parent_id=None)
 
+        # ИСПРАВЛЕНО (audit 12.4): Pre-compute пути для всех узлов
+        self._precompute_container_paths()
+
         logger.info(
             f"Shadow graph loaded: {len(self._node_map)} nodes, "
-            f"{len(self._parent_map)} parent-child relations"
+            f"{len(self._parent_map)} parent-child relations, "
+            f"{len(self._container_path_cache)} cached paths"
         )
 
     def _build_node_map(self, node: Any, parent_id: Optional[str]):
@@ -90,8 +116,9 @@ class StateTracker:
 
         if node_id:
             self._node_map[node_id] = node
-            if parent_id:
-                self._parent_map[node_id] = parent_id
+
+        if parent_id:
+            self._parent_map[node_id] = parent_id
 
         # Для контейнеров рекурсивно обрабатываем children, instructions, message_boxes
         if "Container" in node_type or node_type == "SmartExposure":
@@ -117,18 +144,29 @@ class StateTracker:
 
             self._container_children[node_id] = children_ids
 
-    def _find_container_path_for_item(
+    def _precompute_container_paths(self):
+        """
+        ИСПРАВЛЕНО (audit 12.4): Pre-compute пути контейнеров для всех узлов.
+        Выполняется один раз при загрузке графа, обеспечивая O(1) доступ.
+        """
+        for item_id in self._node_map.keys():
+            self._compute_and_cache_container_path(item_id)
+
+    def _compute_and_cache_container_path(
         self, item_id: str
-    ) -> tuple[List[str], List[str]]:
+    ) -> Tuple[List[str], List[str]]:
         """
-        Находит путь контейнеров (имена и ID) для данного элемента.
-        Возвращает (container_names, container_ids) от корня к листу.
+        Вычисляет путь контейнеров и кэширует результат.
         """
+        # Проверка кэша
+        if item_id in self._container_path_cache:
+            return self._container_path_cache[item_id]
+
+        # Вычисление пути
         container_ids = []
         container_names = []
-
         current_id = item_id
-        visited = set()  # Защита от циклов
+        visited = set()
 
         while (
             current_id and current_id in self._parent_map and current_id not in visited
@@ -146,18 +184,65 @@ class StateTracker:
 
             current_id = parent_id
 
-        return container_names, container_ids
+        # Кэширование результата
+        result = (container_names, container_ids)
+        self._container_path_cache[item_id] = result
+        return result
+
+    def _find_container_path_for_item(
+        self, item_id: str
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Находит путь контейнеров (имена и ID) для данного элемента.
+
+        ИСПРАВЛЕНО (audit 12.4): использует кэш для O(1) доступа.
+        """
+        if item_id in self._container_path_cache:
+            return self._container_path_cache[item_id]
+
+        # Fallback: вычислить и закэшировать
+        return self._compute_and_cache_container_path(item_id)
 
     def _is_sibling(self, item1_id: str, item2_id: str) -> bool:
-        """Проверяет, являются ли два элемента siblings (имеют общего родителя)."""
+        """Проверяет, являются ли два элемента siblings."""
         if item1_id not in self._parent_map or item2_id not in self._parent_map:
             return False
         return self._parent_map.get(item1_id) == self._parent_map.get(item2_id)
+
+    def _extract_image_type_from_node(self, node: Dict) -> Optional[str]:
+        """
+        Извлекает ImageType из узла графа (TakeExposure инструкции).
+
+        ИСПРАВЛЕНО (audit 4.3): надёжный источник FLAT_MODE.
+        """
+        if not node:
+            return None
+
+        # Прямое поле image_type (уже нормализованное)
+        image_type = node.get("image_type")
+        if image_type:
+            return str(image_type).upper()
+
+        # Поле ImageType (raw)
+        image_type_raw = node.get("ImageType")
+        if image_type_raw:
+            return str(image_type_raw).upper()
+
+        # Из expression (если есть)
+        image_type_expr = node.get("image_type_expr")
+        if image_type_expr and isinstance(image_type_expr, str):
+            return image_type_expr.upper()
+
+        return None
 
     async def handle_sequence_item_started(self, data: Dict):
         """
         Обработка события SequenceItemStarted.
         Ключевой метод: обновляет container_path на основе теневого графа.
+
+        ИСПРАВЛЕНО (audit 4.3):
+        - FLAT_MODE детектится по ImageType из графа
+        - Fallback на ключевые слова только если ImageType недоступен
         """
         item_id = data.get("Id") or data.get("id")
         item_name = data.get("Name", "")
@@ -170,6 +255,7 @@ class StateTracker:
         self.state.last_update = datetime.now().isoformat()
 
         # Обновляем container_path на основе теневого графа
+        # ИСПРАВЛЕНО (audit 12.4): используем кэш
         if item_id and self._node_map:
             new_container_names, new_container_ids = self._find_container_path_for_item(
                 item_id
@@ -200,26 +286,8 @@ class StateTracker:
             self.state.container_path = new_container_names
             self.state.container_path_ids = new_container_ids
 
-        # === Раннее обнаружение FLAT_MODE ===
-        # Детектируем вход в "Перемещение для съемки FLAT" или аналогичные контейнеры
-        flat_keywords = ["перемещение для съемки flat", "flat", "take trained flats"]
-        item_name_lower = item_name.lower()
-
-        if any(kw in item_name_lower for kw in flat_keywords):
-            if not self.state.is_flat_mode:
-                self.state.is_flat_mode = True
-                logger.info(
-                    f"🟦 FLAT_MODE pre-activated via Shadow Engine (item: {item_name})"
-                )
-
-        # Если это LIGHT-кадр и мы были в FLAT_MODE - сбрасываем
-        if item_type and "TakeExposure" in item_type:
-            # Проверяем ImageType в узле графа
-            node = self._node_map.get(item_id, {})
-            image_type = node.get("image_type", "")
-            if image_type == "LIGHT" and self.state.is_flat_mode:
-                self.state.is_flat_mode = False
-                logger.info("🟩 FLAT_MODE deactivated (LIGHT exposure started)")
+        # === ИСПРАВЛЕНО (audit 4.3): FLAT_MODE детекция ===
+        await self._update_flat_mode(item_id, item_name, item_type)
 
         # === Детекция MessageBox ===
         if "MessageBox" in item_type:
@@ -237,6 +305,61 @@ class StateTracker:
             logger.warning("⚠️ Approaching Shutdown instruction!")
 
         logger.info(f"▶️ Sequence Item Started: {item_name} ({item_type})")
+
+    async def _update_flat_mode(
+        self, item_id: Optional[str], item_name: str, item_type: str
+    ):
+        """
+        Обновляет состояние FLAT_MODE на основе ImageType из графа.
+
+        ИСПРАВЛЕНО (audit 4.3):
+        - Приоритет: ImageType из графа (надёжный источник)
+        - Fallback: ключевые слова в имени (только если ImageType недоступен)
+        - Корректный сброс при возврате к LIGHT-кадрам
+        """
+        # Получаем узел из графа
+        node = self._node_map.get(item_id, {}) if item_id else {}
+
+        # Извлекаем ImageType
+        image_type = self._extract_image_type_from_node(node)
+
+        # Сохраняем текущий ImageType в состоянии
+        if image_type:
+            self.state.current_image_type = image_type
+
+        # === Логика активации/деактивации FLAT_MODE ===
+
+        if image_type == "FLAT":
+            # Надёжный источник: ImageType из графа
+            if not self.state.is_flat_mode:
+                self.state.is_flat_mode = True
+                logger.info(
+                    f"🟦 FLAT_MODE activated via ImageType=FLAT (item: {item_name})"
+                )
+        elif image_type in ("LIGHT", "DARK", "BIAS"):
+            # Возврат к не-FLAT кадрам — сбрасываем режим
+            if self.state.is_flat_mode:
+                self.state.is_flat_mode = False
+                logger.info(
+                    f"🟩 FLAT_MODE deactivated via ImageType={image_type} "
+                    f"(item: {item_name})"
+                )
+        elif image_type is None:
+            # Fallback: детекция по ключевым словам в имени
+            # Только если ImageType недоступен (например, для контейнеров)
+            item_name_lower = item_name.lower() if item_name else ""
+            is_flat_container = any(kw in item_name_lower for kw in self._flat_keywords)
+
+            # Активируем только для явно плоских контейнеров
+            if is_flat_container and not self.state.is_flat_mode:
+                # Дополнительная проверка: это контейнер, а не инструкция
+                node_type = node.get("type", "")
+                if "Container" in node_type or item_type == "":
+                    self.state.is_flat_mode = True
+                    logger.info(
+                        f"🟦 FLAT_MODE pre-activated via container name "
+                        f"(item: {item_name}) [fallback mode]"
+                    )
 
     async def handle_sequence_item_completed(self, data: Dict):
         """Обработка события SequenceItemCompleted."""
@@ -261,6 +384,7 @@ class StateTracker:
         self.state.container_path = []
         self.state.container_path_ids = []
         self.state.is_flat_mode = False
+        self.state.current_image_type = None
         self.state.is_approaching_shutdown = False
         logger.info("🚀 Sequence Started")
 
@@ -270,8 +394,10 @@ class StateTracker:
         self.state.current_item_id = None
         self.state.current_item_name = None
         self.state.current_item_type = None
+        self.state.current_image_type = None
         self.state.is_approaching_shutdown = False
         self.state.is_message_box_active = False
+        self.state.is_flat_mode = False
         self.state.last_update = datetime.now().isoformat()
         logger.info("🛑 Sequence Stopped")
 
@@ -281,11 +407,16 @@ class StateTracker:
 
     def is_in_final_stage(self) -> bool:
         """
-        Проверяет, находимся ли мы в финальной стадии секвенсора
-        (EndAreaContainer или контейнеры с ключевыми словами "Отключение", "Деактивация").
+        Проверяет, находимся ли мы в финальной стадии секвенсора.
         Используется Safety Interceptor.
         """
-        final_keywords = ["endarea", "конец", "отключение", "деактивация", "shutdown"]
+        final_keywords = [
+            "endarea",
+            "конец",
+            "отключение",
+            "деактивация",
+            "shutdown",
+        ]
         for container_name in self.state.container_path:
             if any(kw in container_name.lower() for kw in final_keywords):
                 return True
@@ -299,7 +430,19 @@ class StateTracker:
         """Возвращает информацию об узле по ID из теневого графа."""
         return self._node_map.get(node_id)
 
+    def get_stats(self) -> Dict[str, Any]:
+        """Возвращает статистику State Tracker для мониторинга."""
+        return {
+            "is_running": self.state.is_running,
+            "current_item": self.state.current_item_name,
+            "current_image_type": self.state.current_image_type,
+            "is_flat_mode": self.state.is_flat_mode,
+            "container_depth": len(self.state.container_path),
+            "node_count": len(self._node_map),
+            "cached_paths": len(self._container_path_cache),
+            "global_vars_count": len(self.state.global_variables),
+        }
 
-# Singleton instance (для совместимости с существующим кодом)
-# В будущем можно перевести на DI через WatcherManager
+
+# Singleton instance
 state_tracker = StateTracker()
