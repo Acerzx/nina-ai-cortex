@@ -37,6 +37,7 @@ class SessionDigest(BaseModel):
     problems: List[Dict[str, str]] = Field(default_factory=list)
     recommendations: List[str] = Field(default_factory=list)
     quality_score: float = Field(ge=0.0, le=10.0)
+    detailed_report: Optional[str] = None  # Расширенный отчет от LLM
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -49,6 +50,7 @@ class AuditorAgent(BaseAgent):
     - Индексация в RAG для будущего обучения
     - Выявление повторяющихся проблем
     - Генерация рекомендаций для будущих сессий
+    - Использование LLM для создания расширенных отчетов
 
     Trigger:
     - Событие SEQUENCE_STOPPED
@@ -147,7 +149,9 @@ class AuditorAgent(BaseAgent):
         )
 
     async def _generate_session_digest(self) -> Optional[SessionDigest]:
-        """Генерирует структурированный Session Digest."""
+        """Генерирует структурированный Session Digest с использованием LLM."""
+        from app.agents.llm_client import llm_client
+
         # Получаем данные из ObservatoryState
         metrics = observatory_state.current_metrics
         weather = observatory_state.weather
@@ -166,7 +170,7 @@ class AuditorAgent(BaseAgent):
 
         # Подсчитываем кадры
         frames_total = len(history.hfr)  # Примерная оценка
-        frames_accepted = int(frames_total * 0.9)  # Примерная оценка
+        frames_accepted = int(frames_total * 0.9)  # Примерная оценка (90% acceptance)
 
         # Средние метрики
         avg_hfr = sum(history.hfr) / len(history.hfr) if history.hfr else None
@@ -204,8 +208,32 @@ class AuditorAgent(BaseAgent):
             frames_accepted / frames_total if frames_total > 0 else 0,
         )
 
-        # Создаем Session Digest
+        # Создаем session_id
         session_id = f"{target}_{datetime.now().strftime('%Y-%m-%d')}"
+
+        # Если LLM доступен, генерируем расширенный текстовый отчет
+        detailed_report = None
+        if llm_client.is_available():
+            session_data = {
+                "target": target,
+                "filter": filter_name,
+                "exposure_time": exposure_time,
+                "frames_total": frames_total,
+                "frames_accepted": frames_accepted,
+                "avg_hfr": avg_hfr,
+                "avg_rms_ra": avg_rms_ra,
+                "avg_rms_dec": avg_rms_dec,
+                "problems": problems,
+            }
+
+            context = await self.get_rag_context(f"Сессия {target} {filter_name}")
+
+            detailed_report = await llm_client.generate_session_digest(
+                session_data=session_data, problems=problems, context=context
+            )
+
+            if detailed_report:
+                logger.info("✨ Session Digest enhanced with LLM analysis")
 
         return SessionDigest(
             session_id=session_id,
@@ -225,6 +253,7 @@ class AuditorAgent(BaseAgent):
             problems=problems,
             recommendations=recommendations,
             quality_score=quality_score,
+            detailed_report=detailed_report,
         )
 
     async def _generate_recommendations(

@@ -11,7 +11,6 @@ from typing import Dict, Any, List, Optional, ClassVar
 from datetime import datetime
 from collections import deque
 from pydantic import BaseModel, Field
-
 from app.core.events import event_bus
 from app.shadow_engine.state_tracker import state_tracker
 
@@ -65,6 +64,10 @@ class ObservatoryState:
             "rotator_angle": None,
             "mount_altitude": None,
             "mount_azimuth": None,
+            "exposure_time": None,
+            "gain": None,
+            "filter": None,
+            "snr": None,
         }
 
         # === Погода ===
@@ -137,6 +140,9 @@ class ObservatoryState:
         # События гида и безопасности из логов
         event_bus.subscribe("LOG_EVENT", self._on_log_event)
 
+        # LiveStack статус
+        event_bus.subscribe("LIVESTACK_STATUS", self._on_livestack_status)
+
         self._subscribed = True
         logger.info("🧠 ObservatoryState initialized and subscribed to events")
 
@@ -172,15 +178,25 @@ class ObservatoryState:
     async def _on_new_frame(self, data: Dict[str, Any]):
         """Обработка нового кадра из Session Metadata."""
         frame = data.get("frame", {})
+
         if frame:
             if frame.get("hfr"):
                 self._append_history("hfr", frame["hfr"])
             if frame.get("fwhm"):
                 self._append_history("fwhm", frame["fwhm"])
 
+            # Обновляем текущие метрики из кадра
+            if frame.get("exposure_time"):
+                self.current_metrics["exposure_time"] = frame["exposure_time"]
+            if frame.get("gain"):
+                self.current_metrics["gain"] = frame["gain"]
+            if frame.get("filter"):
+                self.current_metrics["filter"] = frame["filter"]
+
     async def _on_weather_update(self, data: Dict[str, Any]):
         """Обновление погоды."""
         weather = data.get("weather", {})
+
         for key, value in weather.items():
             if value is not None and key in self.weather:
                 self.weather[key] = value
@@ -191,6 +207,7 @@ class ObservatoryState:
     async def _on_fits_parsed(self, data: Dict[str, Any]):
         """Обновление астрономических данных из FITS."""
         report = data.get("report", {})
+
         if report.get("moon_angl") is not None:
             self.astronomy["moon_angle"] = report["moon_angl"]
         if report.get("sun_angle") is not None:
@@ -203,6 +220,7 @@ class ObservatoryState:
             "timestamp": datetime.now().isoformat(),
             **data,
         }
+
         self.active_alerts.append(alert)
 
         # Ограничиваем количество активных алертов
@@ -232,6 +250,11 @@ class ObservatoryState:
         elif event_type == "safety_safe":
             self.safety_status = "SAFE"
 
+    async def _on_livestack_status(self, data: Dict[str, Any]):
+        """Обновление статуса LiveStack."""
+        if "snr" in data:
+            self.current_metrics["snr"] = data["snr"]
+
     def _append_history(self, metric: str, value: Optional[float]):
         """Добавляет значение в историю метрики."""
         if value is None:
@@ -240,6 +263,7 @@ class ObservatoryState:
         history_list = getattr(self.history, metric, None)
         if history_list is not None and isinstance(history_list, list):
             history_list.append(float(value))
+
             # Обрезаем историю до MAX_POINTS
             if len(history_list) > self.history.MAX_POINTS:
                 history_list.pop(0)
@@ -262,6 +286,7 @@ class ObservatoryState:
         Положительный = рост, отрицательный = падение.
         """
         history_list = getattr(self.history, metric, None)
+
         if not history_list or len(history_list) < window:
             return None
 
@@ -277,6 +302,77 @@ class ObservatoryState:
             return 0.0
 
         return numerator / denominator
+
+    def get_metric_average(self, metric: str, window: int = 20) -> Optional[float]:
+        """Возвращает среднее значение метрики за последние N точек."""
+        history_list = getattr(self.history, metric, None)
+        if not history_list:
+            return None
+
+        recent = history_list[-window:]
+        return sum(recent) / len(recent) if recent else None
+
+    def get_metric_std(self, metric: str, window: int = 20) -> Optional[float]:
+        """Возвращает стандартное отклонение метрики за последние N точек."""
+        import numpy as np
+
+        history_list = getattr(self.history, metric, None)
+        if not history_list or len(history_list) < 3:
+            return None
+
+        recent = history_list[-window:]
+        return float(np.std(recent))
+
+    def is_metric_degrading(self, metric: str, threshold_percent: float = 20.0) -> bool:
+        """
+        Проверяет, деградирует ли метрика (растет ли она сверх порога).
+        Полезно для HFR, FWHM, RMS.
+        """
+        history_list = getattr(self.history, metric, None)
+        if not history_list or len(history_list) < 10:
+            return False
+
+        baseline = (
+            history_list[-20:-10]
+            if len(history_list) >= 20
+            else history_list[: len(history_list) // 2]
+        )
+        recent = history_list[-10:]
+
+        if not baseline:
+            return False
+
+        baseline_mean = sum(baseline) / len(baseline)
+        recent_mean = sum(recent) / len(recent)
+
+        if baseline_mean == 0:
+            return False
+
+        change_percent = ((recent_mean - baseline_mean) / baseline_mean) * 100
+        return change_percent > threshold_percent
+
+    def clear_resolved_alerts(self):
+        """Очищает алерты, которые были решены (например, после успешного автофокуса)."""
+        # Оставляем только CRITICAL алерты для аудита
+        self.active_alerts = [
+            a for a in self.active_alerts if a.get("level") == "CRITICAL"
+        ]
+
+    def get_session_summary(self) -> Dict[str, Any]:
+        """Возвращает краткую сводку текущей сессии для LLM."""
+        return {
+            "target": self.active_targets[0].get("name")
+            if self.active_targets
+            else "Unknown",
+            "safety_status": self.safety_status,
+            "is_guiding": self.is_guiding_active,
+            "is_autofocus_running": self.is_autofocus_running,
+            "current_hfr": self.current_metrics.get("hfr"),
+            "current_rms_total": self.current_metrics.get("rms_total"),
+            "wind_speed": self.weather.get("wind_speed"),
+            "cloud_cover": self.weather.get("cloud_cover"),
+            "active_alerts_count": len(self.active_alerts),
+        }
 
     def get_full_state(self) -> Dict[str, Any]:
         """Возвращает полное состояние для AI-агентов и Frontend."""

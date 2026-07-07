@@ -557,6 +557,42 @@ async def list_vault_secrets():
 
 
 # ============================================================================
+# LLM & DIAGNOSTICS ENDPOINTS
+# ============================================================================
+@app.get("/api/v1/agents/llm-status", tags=["AI Agents"])
+async def get_llm_status():
+    """Проверяет доступность локального LLM (Ollama)."""
+    from app.agents.llm_client import llm_client
+
+    return {
+        "available": llm_client.is_available(),
+        "model": settings.ai_settings.model_name,
+        "host": settings.ai_settings.ollama_host,
+    }
+
+
+@app.post("/api/v1/agents/test-llm", tags=["AI Agents"])
+async def test_llm_generation(prompt: str = Query(..., description="Тестовый промпт")):
+    """Тестовый эндпоинт для проверки генерации LLM."""
+    from app.agents.llm_client import llm_client
+
+    if not llm_client.is_available():
+        raise HTTPException(status_code=503, detail="LLM (Ollama) is not available")
+
+    response = await llm_client.generate(
+        agent_name="Copilot", prompt=prompt, max_tokens=500
+    )
+
+    return {"prompt": prompt, "response": response}
+
+
+@app.get("/api/v1/observatory/session-summary", tags=["AI Agents"])
+async def get_session_summary():
+    """Возвращает краткую сводку текущей сессии для LLM контекста."""
+    return observatory_state.get_session_summary()
+
+
+# ============================================================================
 # SIMULATION MODE ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/simulation/start", tags=["Simulation"])
