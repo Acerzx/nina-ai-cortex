@@ -39,7 +39,13 @@ class NinaWebSocketClient:
             except asyncio.CancelledError:
                 pass
         if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+                logger.info("✅ NINA WebSocket closed")
+            except Exception as e:
+                logger.debug(f"Error closing WebSocket: {e}")
+            finally:
+                self._ws = None
 
     async def _connect_loop(self):
         """Цикл подключения с экспоненциальной задержкой при обрыве."""

@@ -74,5 +74,10 @@ class InfluxDBSubscriber:
 
     async def stop(self):
         if self.client:
-            await self.client.close()
-            logger.info("🛑 InfluxDB Subscriber disconnected")
+            try:
+                await self.client.close()
+                logger.info("✅ InfluxDB Subscriber client closed")
+            except Exception as e:
+                logger.debug(f"Error closing InfluxDB subscriber client: {e}")
+            finally:
+                self.client = None

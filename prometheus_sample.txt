@@ -1,0 +1,349 @@
+﻿# HELP nina_up 1 if the Prometheus exporter plugin is running
+# TYPE nina_up gauge
+nina_up{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 1
+# HELP nina_equipment 1 if equipment of the given type is connected, else 0
+# TYPE nina_equipment gauge
+nina_equipment{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4",type="camera"} 1
+nina_equipment{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4",type="filterwheel"} 1
+nina_equipment{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4",type="focuser"} 1
+nina_equipment{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4",type="rotator"} 1
+nina_equipment{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4",type="telescope"} 1
+nina_equipment{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4",type="weather"} 1
+# HELP nina_camera_temperature_celsius Camera sensor temperature in degrees Celsius
+# TYPE nina_camera_temperature_celsius gauge
+nina_camera_temperature_celsius{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 10
+# HELP nina_camera_cooler_power_percent Camera cooler power level (0-100)
+# TYPE nina_camera_cooler_power_percent gauge
+nina_camera_cooler_power_percent{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} -1
+# HELP nina_camera_download_timeout_total Total count of camera download timeout events
+# TYPE nina_camera_download_timeout_total counter
+# HELP nina_mount_altitude_degrees Mount altitude in degrees
+# TYPE nina_mount_altitude_degrees gauge
+nina_mount_altitude_degrees{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 14.583333313339635
+# HELP nina_mount_azimuth_degrees Mount azimuth in degrees
+# TYPE nina_mount_azimuth_degrees gauge
+nina_mount_azimuth_degrees{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 1.8846220187218599e-07
+# HELP nina_mount_ra_hours Mount RA in hours
+# TYPE nina_mount_ra_hours gauge
+nina_mount_ra_hours{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 17.76360059266099
+# HELP nina_mount_dec_degrees Mount Dec in degrees
+# TYPE nina_mount_dec_degrees gauge
+nina_mount_dec_degrees{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 90
+# HELP nina_mount_side_of_pier Mount side of pier (0=Unknown, 1=East, 2=West)
+# TYPE nina_mount_side_of_pier gauge
+nina_mount_side_of_pier{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 2
+# HELP nina_mount_tracking 1 if tracking enabled, else 0
+# TYPE nina_mount_tracking gauge
+nina_mount_tracking{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_mount_slewing 1 if currently slewing, else 0
+# TYPE nina_mount_slewing gauge
+nina_mount_slewing{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_mount_parked 1 if parked, else 0
+# TYPE nina_mount_parked gauge
+nina_mount_parked{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_mount_meridian_flip 1 between BeforeMeridianFlip and AfterMeridianFlip events, else 0
+# TYPE nina_mount_meridian_flip gauge
+# HELP nina_mount_side_of_pier_unknown_total Edge-triggered count of side-of-pier transitions into Unknown
+# TYPE nina_mount_side_of_pier_unknown_total counter
+# HELP nina_focuser_position Focuser position (steps)
+# TYPE nina_focuser_position gauge
+nina_focuser_position{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 7200
+# HELP nina_focuser_temperature_celsius Focuser ambient temperature in degrees Celsius
+# TYPE nina_focuser_temperature_celsius gauge
+nina_focuser_temperature_celsius{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} -4.56
+# HELP nina_focuser_temp_comp 1 if temperature compensation is enabled, else 0
+# TYPE nina_focuser_temp_comp gauge
+nina_focuser_temp_comp{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_focuser_temp_comp_available 1 if the driver supports temperature compensation, else 0
+# TYPE nina_focuser_temp_comp_available gauge
+nina_focuser_temp_comp_available{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 1
+# HELP nina_focuser_moving 1 if focuser is currently moving, else 0
+# TYPE nina_focuser_moving gauge
+nina_focuser_moving{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_focuser_settling 1 if focuser is settling after a move, else 0
+# TYPE nina_focuser_settling gauge
+nina_focuser_settling{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_filter_position Current filter-wheel slot index
+# TYPE nina_filter_position gauge
+nina_filter_position{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_filter_current 1 for the currently selected filter, 0 for previously selected
+# TYPE nina_filter_current gauge
+# HELP nina_guider_guiding 1 while guiding is active
+# TYPE nina_guider_guiding gauge
+# HELP nina_guider_rms_ra_arcsec Guider RA RMS in arcseconds
+# TYPE nina_guider_rms_ra_arcsec gauge
+# HELP nina_guider_rms_dec_arcsec Guider Dec RMS in arcseconds
+# TYPE nina_guider_rms_dec_arcsec gauge
+# HELP nina_guider_rms_total_arcsec Guider total RMS in arcseconds
+# TYPE nina_guider_rms_total_arcsec gauge
+# HELP nina_guider_peak_ra_arcsec Guider peak RA error in arcseconds
+# TYPE nina_guider_peak_ra_arcsec gauge
+# HELP nina_guider_peak_dec_arcsec Guider peak Dec error in arcseconds
+# TYPE nina_guider_peak_dec_arcsec gauge
+# HELP nina_guider_step_ra_distance Last guide step RA distance (raw guider units)
+# TYPE nina_guider_step_ra_distance gauge
+# HELP nina_guider_step_ra_duration_ms Last guide step RA pulse duration in ms
+# TYPE nina_guider_step_ra_duration_ms gauge
+# HELP nina_guider_step_dec_distance Last guide step Dec distance (raw guider units)
+# TYPE nina_guider_step_dec_distance gauge
+# HELP nina_guider_step_dec_duration_ms Last guide step Dec pulse duration in ms
+# TYPE nina_guider_step_dec_duration_ms gauge
+# HELP nina_guider_dithers_total Count of completed dithers
+# TYPE nina_guider_dithers_total counter
+# HELP nina_exposure_total Count of saved exposures, labeled by exposure-time/filter/gain/offset/binning
+# TYPE nina_exposure_total counter
+# HELP nina_detect_hfr Half-flux radius of last saved image
+# TYPE nina_detect_hfr gauge
+# HELP nina_detect_stars Detected stars on last saved image
+# TYPE nina_detect_stars gauge
+# HELP nina_detect_rms_arcsec Recorded total guiding RMS for last image
+# TYPE nina_detect_rms_arcsec gauge
+# HELP nina_detect_camera_temperature_celsius Camera temperature recorded on last image
+# TYPE nina_detect_camera_temperature_celsius gauge
+# HELP nina_image_mean Image mean ADU
+# TYPE nina_image_mean gauge
+# HELP nina_image_median Image median ADU
+# TYPE nina_image_median gauge
+# HELP nina_image_stdev Image stdev ADU
+# TYPE nina_image_stdev gauge
+# HELP nina_image_mad Image median absolute deviation
+# TYPE nina_image_mad gauge
+# HELP nina_image_min_adu Image minimum ADU
+# TYPE nina_image_min_adu gauge
+# HELP nina_image_max_adu Image maximum ADU
+# TYPE nina_image_max_adu gauge
+# HELP nina_image_hfr_stdev HFR standard deviation across stars
+# TYPE nina_image_hfr_stdev gauge
+# HELP nina_autofocus_running 1 while an autofocus run is in progress, else 0
+# TYPE nina_autofocus_running gauge
+# HELP nina_autofocus_success_total Count of successful autofocus runs
+# TYPE nina_autofocus_success_total counter
+# HELP nina_autofocus_failure_total Count of failed autofocus runs
+# TYPE nina_autofocus_failure_total counter
+# HELP nina_autofocus_rsquares R-squared of fit type for last autofocus report
+# TYPE nina_autofocus_rsquares gauge
+# HELP nina_autofocus_final_hfr Final HFR achieved by last autofocus run
+# TYPE nina_autofocus_final_hfr gauge
+# HELP nina_autofocus_duration_seconds Wall-clock duration of last autofocus run in seconds
+# TYPE nina_autofocus_duration_seconds gauge
+# HELP nina_autofocus_initial_position Focuser position at start of last autofocus run (steps)
+# TYPE nina_autofocus_initial_position gauge
+# HELP nina_autofocus_initial_hfr HFR at start of last autofocus run
+# TYPE nina_autofocus_initial_hfr gauge
+# HELP nina_autofocus_calculated_position Focuser position chosen by last autofocus run (steps)
+# TYPE nina_autofocus_calculated_position gauge
+# HELP nina_autofocus_calculated_hfr HFR at chosen focuser position from last autofocus run
+# TYPE nina_autofocus_calculated_hfr gauge
+# HELP nina_status 1 while sequence item is running, else 0
+# TYPE nina_status gauge
+# HELP nina_status_count_started_total Count of sequence-item runs started
+# TYPE nina_status_count_started_total counter
+# HELP nina_status_count_completed_total Count of sequence-item runs completed
+# TYPE nina_status_count_completed_total counter
+# HELP nina_dome_azimuth_degrees Dome azimuth in degrees
+# TYPE nina_dome_azimuth_degrees gauge
+# HELP nina_dome_slewing 1 if dome is slewing, else 0
+# TYPE nina_dome_slewing gauge
+# HELP nina_dome_at_park 1 if dome is at park, else 0
+# TYPE nina_dome_at_park gauge
+# HELP nina_dome_at_home 1 if dome is at home, else 0
+# TYPE nina_dome_at_home gauge
+# HELP nina_dome_shutter_open 1 if shutter status is ShutterOpen, else 0
+# TYPE nina_dome_shutter_open gauge
+# HELP nina_dome_shutter_state Raw ShutterState enum value
+# TYPE nina_dome_shutter_state gauge
+# HELP nina_rotator_position_degrees Rotator sky position in degrees
+# TYPE nina_rotator_position_degrees gauge
+nina_rotator_position_degrees{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_rotator_mechanical_position_degrees Rotator mechanical position in degrees
+# TYPE nina_rotator_mechanical_position_degrees gauge
+nina_rotator_mechanical_position_degrees{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_rotator_moving 1 if rotator is moving, else 0
+# TYPE nina_rotator_moving gauge
+nina_rotator_moving{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_rotator_synced 1 if rotator is synced, else 0
+# TYPE nina_rotator_synced gauge
+nina_rotator_synced{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_flat_brightness Flat panel brightness 0..MaxBrightness
+# TYPE nina_flat_brightness gauge
+# HELP nina_flat_light_on 1 if flat panel light is on, else 0
+# TYPE nina_flat_light_on gauge
+# HELP nina_flat_cover_open 1 if CoverState == Open, else 0
+# TYPE nina_flat_cover_open gauge
+# HELP nina_flat_cover_state Raw CoverState enum value
+# TYPE nina_flat_cover_state gauge
+# HELP nina_safety_is_safe 1 if the safety monitor reports safe, else 0
+# TYPE nina_safety_is_safe gauge
+# HELP nina_weather_temperature_celsius Outdoor temperature in degrees Celsius
+# TYPE nina_weather_temperature_celsius gauge
+nina_weather_temperature_celsius{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 30
+# HELP nina_weather_humidity_percent Outdoor humidity 0..100
+# TYPE nina_weather_humidity_percent gauge
+nina_weather_humidity_percent{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 45
+# HELP nina_weather_pressure_hpa Atmospheric pressure in hPa
+# TYPE nina_weather_pressure_hpa gauge
+nina_weather_pressure_hpa{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 981.4
+# HELP nina_weather_cloud_cover_percent Cloud cover 0..100
+# TYPE nina_weather_cloud_cover_percent gauge
+nina_weather_cloud_cover_percent{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 24
+# HELP nina_weather_wind_speed_mps Wind speed in m/s
+# TYPE nina_weather_wind_speed_mps gauge
+nina_weather_wind_speed_mps{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 2.3
+# HELP nina_weather_wind_direction_degrees Wind direction in degrees
+# TYPE nina_weather_wind_direction_degrees gauge
+nina_weather_wind_direction_degrees{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 208
+# HELP nina_weather_wind_gust_mps Peak 3-second wind speed (last 2 min) m/s
+# TYPE nina_weather_wind_gust_mps gauge
+nina_weather_wind_gust_mps{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 3.4
+# HELP nina_weather_dew_point_celsius Dew point in degrees Celsius
+# TYPE nina_weather_dew_point_celsius gauge
+nina_weather_dew_point_celsius{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 16.7
+# HELP nina_weather_sky_temperature_celsius Sky temperature in degrees Celsius
+# TYPE nina_weather_sky_temperature_celsius gauge
+# HELP nina_weather_sky_brightness_lux Sky brightness in lux
+# TYPE nina_weather_sky_brightness_lux gauge
+# HELP nina_weather_sky_quality_mpsas Sky quality in mag/arcsec^2
+# TYPE nina_weather_sky_quality_mpsas gauge
+# HELP nina_weather_rain_rate_mmh Rain rate in mm/h
+# TYPE nina_weather_rain_rate_mmh gauge
+nina_weather_rain_rate_mmh{profile_name="NoobAstroTeam_Askar 80ED",host_name="DESKTOP-HON3MK4"} 0
+# HELP nina_weather_star_fwhm_arcsec Star FWHM (seeing) in arcseconds
+# TYPE nina_weather_star_fwhm_arcsec gauge
+# HELP nina_switch_value Current value of the named switch (readonly + writable)
+# TYPE nina_switch_value gauge
+# HELP nina_switch_writable 1 if the switch is writable, 0 if readonly
+# TYPE nina_switch_writable gauge
+# HELP nina_switch_target_value Target value of a writable switch
+# TYPE nina_switch_target_value gauge
+# HELP nina_switch_min Minimum value of a writable switch
+# TYPE nina_switch_min gauge
+# HELP nina_switch_max Maximum value of a writable switch
+# TYPE nina_switch_max gauge
+# HELP nina_switch_step_size Step size of a writable switch
+# TYPE nina_switch_step_size gauge
+# HELP dotnet_collection_count_total GC collection count
+# TYPE dotnet_collection_count_total counter
+dotnet_collection_count_total{generation="0"} 1490
+dotnet_collection_count_total{generation="1"} 601
+dotnet_collection_count_total{generation="2"} 19
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1783411691.5037622
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 161.84375
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 2240239505408
+# HELP process_working_set_bytes Process working set
+# TYPE process_working_set_bytes gauge
+process_working_set_bytes 1578156032
+# HELP process_private_memory_bytes Process private memory size
+# TYPE process_private_memory_bytes gauge
+process_private_memory_bytes 1432158208
+# HELP process_open_handles Number of open handles
+# TYPE process_open_handles gauge
+process_open_handles 2544
+# HELP process_num_threads Total number of threads
+# TYPE process_num_threads gauge
+process_num_threads 64
+# HELP dotnet_total_memory_bytes Total known allocated memory
+# TYPE dotnet_total_memory_bytes gauge
+dotnet_total_memory_bytes 629430176
+# HELP prometheus_net_metric_families Number of metric families currently registered.
+# TYPE prometheus_net_metric_families gauge
+prometheus_net_metric_families{metric_type="counter"} 11
+prometheus_net_metric_families{metric_type="gauge"} 116
+prometheus_net_metric_families{metric_type="summary"} 0
+prometheus_net_metric_families{metric_type="histogram"} 0
+# HELP prometheus_net_metric_instances Number of metric instances currently registered across all metric families.
+# TYPE prometheus_net_metric_instances gauge
+prometheus_net_metric_instances{metric_type="counter"} 5
+prometheus_net_metric_instances{metric_type="gauge"} 89
+prometheus_net_metric_instances{metric_type="summary"} 0
+prometheus_net_metric_instances{metric_type="histogram"} 0
+# HELP prometheus_net_metric_timeseries Number of metric timeseries currently generated from all metric instances.
+# TYPE prometheus_net_metric_timeseries gauge
+prometheus_net_metric_timeseries{metric_type="counter"} 5
+prometheus_net_metric_timeseries{metric_type="gauge"} 89
+prometheus_net_metric_timeseries{metric_type="summary"} 0
+prometheus_net_metric_timeseries{metric_type="histogram"} 0
+# HELP prometheus_net_exemplars_recorded_total Number of exemplars that were accepted into in-memory storage in the prometheus-net SDK.
+# TYPE prometheus_net_exemplars_recorded_total counter
+prometheus_net_exemplars_recorded_total 0
+# HELP prometheus_net_eventcounteradapter_sources_connected_total Number of event sources that are currently connected to the adapter.
+# TYPE prometheus_net_eventcounteradapter_sources_connected_total gauge
+prometheus_net_eventcounteradapter_sources_connected_total 6
+# HELP prometheus_net_meteradapter_instruments_connected Number of instruments that are currently connected to the adapter.
+# TYPE prometheus_net_meteradapter_instruments_connected gauge
+prometheus_net_meteradapter_instruments_connected 25
+# HELP system_runtime_dotnet_gc_collections ({collection}) The number of garbage collections that have occurred since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_gc_collections gauge
+system_runtime_dotnet_gc_collections{gc_heap_generation="gen2"} 19
+system_runtime_dotnet_gc_collections{gc_heap_generation="gen1"} 582
+system_runtime_dotnet_gc_collections{gc_heap_generation="gen0"} 889
+# HELP system_runtime_dotnet_process_memory_working_set (By) The number of bytes of physical memory mapped to the process context. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_process_memory_working_set gauge
+system_runtime_dotnet_process_memory_working_set 1578156032
+# HELP system_runtime_dotnet_gc_heap_total_allocated (By) The approximate number of bytes allocated on the managed GC heap since the process has started. The returned value does not include any native allocations. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_gc_heap_total_allocated gauge
+system_runtime_dotnet_gc_heap_total_allocated 9308230504
+# HELP system_runtime_dotnet_gc_last_collection_memory_committed_size (By) The amount of committed virtual memory in use by the .NET GC, as observed during the latest garbage collection. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_gc_last_collection_memory_committed_size gauge
+system_runtime_dotnet_gc_last_collection_memory_committed_size 755109888
+# HELP system_runtime_dotnet_gc_last_collection_heap_size (By) The managed GC heap size (including fragmentation), as observed during the latest garbage collection. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_gc_last_collection_heap_size gauge
+system_runtime_dotnet_gc_last_collection_heap_size{gc_heap_generation="gen0"} 1886544
+system_runtime_dotnet_gc_last_collection_heap_size{gc_heap_generation="gen1"} 1708712
+system_runtime_dotnet_gc_last_collection_heap_size{gc_heap_generation="gen2"} 479743984
+system_runtime_dotnet_gc_last_collection_heap_size{gc_heap_generation="loh"} 170751904
+system_runtime_dotnet_gc_last_collection_heap_size{gc_heap_generation="poh"} 260320
+# HELP system_runtime_dotnet_gc_last_collection_heap_fragmentation_size (By) The heap fragmentation, as observed during the latest garbage collection. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_gc_last_collection_heap_fragmentation_size gauge
+system_runtime_dotnet_gc_last_collection_heap_fragmentation_size{gc_heap_generation="gen0"} 1886280
+system_runtime_dotnet_gc_last_collection_heap_fragmentation_size{gc_heap_generation="gen1"} 98104
+system_runtime_dotnet_gc_last_collection_heap_fragmentation_size{gc_heap_generation="gen2"} 21453976
+system_runtime_dotnet_gc_last_collection_heap_fragmentation_size{gc_heap_generation="loh"} 3051064
+system_runtime_dotnet_gc_last_collection_heap_fragmentation_size{gc_heap_generation="poh"} 0
+# HELP system_runtime_dotnet_gc_pause_time (s) The total amount of time paused in GC since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_gc_pause_time gauge
+system_runtime_dotnet_gc_pause_time 8.149183
+# HELP system_runtime_dotnet_jit_compiled_il_size (By) Count of bytes of intermediate language that have been compiled since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_jit_compiled_il_size gauge
+system_runtime_dotnet_jit_compiled_il_size 6318244
+# HELP system_runtime_dotnet_jit_compiled_methods ({method}) The number of times the JIT compiler (re)compiled methods since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_jit_compiled_methods gauge
+system_runtime_dotnet_jit_compiled_methods 81522
+# HELP system_runtime_dotnet_jit_compilation_time (s) The number of times the JIT compiler (re)compiled methods since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_jit_compilation_time gauge
+system_runtime_dotnet_jit_compilation_time 57.385235
+# HELP system_runtime_dotnet_monitor_lock_contentions ({contention}) The number of times there was contention when trying to acquire a monitor lock since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_monitor_lock_contentions gauge
+system_runtime_dotnet_monitor_lock_contentions 2887
+# HELP system_runtime_dotnet_thread_pool_thread_count ({thread}) The number of thread pool threads that currently exist. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_thread_pool_thread_count gauge
+system_runtime_dotnet_thread_pool_thread_count 5
+# HELP system_runtime_dotnet_thread_pool_work_item_count ({work_item}) The number of work items that the thread pool has completed since the process has started. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_thread_pool_work_item_count gauge
+system_runtime_dotnet_thread_pool_work_item_count 506241
+# HELP system_runtime_dotnet_thread_pool_queue_length ({work_item}) The number of work items that are currently queued to be processed by the thread pool. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_thread_pool_queue_length gauge
+system_runtime_dotnet_thread_pool_queue_length 0
+# HELP system_runtime_dotnet_timer_count ({timer}) The number of timer instances that are currently active. An active timer is registered to tick at some point in the future and has not yet been canceled. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_timer_count gauge
+system_runtime_dotnet_timer_count 64
+# HELP system_runtime_dotnet_assembly_count ({assembly}) The number of .NET assemblies that are currently loaded. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_assembly_count gauge
+system_runtime_dotnet_assembly_count 325
+# HELP system_runtime_dotnet_process_cpu_count ({cpu}) The number of processors available to the process. (ObservableUpDownCounter`1)
+# TYPE system_runtime_dotnet_process_cpu_count gauge
+system_runtime_dotnet_process_cpu_count 4
+# HELP system_runtime_dotnet_process_cpu_time (s) CPU time used by the process. (ObservableCounter`1)
+# TYPE system_runtime_dotnet_process_cpu_time gauge
+system_runtime_dotnet_process_cpu_time{cpu_mode="user"} 121.921875
+system_runtime_dotnet_process_cpu_time{cpu_mode="system"} 39.90625
+# HELP system_runtime_dotnet_exceptions ({exception}) The number of exceptions that have been thrown in managed code. (Counter`1)
+# TYPE system_runtime_dotnet_exceptions gauge
+system_runtime_dotnet_exceptions{error_type="SocketException"} 3
+system_runtime_dotnet_exceptions{error_type="FormatException"} 1
+

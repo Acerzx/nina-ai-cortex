@@ -2,7 +2,14 @@
 ObservatoryState — единое состояние обсерватории.
 Агрегирует данные из всех источников (EventBus, Prometheus, InfluxDB, Shadow Engine)
 и предоставляет API для Multi-Agent Swarm (LangGraph).
-Устраняет Упрощение #17.
+
+Архитектура источников метрик:
+- InfluxDB (основной): через INFLUXDB_UPDATE от InfluxDBMetricsProvider
+- Prometheus (резервный): через PROMETHEUS_UPDATE от PrometheusScraper
+- Session Metadata: через NEW_FRAME от SessionWatcher
+- Weather: через WEATHER_UPDATE от WeatherData watcher
+- FITS Headers: через FITS_HEADER_PARSED от FITSHeaderScanner
+- Safety/Events: через LOG_EVENT от LogTailer
 """
 
 import logging
@@ -28,7 +35,7 @@ class MetricsHistory(BaseModel):
     wind_speed: List[float] = Field(default_factory=list)
     humidity: List[float] = Field(default_factory=list)
 
-    # ИСПРАВЛЕНО: ClassVar указывает Pydantic, что это константа класса, а не поле модели
+    # ClassVar указывает Pydantic, что это константа класса
     MAX_POINTS: ClassVar[int] = 100
 
 
@@ -49,7 +56,7 @@ class ObservatoryState:
     """
 
     def __init__(self):
-        # === Текущие метрики (обновляются из Prometheus/Session Metadata) ===
+        # === Текущие метрики (обновляются из Prometheus/Session Metadata/InfluxDB) ===
         self.current_metrics: Dict[str, Any] = {
             "hfr": None,
             "fwhm": None,
@@ -111,6 +118,10 @@ class ObservatoryState:
         self.is_guiding_active: bool = False
         self.is_autofocus_running: bool = False
 
+        # === Источники данных ===
+        self._influxdb_active: bool = False
+        self._prometheus_active: bool = False
+
         self._subscribed = False
 
     async def start(self):
@@ -143,6 +154,9 @@ class ObservatoryState:
         # События гида и безопасности из логов
         event_bus.subscribe("LOG_EVENT", self._on_log_event)
 
+        # LiveStack статус
+        event_bus.subscribe("LIVESTACK_STATUS", self._on_livestack_status)
+
         self._subscribed = True
         logger.info("🧠 ObservatoryState initialized and subscribed to events")
 
@@ -150,28 +164,40 @@ class ObservatoryState:
         """
         Обновление метрик из InfluxDB (ОСНОВНОЙ ИСТОЧНИК).
 
-        Маппинг метрик InfluxDB на внутренние имена ObservatoryState.
+        Данные приходят от InfluxDBMetricsProvider, который выполняет
+        Flux queries к InfluxDB Exporter (daleghent plugin).
         """
+        self._influxdb_active = True
+
         # === Camera ===
-        if "camera_temp" in data:
+        if "camera_temp" in data and data["camera_temp"] is not None:
             self.current_metrics["camera_temp"] = data["camera_temp"]
             self._append_history("temperature", data["camera_temp"])
+
+        if "camera_cooler_power" in data:
+            self.current_metrics["camera_cooler_power"] = data["camera_cooler_power"]
 
         # === Focuser ===
         if "focuser_position" in data:
             self.current_metrics["focuser_position"] = data["focuser_position"]
 
+        if "focuser_temp" in data:
+            self.current_metrics["focuser_temp"] = data["focuser_temp"]
+
         # === Guider (PHD2) ===
-        if "guider_rms_ra" in data:
+        if "guider_rms_ra" in data and data["guider_rms_ra"] is not None:
             self.current_metrics["rms_ra"] = data["guider_rms_ra"]
             self._append_history("rms_ra", data["guider_rms_ra"])
 
-        if "guider_rms_dec" in data:
+        if "guider_rms_dec" in data and data["guider_rms_dec"] is not None:
             self.current_metrics["rms_dec"] = data["guider_rms_dec"]
             self._append_history("rms_dec", data["guider_rms_dec"])
 
         if "guider_rms_total" in data:
             self.current_metrics["rms_total"] = data["guider_rms_total"]
+
+        if data.get("guider_guiding") is not None:
+            self.is_guiding_active = data["guider_guiding"]
 
         # === Mount ===
         if "mount_altitude" in data:
@@ -183,6 +209,10 @@ class ObservatoryState:
         # === Rotator ===
         if "rotator_angle" in data:
             self.current_metrics["rotator_angle"] = data["rotator_angle"]
+
+        # === Filter ===
+        if "filter_current" in data and data["filter_current"]:
+            self.current_metrics["filter"] = data["filter_current"]
 
         # === Weather ===
         if "wx_temperature" in data:
@@ -211,12 +241,15 @@ class ObservatoryState:
         if "wx_pressure" in data:
             self.weather["pressure"] = data["wx_pressure"]
 
-        # === Image Quality ===
-        if "image_hfr" in data:
+        if "wx_sky_quality" in data:
+            self.weather["sky_quality"] = data["wx_sky_quality"]
+
+        # === Image Quality (from ImageSaved event) ===
+        if "image_hfr" in data and data["image_hfr"] is not None:
             self.current_metrics["hfr"] = data["image_hfr"]
             self._append_history("hfr", data["image_hfr"])
 
-        if "image_fwhm" in data:
+        if "image_fwhm" in data and data["image_fwhm"] is not None:
             self.current_metrics["fwhm"] = data["image_fwhm"]
             self._append_history("fwhm", data["image_fwhm"])
 
@@ -226,8 +259,29 @@ class ObservatoryState:
         if "image_median" in data:
             self.current_metrics["median_adu"] = data["image_median"]
 
+        if "image_eccentricity" in data:
+            self.current_metrics["eccentricity"] = data["image_eccentricity"]
+
+        # === Safety ===
+        if data.get("safety_is_safe") is not None:
+            self.safety_status = "SAFE" if data["safety_is_safe"] else "UNSAFE"
+
     async def _on_prometheus_update(self, data: Dict[str, Any]):
-        """Обновление метрик из Prometheus."""
+        """
+        Обновление метрик из Prometheus (РЕЗЕРВНЫЙ ИСТОЧНИК).
+
+        Используется только если InfluxDB недоступен.
+        Если InfluxDB активен, Prometheus данные игнорируются
+        чтобы избежать дублирования и конфликтов.
+        """
+        # Если InfluxDB работает, игнорируем Prometheus
+        if self._influxdb_active:
+            self._prometheus_active = False
+            return
+
+        self._prometheus_active = True
+
+        # Маппинг Prometheus метрик на внутренние имена
         mapping = {
             "image_hfr": "hfr",
             "image_fwhm": "fwhm",
@@ -255,6 +309,20 @@ class ObservatoryState:
         self._append_history("rms_dec", data.get("guider_rms_dec"))
         self._append_history("temperature", data.get("camera_temp"))
 
+        # Погода из Prometheus (wx_* префикс)
+        if data.get("wx_temp") is not None:
+            self.weather["temperature"] = data["wx_temp"]
+        if data.get("wx_humidity") is not None:
+            self.weather["humidity"] = data["wx_humidity"]
+            self._append_history("humidity", data["wx_humidity"])
+        if data.get("wx_wind_speed") is not None:
+            self.weather["wind_speed"] = data["wx_wind_speed"]
+            self._append_history("wind_speed", data["wx_wind_speed"])
+        if data.get("wx_wind_gust") is not None:
+            self.weather["wind_gust"] = data["wx_wind_gust"]
+        if data.get("wx_cloud_cover") is not None:
+            self.weather["cloud_cover"] = data["wx_cloud_cover"]
+
     async def _on_new_frame(self, data: Dict[str, Any]):
         """Обработка нового кадра из Session Metadata."""
         frame = data.get("frame", {})
@@ -262,8 +330,11 @@ class ObservatoryState:
         if frame:
             if frame.get("hfr"):
                 self._append_history("hfr", frame["hfr"])
+                self.current_metrics["hfr"] = frame["hfr"]
+
             if frame.get("fwhm"):
                 self._append_history("fwhm", frame["fwhm"])
+                self.current_metrics["fwhm"] = frame["fwhm"]
 
             # Обновляем текущие метрики из кадра
             if frame.get("exposure_time"):
@@ -272,9 +343,11 @@ class ObservatoryState:
                 self.current_metrics["gain"] = frame["gain"]
             if frame.get("filter"):
                 self.current_metrics["filter"] = frame["filter"]
+            if frame.get("stars"):
+                self.current_metrics["star_count"] = frame["stars"]
 
     async def _on_weather_update(self, data: Dict[str, Any]):
-        """Обновление погоды."""
+        """Обновление погоды из WeatherData.json."""
         weather = data.get("weather", {})
 
         for key, value in weather.items():
@@ -308,9 +381,11 @@ class ObservatoryState:
             self.active_alerts = self.active_alerts[-50:]
 
     async def _on_flat_mode_start(self, data: Dict[str, Any]):
+        """Начало FLAT_MODE."""
         self.is_flat_mode = True
 
     async def _on_flat_mode_end(self, data: Dict[str, Any]):
+        """Окончание FLAT_MODE."""
         self.is_flat_mode = False
 
     async def _on_log_event(self, data: Dict[str, Any]):
@@ -342,11 +417,14 @@ class ObservatoryState:
 
         history_list = getattr(self.history, metric, None)
         if history_list is not None and isinstance(history_list, list):
-            history_list.append(float(value))
+            try:
+                history_list.append(float(value))
 
-            # Обрезаем историю до MAX_POINTS
-            if len(history_list) > self.history.MAX_POINTS:
-                history_list.pop(0)
+                # Обрезаем историю до MAX_POINTS
+                if len(history_list) > self.history.MAX_POINTS:
+                    history_list.pop(0)
+            except (ValueError, TypeError):
+                pass
 
     def log_ai_action(self, agent: str, action: str, reason: str, result: str):
         """Логирует действие AI (для объяснимости)."""
@@ -432,8 +510,8 @@ class ObservatoryState:
         return change_percent > threshold_percent
 
     def clear_resolved_alerts(self):
-        """Очищает алерты, которые были решены (например, после успешного автофокуса)."""
-        # Оставляем только CRITICAL алерты для аудита
+        """Очищает алерты, которые были решены."""
+        # Оставляем только CRITICAL для аудита
         self.active_alerts = [
             a for a in self.active_alerts if a.get("level") == "CRITICAL"
         ]
@@ -452,6 +530,9 @@ class ObservatoryState:
             "wind_speed": self.weather.get("wind_speed"),
             "cloud_cover": self.weather.get("cloud_cover"),
             "active_alerts_count": len(self.active_alerts),
+            "data_source": "influxdb"
+            if self._influxdb_active
+            else ("prometheus" if self._prometheus_active else "none"),
         }
 
     def get_full_state(self) -> Dict[str, Any]:
@@ -470,6 +551,10 @@ class ObservatoryState:
             "active_alerts": self.active_alerts,
             "targets": self.active_targets,
             "recent_ai_actions": list(self.ai_action_log)[-10:],
+            "data_sources": {
+                "influxdb_active": self._influxdb_active,
+                "prometheus_active": self._prometheus_active,
+            },
         }
 
 

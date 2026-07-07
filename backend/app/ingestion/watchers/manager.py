@@ -171,6 +171,16 @@ class WatcherManager:
             except Exception as e:
                 logger.error(f"Error stopping poller: {e}")
 
+        # ИСПРАВЛЕНО: Останавливаем InfluxDB Metrics Provider
+        try:
+            from app.ingestion.providers.influxdb_metrics import (
+                influxdb_metrics_provider,
+            )
+
+            await influxdb_metrics_provider.stop()
+        except Exception as e:
+            logger.debug(f"Error stopping InfluxDB Metrics Provider: {e}")
+
         # Останавливаем WebSocket client
         if self.ws_client:
             try:

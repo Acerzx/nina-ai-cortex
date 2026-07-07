@@ -79,7 +79,13 @@ class LLMClient:
     async def close(self):
         """Закрывает HTTP клиент."""
         if self._client:
-            await self._client.aclose()
+            try:
+                await self._client.aclose()
+                logger.info("✅ LLM Client closed")
+            except Exception as e:
+                logger.debug(f"Error closing LLM client: {e}")
+            finally:
+                self._client = None
 
     async def _check_availability(self):
         """Проверяет доступность Ollama."""

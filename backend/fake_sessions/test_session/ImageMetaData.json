@@ -1,0 +1,64 @@
+{
+  "Frames": [
+    {
+      "Index": 1,
+      "ExposureTime": 60.0,
+      "Filter": "Ha",
+      "Gain": 85,
+      "Offset": 10,
+      "Temperature": -14.861698493202415,
+      "HFR": 2.6544655612563024,
+      "FWHM": 3.096147865715834,
+      "Stars": 155,
+      "RmsTotal": 1.185630879764701,
+      "ImageType": "LIGHT",
+      "Date": "2026-07-07",
+      "Time": "13:45:48"
+    },
+    {
+      "Index": 2,
+      "ExposureTime": 60.0,
+      "Filter": "Ha",
+      "Gain": 85,
+      "Offset": 10,
+      "Temperature": -15.015918113450914,
+      "HFR": 2.42642819146744,
+      "FWHM": 2.6738163680411002,
+      "Stars": 144,
+      "RmsTotal": 1.153812202559688,
+      "ImageType": "LIGHT",
+      "Date": "2026-07-07",
+      "Time": "13:46:53"
+    },
+    {
+      "Index": 3,
+      "ExposureTime": 60.0,
+      "Filter": "Ha",
+      "Gain": 85,
+      "Offset": 10,
+      "Temperature": -15.043348096213156,
+      "HFR": 4.3556268562586355,
+      "FWHM": 2.6422657418556486,
+      "Stars": 159,
+      "RmsTotal": 1.1792572919762556,
+      "ImageType": "LIGHT",
+      "Date": "2026-07-07",
+      "Time": "13:47:58"
+    },
+    {
+      "Index": 4,
+      "ExposureTime": 60.0,
+      "Filter": "Ha",
+      "Gain": 85,
+      "Offset": 10,
+      "Temperature": -14.987138997994121,
+      "HFR": 4.73532187693208,
+      "FWHM": 2.5770004804262,
+      "Stars": 164,
+      "RmsTotal": 1.1516408825225235,
+      "ImageType": "LIGHT",
+      "Date": "2026-07-07",
+      "Time": "13:49:03"
+    }
+  ]
+}

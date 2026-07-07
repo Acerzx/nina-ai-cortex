@@ -172,8 +172,15 @@ class InfluxDBMetricsProvider:
             except asyncio.CancelledError:
                 pass
 
+        # ИСПРАВЛЕНО: Гарантированное закрытие клиента
         if self._client:
-            await self._client.close()
+            try:
+                await self._client.close()
+                logger.info("✅ InfluxDB client closed")
+            except Exception as e:
+                logger.debug(f"Error closing InfluxDB client: {e}")
+            finally:
+                self._client = None
 
         logger.info("🛑 InfluxDB Metrics Provider stopped")
 

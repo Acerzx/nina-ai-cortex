@@ -118,6 +118,7 @@ class ModeManager:
             except asyncio.CancelledError:
                 pass
 
+        # ИСПРАВЛЕНО: Нет постоянного клиента, создаем каждый раз
         logger.info("🛑 Mode Manager stopped")
 
     async def set_mode(self, mode: OperationMode, reason: str = "Manual override"):
@@ -175,41 +176,33 @@ class ModeManager:
         """
         Проверяет доступность LLM API (Ollama).
 
-        ИСПРАВЛЕНО: Тихая проверка без спама логов.
-        Логирует только изменения состояния или раз в 5 минут.
+        ИСПРАВЛЕНО: Используем контекстный менеджер для автоматического закрытия.
         """
         try:
             ollama_host = settings.ai_settings.ollama_host
 
-            # ИСПРАВЛЕНО: Создаем клиент с отключенным логированием
+            # ИСПРАВЛЕНО: async with гарантирует закрытие клиента
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"{ollama_host}/api/tags")
 
                 is_healthy = response.status_code == 200
 
-                # Логируем только если состояние изменилось
                 if is_healthy != self.llm_healthy:
                     self.llm_healthy = is_healthy
 
                     if is_healthy:
                         logger.info("✅ LLM API восстановлен")
-
-                        # Возвращаемся в FULL_AI если были в SAFE_AUTONOMOUS
                         if self.current_mode == OperationMode.SAFE_AUTONOMOUS:
                             await self.set_mode(
                                 OperationMode.FULL_AI, reason="LLM API восстановлен"
                             )
                     else:
                         logger.warning("⚠️ LLM API недоступен")
-
-                        # Переключаемся в SAFE_AUTONOMOUS если были в FULL_AI
                         if self.current_mode == OperationMode.FULL_AI:
                             await self.set_mode(
                                 OperationMode.SAFE_AUTONOMOUS,
                                 reason="LLM API недоступен",
                             )
-
-                            # Публикуем алерт
                             await event_bus.publish(
                                 "ALERT",
                                 {
@@ -220,7 +213,6 @@ class ModeManager:
                                 },
                             )
 
-                # ИСПРАВЛЕНО: Периодический лог статуса (раз в 5 минут)
                 now = datetime.now()
                 should_log_periodic = (
                     self._last_health_log_time is None
@@ -238,7 +230,6 @@ class ModeManager:
             if self.llm_healthy:
                 self.llm_healthy = False
                 logger.warning("⚠️ Невозможно подключиться к LLM API")
-
                 if self.current_mode == OperationMode.FULL_AI:
                     await self.set_mode(
                         OperationMode.SAFE_AUTONOMOUS,
@@ -246,7 +237,6 @@ class ModeManager:
                     )
 
         except Exception as e:
-            # Логируем только неожиданные ошибки
             logger.debug(f"LLM health check error: {type(e).__name__}")
 
     def get_stats(self) -> Dict[str, Any]:

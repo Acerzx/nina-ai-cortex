@@ -12,11 +12,22 @@ class SafetyInterceptor:
 
     async def start(self):
         event_bus.subscribe("SEQUENCE_ITEM_STARTED", self._handle_item)
+        logger.info("🛡️ Safety Interceptor started")
+
+    async def stop(self):
+        """Корректная остановка Safety Interceptor."""
+        try:
+            event_bus.unsubscribe("SEQUENCE_ITEM_STARTED", self._handle_item)
+            logger.info("🛑 Safety Interceptor stopped")
+        except Exception as e:
+            logger.debug(f"Error stopping Safety Interceptor: {e}")
 
     async def _handle_item(self, data: dict):
         item_type = data.get("Type", "")
+
         if "ShutdownPcInstruction" in item_type or "ShutdownNina" in item_type:
             path = state_tracker.state.container_path
+
             # Проверяем, находимся ли мы в финальном блоке (EndAreaContainer / Деактивация)
             is_final_stage = any(
                 "EndArea" in p or "Деактивация" in p or "Отключение" in p for p in path

@@ -101,10 +101,34 @@ class RAGEngine:
 
     async def close(self):
         """Закрывает подключения."""
+        # Закрываем HTTP клиент (Ollama)
         if self._http_client:
-            await self._http_client.aclose()
+            try:
+                await self._http_client.aclose()
+                logger.debug("RAG HTTP client closed")
+            except Exception as e:
+                logger.debug(f"Error closing RAG HTTP client: {e}")
+            finally:
+                self._http_client = None
+
+        # Закрываем Qdrant клиент (использует aiohttp внутри)
         if self._client:
-            await self._client.close()
+            try:
+                await self._client.close()
+                logger.debug("RAG Qdrant client closed")
+            except Exception as e:
+                logger.debug(f"Error closing RAG Qdrant client: {e}")
+            finally:
+                self._client = None
+
+        # Отписываемся от событий
+        try:
+            event_bus.unsubscribe("SESSION_COMPLETED", self._on_session_completed)
+            event_bus.unsubscribe("NIGHT_SUMMARY", self._on_night_summary)
+        except Exception:
+            pass
+
+        logger.info("🛑 RAG Engine closed")
 
     async def _get_embedding(self, text: str) -> Optional[List[float]]:
         """
