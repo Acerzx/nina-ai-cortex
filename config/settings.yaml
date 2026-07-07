@@ -1,96 +1,283 @@
+# ============================================================================
+# N.I.N.A. AI Cortex — Конфигурация
+# ============================================================================
+# Все пути параметризированы. Система работает на любом ПК.
+# Переменные окружения подставляются через ${VAR_NAME}
+#
+# Файл разделён на секции:
+#   1. nina_environment — пути к файлам N.I.N.A.
+#   2. network          — сетевые подключения
+#   3. influxdb         — time-series БД для метрик
+#   4. qdrant           — векторная БД для RAG
+#   5. ws_broadcast     — WebSocket для Frontend
+#   6. ai_settings      — LLM и embeddings
+#   7. home_assistant   — интеграция с умным домом
+#   8. hal              — Hardware Abstraction Layer
+#   9. watchers         — настройки файловых вотчеров
+#  10. plugins_status   — статус плагинов N.I.N.A.
+#  11. logging          — настройки логирования
+#  12. cors             — Cross-Origin Resource Sharing
+#  13. auth             — аутентификация и авторизация
+#  14. security         — маскирование чувствительных данных
+#  15. thresholds       — пороговые значения для агентов
+#  16. data_sources     — выбор источников метрик
+#  17. decision_audit   — политика хранения решений
+# ============================================================================
+
+# ============================================================================
+# 1. ПУТИ N.I.N.A. (nina_environment)
+# ============================================================================
+# Все пути к файлам и папкам N.I.N.A. на данном ПК.
+# Измените под свою систему!
 nina_environment:
+  # Корневая папка AppData N.I.N.A. (профили, логи, плагины)
   appdata_root: "C:\\Users\\istep\\AppData\\Local\\NINA"
+
+  # Папка с сессиями съёмки (ImageMetaData.json, FITS-файлы)
   sessions_root: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\Фото\\Сессии"
+
+  # Папка с мастер-кадрами калибровки (Bias, Dark, Flat)
   masters_root: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\Фото\\Данные\\MASTER FILE\\Masters"
+
+  # Папка с профилями N.I.N.A. (.profile файлы)
   profiles_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Profiles"
+
+  # Шаблон секвенсора (Sequence.json для Shadow Engine)
   sequence_template: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\ПО\\N.I.N.A\\Set templates\\Sequence.json"
+
+  # Папка с логами N.I.N.A.
   logs_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Logs"
+
+  # Папка с плагинами N.I.N.A.
   plugins_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Plugins\\3.0.0"
 
+# ============================================================================
+# 2. СЕТЕВЫЕ ПОДКЛЮЧЕНИЯ (network)
+# ============================================================================
+# Адреса API-серверов, к которым подключается Cortex.
 network:
+  # N.I.N.A. Advanced API (плагин ninaAPI)
+  # Базовый URL, к которому добавляется /v2/api
   nina_api_host: "http://localhost:1888"
+
+  # N.I.N.A. WebSocket (real-time события: SequenceItemStarted, etc.)
   nina_ws_url: "ws://localhost:1888/v2/socket"
+
+  # Prometheus Exporter N.I.N.A. (плагин jewzaam)
+  # Используется как резервный источник метрик
   prometheus_url: "http://localhost:9876"
 
+# ============================================================================
+# 3. INFLUXDB (influxdb)
+# ============================================================================
+# Time-series база данных для хранения метрик оборудования.
+# Основной источник метрик для ObservatoryState.
 influxdb:
+  # URL InfluxDB сервера
   url: "http://localhost:8086"
+
+  # Токен аутентификации.
+  # Рекомендуется использовать переменную окружения: ${INFLUXDB_TOKEN}
   token: "UVvJCtl-ihRqop4tsoXMlUcCcPAKnIHfoGzQRcuAp2LXhD_cTJMLN0Iy2l3_4aReWB_kdFEKezLhkv5ioQFu-A=="
+
+  # Организация InfluxDB
   org: "observatory"
+
+  # Бакет для хранения метрик
   bucket: "nina_telemetry"
 
+# ============================================================================
+# 4. QDRANT (qdrant)
+# ============================================================================
+# Векторная база данных для RAG-системы (Retrieval-Augmented Generation).
+# Хранит эмбеддинги документации и истории сессий.
 qdrant:
+  # URL Qdrant сервера
   url: "http://localhost:6333"
+
+  # Имя коллекции для хранения векторов
   collection_name: "nina_sessions"
+
+  # Модель для генерации эмбеддингов (должна быть загружена в Ollama)
+  # Загрузка: ollama pull nomic-embed-text
   embedding_model: "nomic-embed-text"
 
+# ============================================================================
+# 5. WEBSOCKET BROADCAST (ws_broadcast)
+# ============================================================================
+# WebSocket-сервер для real-time отправки событий на Frontend.
 ws_broadcast:
+  # Включить WebSocket broadcasting
   enabled: true
+
+  # Путь WebSocket endpoint
   path: "/ws"
 
+# ============================================================================
+# 6. AI НАСТРОЙКИ (ai_settings)
+# ============================================================================
+# Настройки LLM (Large Language Model) и RAG-системы.
+#
+# Архитектура LLM:
+#   - Primary модель (gemma4:31b-cloud) — облачная, мощная, для сложного анализа
+#   - Fallback модель (gemma4:e4b) — локальная, быстрая, при недоступности primary
+#   Обе модели вызываются через Ollama API.
 ai_settings:
+  # URL Ollama сервера
   ollama_host: "http://localhost:11434"
+
+  # Основная LLM модель (облачная через Ollama cloud routing)
+  # Используется для: Diagnostician, Strategist, Auditor, Copilot
+  # Загрузка: ollama pull gemma4:31b-cloud
+  primary_model: "gemma4:31b-cloud"
+
+  # Fallback LLM модель (локальная, быстрая)
+  # Используется при недоступности primary или для простых запросов
+  # Загрузка: ollama pull gemma4:e4b
+  fallback_model: "gemma4:e4b"
+
+  # [DEPRECATED] Оставлено для обратной совместимости.
+  # Используйте primary_model и fallback_model вместо этого.
   model_name: "gemma4:31b-cloud"
+
+  # Путь к локальной векторной БД (альтернатива Qdrant)
   rag_db_path: "./data/vector_db"
 
+# ============================================================================
+# 7. HOME ASSISTANT (home_assistant)
+# ============================================================================
+# Интеграция с Home Assistant для управления умным домом обсерватории.
+# Позволяет управлять: Flat Panel, Dew Heater, питанием обсерватории.
 home_assistant:
+  # Включить интеграцию с Home Assistant
   enabled: false
+
+  # URL Home Assistant сервера
   url: "http://homeassistant.local:8123"
+
+  # Long-Lived Access Token из Home Assistant.
+  # Получить: Profile → Security → Long-Lived Access Tokens → Create Token
+  # Рекомендуется использовать переменную окружения: ${HA_TOKEN}
   token: "${HA_TOKEN}"
 
+# ============================================================================
+# 8. HARDWARE ABSTRACTION LAYER (hal)
+# ============================================================================
+# Финальная валидация всех команд перед отправкой в N.I.N.A.
+# Предотвращает опасные операции (slew ниже горизонта, команды при UNSAFE).
 hal:
+  # Включить HAL валидацию
   enabled: true
+
+  # Минимальная высота (градусы) для команд slew.
+  # Команды slew ниже этого лимита блокируются.
   min_altitude_limit: 15.0
 
+# ============================================================================
+# 9. НАСТРОЙКИ ВОТЧЕРОВ (watchers)
+# ============================================================================
+# Конфигурация файловых вотчеров и pollers.
 watchers:
+  # Задержка debouncing (секунды).
+  # Предотвращает множественные срабатывания при быстром изменении файла.
   debounce_seconds: 1.5
+
+  # Путь к статусному файлу AI Weather плагина.
+  # Если null, используется appdata_root/AIWeather/status.json
   ai_weather_status_file: "C:\\Users\\istep\\AppData\\Local\\NINA\\AIWeather\\status.json"
 
+  # Опциональные пути к экспортам плагинов (null = автоопределение)
+  dither_statistics_path: null
+  guiding_analyzer_path: null
+  dynamic_sequencer_path: null
+
+# ============================================================================
+# 10. СТАТУС ПЛАГИНОВ (plugins_status)
+# ============================================================================
+# Статус отсутствующих или неактивных плагинов N.I.N.A.
+# Используется для Graceful Degradation — система продолжает работать
+# даже если некоторые плагины не установлены.
 plugins_status:
+  # Плагин инъекции дизеринга
   dither_inject: "NOT_INSTALLED"
+
+  # Плагин калибровки гидирования
   guider_calibration: "NOT_INSTALLED"
 
+# ============================================================================
+# 11. ЛОГИРОВАНИЕ (logging)
+# ============================================================================
 logging:
+  # Уровень логирования: DEBUG, INFO, WARNING, ERROR, CRITICAL
   level: "INFO"
+
+  # Формат логов: "json" (для production/ELK) или "text" (для dev)
   format: "json"
 
 # ============================================================================
-# НОВАЯ СЕКЦИЯ: CORS (audit F2)
-# Заменить на актуальные домены фронтенда в production!
+# 12. CORS — Cross-Origin Resource Sharing (cors)
 # ============================================================================
+# Настройки CORS для доступа Frontend к API.
+# В production ОБЯЗАТЕЛЬНО ограничьте allow_origins доменом фронтенда!
 cors:
+  # Включить CORS middleware
   enabled: true
+
+  # Разрешённые домены (origins) фронтенда.
+  # Для production замените на реальные домены!
   allowed_origins:
-    - "http://localhost:3000"
-    - "http://localhost:5173"
-    - "http://localhost:8080"
+    - "http://localhost:3000" # Vue dev server
+    - "http://localhost:5173" # Vite dev server
+    - "http://localhost:8080" # Alternative frontend
     - "http://127.0.0.1:3000"
     - "http://127.0.0.1:5173"
     # Production domains (раскомментируйте и замените):
     # - "https://cortex.your-domain.com"
     # - "https://observatory.local"
+
+  # Разрешить отправку credentials (cookies, auth headers)
   allow_credentials: true
+
+  # Разрешённые HTTP методы
   allowed_methods:
     - "GET"
     - "POST"
     - "PUT"
     - "DELETE"
     - "OPTIONS"
+
+  # Разрешённые HTTP заголовки
   allowed_headers:
     - "Authorization"
     - "Content-Type"
     - "X-API-Key"
     - "X-Request-ID"
+
+  # Время кэширования preflight-запросов (секунды)
   max_age: 3600
 
 # ============================================================================
-# НОВАЯ СЕКЦИЯ: Authentication (audit C4)
+# 13. АУТЕНТИФИКАЦИЯ (auth)
 # ============================================================================
+# JWT-аутентификация и rate limiting для API.
 auth:
+  # Включить аутентификацию.
+  # В production ОБЯЗАТЕЛЬНО true!
   enabled: true
-  access_token_expire_minutes: 1440 # 24 часа
+
+  # Время жизни JWT access token (минуты). 1440 = 24 часа.
+  access_token_expire_minutes: 1440
+
+  # Rate limiting: максимум запросов в минуту с одного IP
   rate_limit_per_minute: 120
+
+  # Rate limiting для LLM endpoints (защита от перегрузки Ollama)
   llm_rate_limit_per_minute: 20
+
+  # Rate limiting для trigger endpoints (защита оборудования)
   trigger_rate_limit_per_minute: 30
+
+  # Публичные paths (не требуют аутентификации)
   public_paths:
     - "/"
     - "/docs"
@@ -100,23 +287,193 @@ auth:
     - "/metrics"
 
 # ============================================================================
-# НОВАЯ СЕКЦИЯ: Thresholds (audit 7.2 — магические числа)
+# 14. БЕЗОПАСНОСТЬ (security)
 # ============================================================================
+# Маскирование чувствительных данных в логах.
+security:
+  # Паттерны имен переменных, значения которых маскируются в логах.
+  # Если имя переменной содержит любую из этих подстрок (case-insensitive),
+  # её значение в логах отображается как "***".
+  sensitive_patterns:
+    - "token"
+    - "password"
+    - "passwd"
+    - "secret"
+    - "api_key"
+    - "apikey"
+    - "api-key"
+    - "private_key"
+    - "privatekey"
+    - "credentials"
+    - "auth"
+    - "bearer"
+    - "access_key"
+    - "accesskey"
+    - "secret_key"
+    - "secretkey"
+
+# ============================================================================
+# 15. ПОРОГОВЫЕ ЗНАЧЕНИЯ (thresholds)
+# ============================================================================
+# Все магические числа вынесены сюда для удобной настройки.
+# Измените пороги под своё оборудование и условия съёмки.
 thresholds:
-  # Watcher Agent
-  hfr_increase_percent: 30.0
-  rms_ra_critical: 2.0
-  rms_dec_critical: 2.0
-  temperature_deviation: 2.0
-  wind_speed_warning: 15.0
-  wind_gust_critical: 20.0
-  z_score_threshold: 3.0
-  # Calibrator Agent (дней)
-  bias_freshness_days: 90
-  dark_freshness_days: 30
-  flat_freshness_days: 7
-  # Preflight gates
-  cloud_cover_max_percent: 80.0
-  wind_speed_max_mps: 20.0
-  humidity_max_percent: 90.0
-  min_free_disk_space_gb: 20.0
+  # --- Watcher Agent ---
+  # Детекция аномалий в метриках качества
+  watcher:
+    # Рост HFR на этот процент считается аномалией (%)
+    hfr_increase_percent: 30.0
+
+    # Рост FWHM на этот процент считается аномалией (%)
+    fwhm_increase_percent: 30.0
+
+    # RMS RA выше этого значения — критическая аномалия (arcsec)
+    rms_ra_critical: 2.0
+
+    # RMS Dec выше этого значения — критическая аномалия (arcsec)
+    rms_dec_critical: 2.0
+
+    # Отклонение температуры камеры от setpoint (°C)
+    temperature_deviation: 2.0
+
+    # Скорость ветра для предупреждения (м/с)
+    wind_speed_warning: 15.0
+
+    # Порывы ветра выше этого значения — критическая аномалия (м/с)
+    wind_gust_critical: 20.0
+
+    # Z-Score для статистической детекции аномалий
+    z_score_threshold: 3.0
+
+    # Минимальное количество точек истории для анализа тренда
+    min_history_points: 5
+
+    # Cooldown между повторными алертами одного типа (секунды)
+    anomaly_cooldown_seconds: 300
+
+  # --- Calibrator Agent ---
+  # Контроль свежести мастер-кадров калибровки
+  calibrator:
+    # Bias мастера считаются свежими N дней
+    bias_freshness_days: 90
+
+    # Dark мастера считаются свежими N дней
+    dark_freshness_days: 30
+
+    # Flat мастера считаются свежими N дней
+    flat_freshness_days: 7
+
+    # Допуск по температуре при подборе мастера (°C)
+    temperature_tolerance: 2.0
+
+    # Cooldown между повторными алертами (секунды)
+    alert_cooldown_seconds: 600
+
+  # --- Preflight Gates ---
+  # Пороговые значения для pre-flight проверки перед стартом сессии
+  preflight:
+    # Максимальная облачность для GO (%)
+    cloud_cover_max: 80.0
+
+    # Максимальная скорость ветра для GO (м/с)
+    wind_speed_max: 20.0
+
+    # Максимальная влажность для GO (%)
+    humidity_max: 90.0
+
+    # Минимальное свободное место на диске (GB)
+    min_free_disk_space_gb: 50.0
+
+    # Температура камеры считается "охлаждённой" ниже этого значения (°C)
+    camera_cooled_threshold: -10.0
+
+  # --- Strategist Agent ---
+  # Целевые метрики качества и параметры оптимизации
+  strategist:
+    # Целевой SNR (Signal-to-Noise Ratio)
+    snr_target: 20.0
+
+    # Целевой HFR (Half Flux Radius, пиксели)
+    hfr_target: 2.5
+
+    # Целевой FWHM (Full Width Half Maximum, пиксели)
+    fwhm_target: 3.0
+
+    # Целевой acceptance rate (доля принятых кадров, 0-1)
+    acceptance_rate_target: 0.90
+
+    # Нормальный интервал автофокуса (минуты)
+    autofocus_interval_normal: 60
+
+    # Частый интервал автофокуса при дрейфе (минуты)
+    autofocus_interval_frequent: 30
+
+    # Экстренный интервал автофокуса (минуты)
+    autofocus_interval_emergency: 15
+
+    # Порог деградации HFR (пикселей/кадр)
+    hfr_degradation_threshold: 0.05
+
+    # Минимальный интервал между предложениями оптимизаций (секунды)
+    min_proposal_interval_seconds: 600
+
+    # Предупреждение о ветровой нагрузке (м/с)
+    wind_load_warning: 10.0
+
+  # --- Guardian Agent ---
+  # Пороговые значения безопасности оборудования
+  guardian:
+    # Скорость ветра для аварийной парковки (м/с)
+    wind_speed_park: 20.0
+
+    # Облачность для паузы съёмки (%)
+    cloud_cover_pause: 80.0
+
+    # Влажность для предупреждения (%)
+    humidity_warning: 90.0
+
+    # RMS для рекалибровки гидирования (arcsec)
+    rms_recalibration: 3.0
+
+    # Отклонение температуры для аларма (°C)
+    temperature_alarm: 5.0
+
+# ============================================================================
+# 16. ИСТОЧНИКИ ДАННЫХ (data_sources)
+# ============================================================================
+# Выбор основного и резервного источников метрик.
+# Предотвращает дублирование событий от InfluxDB и Prometheus.
+data_sources:
+  # Основной источник метрик: "influxdb" или "prometheus"
+  # InfluxDB рекомендуется как основной (более полная история)
+  primary_metrics_source: "influxdb"
+
+  # Включить резервный источник (для отказоустойчивости).
+  # Если основной недоступен, автоматически используется резервный.
+  enable_fallback_source: true
+
+  # Интервал опроса метрик (секунды)
+  metrics_poll_interval: 3.0
+
+# ============================================================================
+# 17. DECISION AUDIT TRAIL (decision_audit)
+# ============================================================================
+# Политика хранения и очистки истории решений AI-агентов.
+decision_audit:
+  # Хранить решения за последние N дней
+  keep_last_days: 90
+
+  # Максимальное количество записей в SQLite БД
+  max_records: 100000
+
+  # Экспортировать удаляемые записи в JSON-архив перед удалением
+  archive_before_delete: true
+
+  # Путь для хранения JSON-архивов
+  archive_path: "./data/decision_archives"
+
+  # Автоматическая очистка (запускать периодически)
+  auto_cleanup_enabled: true
+
+  # Интервал автоматической очистки (часы)
+  auto_cleanup_interval_hours: 24

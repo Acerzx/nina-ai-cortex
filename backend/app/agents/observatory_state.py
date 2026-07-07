@@ -3,8 +3,13 @@ ObservatoryState — единое состояние обсерватории.
 Агрегирует данные из всех источников (EventBus, Prometheus, InfluxDB, Shadow Engine)
 и предоставляет API для Multi-Agent Swarm (LangGraph).
 
+ИСПРАВЛЕНО (audit 9.1):
+- Добавлен выбор основного источника метрик через settings.data_sources
+- Второй источник используется только как fallback при недоступности основного
+- Предотвращено дублирование событий и конфликты данных
+
 Архитектура источников метрик:
-- InfluxDB (основной): через INFLUXDB_UPDATE от InfluxDBMetricsProvider
+- InfluxDB (основной по умолчанию): через INFLUXDB_UPDATE от InfluxDBMetricsProvider
 - Prometheus (резервный): через PROMETHEUS_UPDATE от PrometheusScraper
 - Session Metadata: через NEW_FRAME от SessionWatcher
 - Weather: через WEATHER_UPDATE от WeatherData watcher
@@ -19,6 +24,7 @@ from datetime import datetime
 from collections import deque
 from pydantic import BaseModel, Field
 from app.core.events import event_bus
+from app.core.config import settings
 from app.shadow_engine.state_tracker import state_tracker
 
 logger = logging.getLogger("ObservatoryState")
@@ -34,6 +40,7 @@ class MetricsHistory(BaseModel):
     temperature: List[float] = Field(default_factory=list)
     wind_speed: List[float] = Field(default_factory=list)
     humidity: List[float] = Field(default_factory=list)
+    rms_total: List[float] = Field(default_factory=list)
 
     # ClassVar указывает Pydantic, что это константа класса
     MAX_POINTS: ClassVar[int] = 100
@@ -53,6 +60,11 @@ class ObservatoryState:
     """
     Единое состояние обсерватории.
     Все AI-агенты обращаются к этому объекту для получения актуальных данных.
+
+    ИСПРАВЛЕНО (audit 9.1):
+    - Добавлен выбор основного источника метрик через конфиг
+    - Fallback источник используется только при недоступности основного
+    - Таймаут для определения доступности источника (30 секунд)
     """
 
     def __init__(self):
@@ -118,9 +130,19 @@ class ObservatoryState:
         self.is_guiding_active: bool = False
         self.is_autofocus_running: bool = False
 
-        # === Источники данных ===
+        # === ИСПРАВЛЕНО (audit 9.1): Источники данных с конфигом ===
+        # Настройка из settings.data_sources
+        self._primary_source: str = settings.data_sources.primary_metrics_source
+        self._fallback_enabled: bool = settings.data_sources.enable_fallback_source
+
+        # Статус доступности источников
         self._influxdb_active: bool = False
         self._prometheus_active: bool = False
+        self._influxdb_last_update: Optional[datetime] = None
+        self._prometheus_last_update: Optional[datetime] = None
+
+        # Таймаут для определения недоступности источника (секунды)
+        self._source_timeout: float = 30.0
 
         self._subscribed = False
 
@@ -129,58 +151,121 @@ class ObservatoryState:
         if self._subscribed:
             return
 
-        # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB ===
+        # ИСПРАВЛЕНО (audit 9.1): Подписываемся на оба источника,
+        # но используем только активный
         event_bus.subscribe("INFLUXDB_UPDATE", self._on_influxdb_update)
-
-        # === РЕЗЕРВНЫЙ ИСТОЧНИК: Prometheus ===
         event_bus.subscribe("PROMETHEUS_UPDATE", self._on_prometheus_update)
 
         # Session Metadata (новые кадры)
         event_bus.subscribe("NEW_FRAME", self._on_new_frame)
-
         # Погода
         event_bus.subscribe("WEATHER_UPDATE", self._on_weather_update)
-
         # FITS Headers (астрономия)
         event_bus.subscribe("FITS_HEADER_PARSED", self._on_fits_parsed)
-
         # Алерты от Watcher агента
         event_bus.subscribe("ALERT", self._on_alert)
-
         # Режимы
         event_bus.subscribe("FLAT_MODE_CONFIRMED", self._on_flat_mode_start)
         event_bus.subscribe("FLAT_MODE_ENDED", self._on_flat_mode_end)
-
         # События гида и безопасности из логов
         event_bus.subscribe("LOG_EVENT", self._on_log_event)
-
         # LiveStack статус
         event_bus.subscribe("LIVESTACK_STATUS", self._on_livestack_status)
 
         self._subscribed = True
-        logger.info("🧠 ObservatoryState initialized and subscribed to events")
+        logger.info(
+            f"🧠 ObservatoryState initialized "
+            f"(primary source: {self._primary_source}, "
+            f"fallback: {'enabled' if self._fallback_enabled else 'disabled'})"
+        )
+
+    def _is_source_available(self, source: str) -> bool:
+        """
+        ИСПРАВЛЕНО (audit 9.1): Проверяет доступность источника метрик.
+        Источник считается недоступным, если с момента последнего обновления
+        прошло больше _source_timeout секунд.
+        """
+        now = datetime.now()
+
+        if source == "influxdb":
+            if not self._influxdb_last_update:
+                return False
+            elapsed = (now - self._influxdb_last_update).total_seconds()
+            return elapsed < self._source_timeout
+
+        elif source == "prometheus":
+            if not self._prometheus_last_update:
+                return False
+            elapsed = (now - self._prometheus_last_update).total_seconds()
+            return elapsed < self._source_timeout
+
+        return False
+
+    def _should_accept_influxdb(self) -> bool:
+        """
+        ИСПРАВЛЕНО (audit 9.1): Определяет, принимать ли данные из InfluxDB.
+        InfluxDB принимается если:
+        - Он является основным источником, ИЛИ
+        - Он является fallback и основной источник недоступен
+        """
+        if self._primary_source == "influxdb":
+            return True
+
+        if self._fallback_enabled and not self._is_source_available(
+            self._primary_source
+        ):
+            return True
+
+        return False
+
+    def _should_accept_prometheus(self) -> bool:
+        """
+        ИСПРАВЛЕНО (audit 9.1): Определяет, принимать ли данные из Prometheus.
+        Prometheus принимается если:
+        - Он является основным источником, ИЛИ
+        - Он является fallback и основной источник недоступен
+        """
+        if self._primary_source == "prometheus":
+            return True
+
+        if self._fallback_enabled and not self._is_source_available(
+            self._primary_source
+        ):
+            return True
+
+        return False
 
     async def _on_influxdb_update(self, data: Dict[str, Any]):
         """
-        Обновление метрик из InfluxDB (ОСНОВНОЙ ИСТОЧНИК).
+        Обновление метрик из InfluxDB.
 
-        Данные приходят от InfluxDBMetricsProvider, который выполняет
-        Flux queries к InfluxDB Exporter (daleghent plugin).
+        ИСПРАВЛЕНО (audit 9.1): Проверяет, должен ли этот источник приниматься
+        на основе настроек primary/fallback.
         """
+        # Обновляем timestamp
+        self._influxdb_last_update = datetime.now()
+
+        # Проверяем, должны ли мы принимать эти данные
+        if not self._should_accept_influxdb():
+            # InfluxDB не является активным источником — игнорируем
+            logger.debug(
+                "Ignoring InfluxDB update (not active source, "
+                f"primary={self._primary_source})"
+            )
+            return
+
         self._influxdb_active = True
 
         # === Camera ===
         if "camera_temp" in data and data["camera_temp"] is not None:
             self.current_metrics["camera_temp"] = data["camera_temp"]
             self._append_history("temperature", data["camera_temp"])
-
         if "camera_cooler_power" in data:
             self.current_metrics["camera_cooler_power"] = data["camera_cooler_power"]
 
         # === Focuser ===
         if "focuser_position" in data:
             self.current_metrics["focuser_position"] = data["focuser_position"]
-
         if "focuser_temp" in data:
             self.current_metrics["focuser_temp"] = data["focuser_temp"]
 
@@ -188,21 +273,18 @@ class ObservatoryState:
         if "guider_rms_ra" in data and data["guider_rms_ra"] is not None:
             self.current_metrics["rms_ra"] = data["guider_rms_ra"]
             self._append_history("rms_ra", data["guider_rms_ra"])
-
         if "guider_rms_dec" in data and data["guider_rms_dec"] is not None:
             self.current_metrics["rms_dec"] = data["guider_rms_dec"]
             self._append_history("rms_dec", data["guider_rms_dec"])
-
         if "guider_rms_total" in data:
             self.current_metrics["rms_total"] = data["guider_rms_total"]
-
+            self._append_history("rms_total", data["guider_rms_total"])
         if data.get("guider_guiding") is not None:
             self.is_guiding_active = data["guider_guiding"]
 
         # === Mount ===
         if "mount_altitude" in data:
             self.current_metrics["mount_altitude"] = data["mount_altitude"]
-
         if "mount_azimuth" in data:
             self.current_metrics["mount_azimuth"] = data["mount_azimuth"]
 
@@ -217,30 +299,22 @@ class ObservatoryState:
         # === Weather ===
         if "wx_temperature" in data:
             self.weather["temperature"] = data["wx_temperature"]
-
         if "wx_humidity" in data:
             self.weather["humidity"] = data["wx_humidity"]
             self._append_history("humidity", data["wx_humidity"])
-
         if "wx_dewpoint" in data:
             self.weather["dewpoint"] = data["wx_dewpoint"]
-
         if "wx_cloud_cover" in data:
             self.weather["cloud_cover"] = data["wx_cloud_cover"]
-
         if "wx_wind_speed" in data:
             self.weather["wind_speed"] = data["wx_wind_speed"]
             self._append_history("wind_speed", data["wx_wind_speed"])
-
         if "wx_wind_gust" in data:
             self.weather["wind_gust"] = data["wx_wind_gust"]
-
         if "wx_wind_direction" in data:
             self.weather["wind_direction"] = data["wx_wind_direction"]
-
         if "wx_pressure" in data:
             self.weather["pressure"] = data["wx_pressure"]
-
         if "wx_sky_quality" in data:
             self.weather["sky_quality"] = data["wx_sky_quality"]
 
@@ -248,17 +322,13 @@ class ObservatoryState:
         if "image_hfr" in data and data["image_hfr"] is not None:
             self.current_metrics["hfr"] = data["image_hfr"]
             self._append_history("hfr", data["image_hfr"])
-
         if "image_fwhm" in data and data["image_fwhm"] is not None:
             self.current_metrics["fwhm"] = data["image_fwhm"]
             self._append_history("fwhm", data["image_fwhm"])
-
         if "image_stars" in data:
             self.current_metrics["star_count"] = data["image_stars"]
-
         if "image_median" in data:
             self.current_metrics["median_adu"] = data["image_median"]
-
         if "image_eccentricity" in data:
             self.current_metrics["eccentricity"] = data["image_eccentricity"]
 
@@ -268,15 +338,21 @@ class ObservatoryState:
 
     async def _on_prometheus_update(self, data: Dict[str, Any]):
         """
-        Обновление метрик из Prometheus (РЕЗЕРВНЫЙ ИСТОЧНИК).
+        Обновление метрик из Prometheus.
 
-        Используется только если InfluxDB недоступен.
-        Если InfluxDB активен, Prometheus данные игнорируются
-        чтобы избежать дублирования и конфликтов.
+        ИСПРАВЛЕНО (audit 9.1): Проверяет, должен ли этот источник приниматься
+        на основе настроек primary/fallback.
         """
-        # Если InfluxDB работает, игнорируем Prometheus
-        if self._influxdb_active:
-            self._prometheus_active = False
+        # Обновляем timestamp
+        self._prometheus_last_update = datetime.now()
+
+        # Проверяем, должны ли мы принимать эти данные
+        if not self._should_accept_prometheus():
+            # Prometheus не является активным источником — игнорируем
+            logger.debug(
+                "Ignoring Prometheus update (not active source, "
+                f"primary={self._primary_source})"
+            )
             return
 
         self._prometheus_active = True
@@ -307,6 +383,7 @@ class ObservatoryState:
         self._append_history("fwhm", data.get("image_fwhm"))
         self._append_history("rms_ra", data.get("guider_rms_ra"))
         self._append_history("rms_dec", data.get("guider_rms_dec"))
+        self._append_history("rms_total", data.get("guider_rms_total"))
         self._append_history("temperature", data.get("camera_temp"))
 
         # Погода из Prometheus (wx_* префикс)
@@ -326,13 +403,9 @@ class ObservatoryState:
     async def _on_new_frame(self, data: Dict[str, Any]):
         """
         Обработка нового кадра из Session Metadata или FakeNina.
-
-        ИСПРАВЛЕНО: Поддержка обоих регистров ключей (HFR/hfr, FWHM/fwhm, etc.)
-        N.I.N.A. использует ЗАГЛАВНЫЕ ключи (HFR, FWHM),
-        а внутренние структуры - строчные (hfr, fwhm).
+        Поддержка обоих регистров ключей (HFR/hfr, FWHM/fwhm, etc.)
         """
         frame = data.get("frame", {})
-
         if not frame:
             return
 
@@ -398,18 +471,15 @@ class ObservatoryState:
     async def _on_weather_update(self, data: Dict[str, Any]):
         """Обновление погоды из WeatherData.json."""
         weather = data.get("weather", {})
-
         for key, value in weather.items():
             if value is not None and key in self.weather:
                 self.weather[key] = value
-
         self._append_history("wind_speed", weather.get("wind_speed"))
         self._append_history("humidity", weather.get("humidity"))
 
     async def _on_fits_parsed(self, data: Dict[str, Any]):
         """Обновление астрономических данных из FITS."""
         report = data.get("report", {})
-
         if report.get("moon_angl") is not None:
             self.astronomy["moon_angle"] = report["moon_angl"]
         if report.get("sun_angle") is not None:
@@ -422,7 +492,6 @@ class ObservatoryState:
             "timestamp": datetime.now().isoformat(),
             **data,
         }
-
         self.active_alerts.append(alert)
 
         # Ограничиваем количество активных алертов
@@ -440,7 +509,6 @@ class ObservatoryState:
     async def _on_log_event(self, data: Dict[str, Any]):
         """Отслеживание состояний из логов."""
         event_type = data.get("event_type", "")
-
         if event_type == "guiding_start":
             self.is_guiding_active = True
         elif event_type in ("guiding_lost", "guiding_stop", "stop_guiding"):
@@ -468,7 +536,6 @@ class ObservatoryState:
         if history_list is not None and isinstance(history_list, list):
             try:
                 history_list.append(float(value))
-
                 # Обрезаем историю до MAX_POINTS
                 if len(history_list) > self.history.MAX_POINTS:
                     history_list.pop(0)
@@ -493,7 +560,6 @@ class ObservatoryState:
         Положительный = рост, отрицательный = падение.
         """
         history_list = getattr(self.history, metric, None)
-
         if not history_list or len(history_list) < window:
             return None
 
@@ -567,10 +633,17 @@ class ObservatoryState:
 
     def get_session_summary(self) -> Dict[str, Any]:
         """Возвращает краткую сводку текущей сессии для LLM."""
+        # Определяем активный источник данных
+        active_source = "none"
+        if self._influxdb_active and self._should_accept_influxdb():
+            active_source = "influxdb"
+        elif self._prometheus_active and self._should_accept_prometheus():
+            active_source = "prometheus"
+
         return {
-            "target": self.active_targets[0].get("name")
-            if self.active_targets
-            else "Unknown",
+            "target": (
+                self.active_targets[0].get("name") if self.active_targets else "Unknown"
+            ),
             "safety_status": self.safety_status,
             "is_guiding": self.is_guiding_active,
             "is_autofocus_running": self.is_autofocus_running,
@@ -579,13 +652,16 @@ class ObservatoryState:
             "wind_speed": self.weather.get("wind_speed"),
             "cloud_cover": self.weather.get("cloud_cover"),
             "active_alerts_count": len(self.active_alerts),
-            "data_source": "influxdb"
-            if self._influxdb_active
-            else ("prometheus" if self._prometheus_active else "none"),
+            "data_source": active_source,
+            "primary_source_config": self._primary_source,
         }
 
     def get_full_state(self) -> Dict[str, Any]:
         """Возвращает полное состояние для AI-агентов и Frontend."""
+        # Определяем активные источники
+        influxdb_active = self._influxdb_active and self._should_accept_influxdb()
+        prometheus_active = self._prometheus_active and self._should_accept_prometheus()
+
         return {
             "metrics": self.current_metrics,
             "weather": self.weather,
@@ -601,8 +677,20 @@ class ObservatoryState:
             "targets": self.active_targets,
             "recent_ai_actions": list(self.ai_action_log)[-10:],
             "data_sources": {
-                "influxdb_active": self._influxdb_active,
-                "prometheus_active": self._prometheus_active,
+                "primary_config": self._primary_source,
+                "fallback_enabled": self._fallback_enabled,
+                "influxdb_active": influxdb_active,
+                "prometheus_active": prometheus_active,
+                "influxdb_last_update": (
+                    self._influxdb_last_update.isoformat()
+                    if self._influxdb_last_update
+                    else None
+                ),
+                "prometheus_last_update": (
+                    self._prometheus_last_update.isoformat()
+                    if self._prometheus_last_update
+                    else None
+                ),
             },
         }
 

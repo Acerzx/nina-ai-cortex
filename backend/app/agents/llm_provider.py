@@ -94,9 +94,13 @@ class LLMProvider:
     def _load_config(self) -> LLMConfig:
         """Загружает конфигурацию из переменных окружения."""
         return LLMConfig(
-            ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            primary_model=os.getenv("LLM_PRIMARY_MODEL", "gemma4:31b-cloud"),
-            fallback_model=os.getenv("LLM_FALLBACK_MODEL", "gemma4:e4b"),
+            ollama_host=os.getenv("OLLAMA_HOST", app_settings.ai_settings.ollama_host),
+            primary_model=os.getenv(
+                "LLM_PRIMARY_MODEL", app_settings.ai_settings.primary_model
+            ),
+            fallback_model=os.getenv(
+                "LLM_FALLBACK_MODEL", app_settings.ai_settings.fallback_model
+            ),
             primary_timeout=float(os.getenv("LLM_PRIMARY_TIMEOUT", "30.0")),
             fallback_timeout=float(os.getenv("LLM_FALLBACK_TIMEOUT", "15.0")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1500")),
