@@ -324,27 +324,76 @@ class ObservatoryState:
             self.weather["cloud_cover"] = data["wx_cloud_cover"]
 
     async def _on_new_frame(self, data: Dict[str, Any]):
-        """Обработка нового кадра из Session Metadata."""
+        """
+        Обработка нового кадра из Session Metadata или FakeNina.
+
+        ИСПРАВЛЕНО: Поддержка обоих регистров ключей (HFR/hfr, FWHM/fwhm, etc.)
+        N.I.N.A. использует ЗАГЛАВНЫЕ ключи (HFR, FWHM),
+        а внутренние структуры - строчные (hfr, fwhm).
+        """
         frame = data.get("frame", {})
 
-        if frame:
-            if frame.get("hfr"):
-                self._append_history("hfr", frame["hfr"])
-                self.current_metrics["hfr"] = frame["hfr"]
+        if not frame:
+            return
 
-            if frame.get("fwhm"):
-                self._append_history("fwhm", frame["fwhm"])
-                self.current_metrics["fwhm"] = frame["fwhm"]
+        # Универсальный геттер с поддержкой обоих регистров
+        def get_value(*keys, default=None):
+            for key in keys:
+                if key in frame and frame[key] is not None:
+                    return frame[key]
+            return default
 
-            # Обновляем текущие метрики из кадра
-            if frame.get("exposure_time"):
-                self.current_metrics["exposure_time"] = frame["exposure_time"]
-            if frame.get("gain"):
-                self.current_metrics["gain"] = frame["gain"]
-            if frame.get("filter"):
-                self.current_metrics["filter"] = frame["filter"]
-            if frame.get("stars"):
-                self.current_metrics["star_count"] = frame["stars"]
+        # === HFR (оба варианта: HFR и hfr) ===
+        hfr = get_value("HFR", "hfr")
+        if hfr is not None:
+            self._append_history("hfr", hfr)
+            self.current_metrics["hfr"] = hfr
+            logger.debug(
+                f"📈 HFR updated: {hfr:.2f} (history length: {len(self.history.hfr)})"
+            )
+
+        # === FWHM (оба варианта: FWHM и fwhm) ===
+        fwhm = get_value("FWHM", "fwhm")
+        if fwhm is not None:
+            self._append_history("fwhm", fwhm)
+            self.current_metrics["fwhm"] = fwhm
+
+        # === Stars (оба варианта: Stars и stars) ===
+        stars = get_value("Stars", "stars", "star_count")
+        if stars is not None:
+            self.current_metrics["star_count"] = stars
+
+        # === RMS (оба варианта: RmsTotal и rms_total) ===
+        rms = get_value("RmsTotal", "rms_total", "RMS")
+        if rms is not None:
+            self.current_metrics["rms_total"] = rms
+            self._append_history("rms_total", rms)
+
+        # === Exposure Time ===
+        exposure = get_value("ExposureTime", "exposure_time", "Exposure")
+        if exposure is not None:
+            self.current_metrics["exposure_time"] = exposure
+
+        # === Gain ===
+        gain = get_value("Gain", "gain")
+        if gain is not None:
+            self.current_metrics["gain"] = gain
+
+        # === Filter ===
+        filter_name = get_value("Filter", "filter", "FilterName")
+        if filter_name is not None:
+            self.current_metrics["filter"] = filter_name
+
+        # === Temperature ===
+        temp = get_value("Temperature", "temperature", "CameraTemp")
+        if temp is not None:
+            self.current_metrics["camera_temp"] = temp
+            self._append_history("temperature", temp)
+
+        # === Index ===
+        index = get_value("Index", "index")
+        if index is not None:
+            self.current_metrics["frame_index"] = index
 
     async def _on_weather_update(self, data: Dict[str, Any]):
         """Обновление погоды из WeatherData.json."""

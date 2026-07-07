@@ -1,0 +1,393 @@
+{
+  "base_url": "http://localhost:1888/v2/api",
+  "triggers": {
+    "autofocus": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/focuser/auto-focus",
+        "summary": "Auto Focus",
+        "parameters": [
+          {
+            "name": "cancel",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": [
+        {
+          "method": "GET",
+          "path": "/equipment/focuser/last-af"
+        }
+      ]
+    },
+    "dither": {
+      "primary": {
+        "method": "GET",
+        "path": "/flats/skyflat",
+        "summary": "Sky flats",
+        "parameters": [
+          {
+            "name": "count",
+            "location": "query",
+            "type": "integer",
+            "required": true
+          },
+          {
+            "name": "minExposure",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "maxExposure",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "histogramMean",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "meanTolerance",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "dither",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          },
+          {
+            "name": "filterId",
+            "location": "query",
+            "type": "integer",
+            "required": false
+          },
+          {
+            "name": "binning",
+            "location": "query",
+            "type": "string",
+            "required": false
+          },
+          {
+            "name": "gain",
+            "location": "query",
+            "type": "integer",
+            "required": false
+          },
+          {
+            "name": "offset",
+            "location": "query",
+            "type": "integer",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": []
+    },
+    "guider_start": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/guider/start",
+        "summary": "Start Guiding",
+        "parameters": [
+          {
+            "name": "calibrate",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": []
+    },
+    "guider_stop": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/guider/stop",
+        "summary": "Stop Guiding",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "guider_calibrate": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/guider/start",
+        "summary": "Start Guiding",
+        "parameters": [
+          {
+            "name": "calibrate",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": [
+        {
+          "method": "GET",
+          "path": "/equipment/guider/clear-calibration"
+        }
+      ]
+    },
+    "sequence_start": {
+      "primary": {
+        "method": "GET",
+        "path": "/sequence/start",
+        "summary": "Start",
+        "parameters": [
+          {
+            "name": "skipValidation",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": []
+    },
+    "sequence_stop": {
+      "primary": {
+        "method": "GET",
+        "path": "/sequence/stop",
+        "summary": "Stop",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "mount_park": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/mount/park",
+        "summary": "Park",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "mount_unpark": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/mount/unpark",
+        "summary": "Unpark",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "mount_home": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/mount/home",
+        "summary": "Home",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "meridian_flip": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/mount/flip",
+        "summary": "Flip",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "dome_park": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/dome/park",
+        "summary": "Park",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "dome_open": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/dome/open",
+        "summary": "Open Shutter",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "dome_close": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/dome/close",
+        "summary": "Close Shutter",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "camera_connect": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/camera/connect",
+        "summary": "Connect",
+        "parameters": [
+          {
+            "name": "to",
+            "location": "query",
+            "type": "string",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": []
+    },
+    "camera_cool": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/camera/cool",
+        "summary": "Cooling",
+        "parameters": [
+          {
+            "name": "temperature",
+            "location": "query",
+            "type": "number",
+            "required": true
+          },
+          {
+            "name": "minutes",
+            "location": "query",
+            "type": "number",
+            "required": true
+          },
+          {
+            "name": "cancel",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": []
+    },
+    "camera_warm": {
+      "primary": {
+        "method": "GET",
+        "path": "/equipment/camera/warm",
+        "summary": "Warming",
+        "parameters": [
+          {
+            "name": "minutes",
+            "location": "query",
+            "type": "number",
+            "required": true
+          },
+          {
+            "name": "cancel",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": []
+    },
+    "flat_wizard": {
+      "primary": {
+        "method": "GET",
+        "path": "/flats/skyflat",
+        "summary": "Sky flats",
+        "parameters": [
+          {
+            "name": "count",
+            "location": "query",
+            "type": "integer",
+            "required": true
+          },
+          {
+            "name": "minExposure",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "maxExposure",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "histogramMean",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "meanTolerance",
+            "location": "query",
+            "type": "number",
+            "required": false
+          },
+          {
+            "name": "dither",
+            "location": "query",
+            "type": "boolean",
+            "required": false
+          },
+          {
+            "name": "filterId",
+            "location": "query",
+            "type": "integer",
+            "required": false
+          },
+          {
+            "name": "binning",
+            "location": "query",
+            "type": "string",
+            "required": false
+          },
+          {
+            "name": "gain",
+            "location": "query",
+            "type": "integer",
+            "required": false
+          },
+          {
+            "name": "offset",
+            "location": "query",
+            "type": "integer",
+            "required": false
+          }
+        ]
+      },
+      "alternatives": [
+        {
+          "method": "GET",
+          "path": "/flats/auto-brightness"
+        },
+        {
+          "method": "GET",
+          "path": "/flats/auto-exposure"
+        }
+      ]
+    },
+    "livestack_start": {
+      "primary": {
+        "method": "GET",
+        "path": "/livestack/start",
+        "summary": "Start Livestack",
+        "parameters": []
+      },
+      "alternatives": []
+    },
+    "livestack_stop": {
+      "primary": {
+        "method": "GET",
+        "path": "/livestack/stop",
+        "summary": "Stop Livestack",
+        "parameters": []
+      },
+      "alternatives": []
+    }
+  }
+}

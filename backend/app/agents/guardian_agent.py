@@ -1,6 +1,8 @@
 """
 Guardian Agent — обеспечивает безопасность оборудования и данных.
 Имеет наивысший приоритет в системе.
+
+ИСПРАВЛЕНО: Использует trigger_emulator вместо прямого httpx.
 """
 
 import logging
@@ -26,13 +28,6 @@ class GuardianAgent(BaseAgent):
     - Автоматическая парковка при критических условиях
     - Перехват Shutdown PC
     - Управление автофокусом и гидированием
-
-    Priorities:
-    1. Safety Monitor UNSAFE → немедленная парковка
-    2. Ветер > 20 м/с → парковка
-    3. Облачность > 80% → пауза
-    4. RMS > 3.0" в течение 5 кадров → recalibration
-    5. Температура камеры > setpoint + 5°C → alarm
     """
 
     def __init__(self):
@@ -40,14 +35,13 @@ class GuardianAgent(BaseAgent):
 
         # Пороговые значения безопасности
         self.safety_thresholds = {
-            "wind_speed_park": 20.0,  # Парковка при ветре > 20 м/с
-            "cloud_cover_pause": 80.0,  # Пауза при облачности > 80%
-            "humidity_warning": 90.0,  # Предупреждение при влажности > 90%
-            "rms_recalibration": 3.0,  # Перекалибровка при RMS > 3.0"
-            "temperature_alarm": 5.0,  # Аларм при отклонении температуры > 5°C
+            "wind_speed_park": 20.0,
+            "cloud_cover_pause": 80.0,
+            "humidity_warning": 90.0,
+            "rms_recalibration": 3.0,
+            "temperature_alarm": 5.0,
         }
 
-        # Флаги состояния
         self._parked = False
         self._paused = False
 
@@ -55,7 +49,6 @@ class GuardianAgent(BaseAgent):
         """Инициализация агента безопасности."""
         await super().initialize()
 
-        # Подписываемся на критические события
         event_bus.subscribe("ALERT", self._handle_alert)
         event_bus.subscribe("LOG_EVENT", self._handle_log_event)
 
@@ -72,7 +65,6 @@ class GuardianAgent(BaseAgent):
 
     async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
         """Анализирует контекст безопасности."""
-        # Проверяем критические условия
         if await self._check_critical_conditions():
             decision = AgentDecision(
                 agent=self.name,
@@ -107,10 +99,8 @@ class GuardianAgent(BaseAgent):
         level = data.get("level", "INFO")
 
         if level == "CRITICAL":
-            # Критические алерты требуют немедленного действия
             await self._handle_critical_alert(data)
         elif level == "WARNING":
-            # Предупреждения требуют проверки
             await self._handle_warning_alert(data)
 
     async def _handle_log_event(self, data: Dict[str, Any]) -> None:
@@ -124,20 +114,17 @@ class GuardianAgent(BaseAgent):
 
     async def _check_critical_conditions(self) -> bool:
         """Проверяет критические условия безопасности."""
-        # 1. Safety Monitor UNSAFE
         if observatory_state.safety_status == "UNSAFE":
             logger.critical("🚨 Safety Monitor UNSAFE - emergency park required")
             return True
 
-        # 2. Критический ветер
         wind_speed = observatory_state.weather.get("wind_speed")
         if wind_speed and wind_speed > self.safety_thresholds["wind_speed_park"]:
             logger.critical(f"🚨 Wind speed {wind_speed} m/s - park required")
             return True
 
-        # 3. Критическая облачность
         cloud_cover = observatory_state.weather.get("cloud_cover")
-        if cloud_cover and cloud_cover > 95.0:  # 95% для немедленной парковки
+        if cloud_cover and cloud_cover > 95.0:
             logger.warning(f"☁️ Cloud cover {cloud_cover}% - consider parking")
             return True
 
@@ -150,7 +137,6 @@ class GuardianAgent(BaseAgent):
 
         logger.critical(f"🚨 CRITICAL ALERT: {message}")
 
-        # Определяем действие на основе типа алерта
         metric = context.get("metric", "")
 
         if metric in ["WIND_GUST", "WIND_SPEED"]:
@@ -172,10 +158,9 @@ class GuardianAgent(BaseAgent):
         metric = context.get("metric", "")
 
         if metric == "HFR":
-            # Высокий HFR - запускаем автофокус
+            # ИСПРАВЛЕНО: Используем trigger_emulator вместо прямого httpx
             await self._trigger_autofocus("HFR degradation detected")
         elif metric == "RMS_RA" or metric == "RMS_DEC":
-            # Высокий RMS - запускаем дизеринг или перекалибровку
             await self._trigger_dither("High RMS detected")
 
     async def _emergency_park(self) -> bool:
@@ -187,20 +172,17 @@ class GuardianAgent(BaseAgent):
         logger.critical("🅿️ EMERGENCY PARK initiated")
 
         try:
-            # Проверяем безопасность через HAL
             is_safe, reason = hal.validate_slew()
             if not is_safe:
                 logger.error(f"Park blocked by HAL: {reason}")
                 return False
 
-            # Отправляем команду парковки
             result = await device_commander.send_action("Mount", "Park")
 
             if result.get("status") == "success":
                 self._parked = True
                 logger.info("✅ Mount parked successfully")
 
-                # Публикуем событие
                 await event_bus.publish(
                     "ALERT",
                     {
@@ -221,7 +203,9 @@ class GuardianAgent(BaseAgent):
             return False
 
     async def _trigger_autofocus(self, reason: str) -> bool:
-        """Запускает автофокус."""
+        """
+        Запускает автофокус через TriggerEmulator.
+        """
         if observatory_state.is_autofocus_running:
             logger.warning("Autofocus already running")
             return True
@@ -229,7 +213,11 @@ class GuardianAgent(BaseAgent):
         logger.info(f"🔍 Triggering autofocus: {reason}")
 
         try:
-            success = await trigger_emulator.fire_trigger("autofocus", reason)
+            # ИСПРАВЛЕНО: используем trigger_emulator с правильным путём
+            success = await trigger_emulator.fire_trigger(
+                "autofocus",
+                reason=reason,
+            )
 
             if success:
                 decision = AgentDecision(
@@ -241,6 +229,8 @@ class GuardianAgent(BaseAgent):
                     confidence=0.95,
                 )
                 self.log_decision(decision)
+            else:
+                logger.warning(f"⚠️ Autofocus trigger failed or blocked")
 
             return success
 

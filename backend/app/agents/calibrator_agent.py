@@ -1,6 +1,7 @@
 """
-Calibrator Agent — управляет библиотекой мастер-кадров, проверяет свежесть калибровок.
-Обеспечивает правильное применение калибровочных кадров.
+Calibrator Agent — управляет библиотекой мастер-кадров.
+
+ИСПРАВЛЕНО: Добавлен throttling для предотвращения спама алертов.
 """
 
 import logging
@@ -27,35 +28,20 @@ class CalibrationCheck(BaseModel):
 
 
 class CalibratorAgent(BaseAgent):
-    """
-    Агент управления калибровочными кадрами.
-
-    Responsibilities:
-    - Проверка свежести мастер-кадров (Bias/Dark/Flat)
-    - Подбор оптимальных мастеров по параметрам
-    - Планирование съемки новых мастеров при необходимости
-    - Валидация качества мастеров
-
-    Критерии свежести:
-    - Bias: возраст < 90 дней
-    - Dark: возраст < 30 дней, температура ± 2°C
-    - Flat: возраст < 7 дней, тот же фильтр
-    """
+    """Агент управления калибровочными кадрами."""
 
     def __init__(self, masters_auditor: MastersLibraryAuditor):
         super().__init__(name="Calibrator", role="Calibration Management")
 
         self.masters_auditor = masters_auditor
 
-        # Пороговые значения свежести
         self.freshness_thresholds = {
-            "BIAS": 90,  # days
-            "DARK": 30,  # days
-            "FLAT": 7,  # days
+            "BIAS": 90,
+            "DARK": 30,
+            "FLAT": 7,
         }
 
-        # Температурный допуск для Dark
-        self.temperature_tolerance = 2.0  # °C
+        self.temperature_tolerance = 2.0
 
         # ИСПРАВЛЕНО: Throttling для повторяющихся алертов
         self._recent_alerts: Dict[str, datetime] = {}
@@ -65,7 +51,6 @@ class CalibratorAgent(BaseAgent):
         """Инициализация агента калибровки."""
         await super().initialize()
 
-        # Подписываемся на события
         event_bus.subscribe("NEW_FRAME", self._on_new_frame)
         event_bus.subscribe("MASTERS_INDEXED", self._on_masters_indexed)
 
@@ -81,9 +66,7 @@ class CalibratorAgent(BaseAgent):
         await super().shutdown()
 
     async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Проверяет калибровки для текущих параметров съемки.
-        """
+        """Проверяет калибровки для текущих параметров съемки."""
         checks = await self._check_all_calibrations()
 
         stale_calibrations = [c for c in checks if not c.is_fresh]
@@ -107,19 +90,23 @@ class CalibratorAgent(BaseAgent):
         if decision.decision_type == "CALIBRATION_STALE":
             checks = decision.outputs.get("checks", [])
 
-            # Публикуем рекомендации
             for check_data in checks:
                 check = CalibrationCheck(**check_data)
                 if not check.is_fresh:
-                    await event_bus.publish(
-                        "ALERT",
-                        {
-                            "level": "WARNING",
-                            "message": f"Калибровка {check.master_type} устарела: {check.recommendation}",
-                            "agent": self.name,
-                            "timestamp": datetime.now().isoformat(),
-                        },
-                    )
+                    # ИСПРАВЛЕНО: Проверяем throttling перед публикацией
+                    alert_key = f"{check.master_type}_{check.recommendation}"
+
+                    if not self._is_alert_in_cooldown(alert_key):
+                        await event_bus.publish(
+                            "ALERT",
+                            {
+                                "level": "WARNING",
+                                "message": f"Калибровка {check.master_type} устарела: {check.recommendation}",
+                                "agent": self.name,
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        )
+                        self._recent_alerts[alert_key] = datetime.now()
 
             return True
 
@@ -131,11 +118,10 @@ class CalibratorAgent(BaseAgent):
         if not frame:
             return
 
-        # Проверяем, есть ли подходящий мастер
         check = await self._check_calibration_for_frame(frame)
 
         if check and not check.is_fresh:
-            # ИСПРАВЛЕНО: Throttling для повторяющихся алертов
+            # ИСПРАВЛЕНО: Throttling
             alert_key = f"{check.master_type}_{check.recommendation}"
 
             if self._is_alert_in_cooldown(alert_key):
@@ -159,7 +145,6 @@ class CalibratorAgent(BaseAgent):
         """Обработка события индексации мастеров."""
         logger.info("📚 Masters library indexed, checking freshness...")
 
-        # Проверяем все калибровки
         await self.analyze(
             AgentContext(
                 current_metrics=observatory_state.current_metrics,
@@ -175,12 +160,9 @@ class CalibratorAgent(BaseAgent):
         """Проверяет все типы калибровок."""
         checks = []
 
-        # ИСПРАВЛЕНО: Безопасное получение текущих параметров
-        # get() возвращает None если ключ существует со значением None,
-        # поэтому используем "or" для fallback
         current_temp = observatory_state.current_metrics.get("camera_temp")
         if current_temp is None:
-            current_temp = -15.0  # Дефолтная температура для калибровок
+            current_temp = -15.0
 
         current_exposure = (
             observatory_state.current_metrics.get("exposure_time") or 60.0
@@ -188,14 +170,12 @@ class CalibratorAgent(BaseAgent):
         current_gain = observatory_state.current_metrics.get("gain") or 85
         current_filter = observatory_state.current_metrics.get("filter")
 
-        # Проверяем Bias
         bias_check = await self._check_master(
             "BIAS", temperature=current_temp, gain=current_gain
         )
         if bias_check:
             checks.append(bias_check)
 
-        # Проверяем Dark
         dark_check = await self._check_master(
             "DARK",
             temperature=current_temp,
@@ -205,7 +185,6 @@ class CalibratorAgent(BaseAgent):
         if dark_check:
             checks.append(dark_check)
 
-        # Проверяем Flat (только если известен фильтр)
         if current_filter:
             flat_check = await self._check_master(
                 "FLAT",
@@ -232,7 +211,6 @@ class CalibratorAgent(BaseAgent):
         gain = frame.get("gain", 85)
         filter_name = frame.get("filter")
 
-        # Проверяем Dark
         dark_check = await self._check_master(
             "DARK", temperature=temperature, exposure=exposure, gain=gain
         )
@@ -248,7 +226,6 @@ class CalibratorAgent(BaseAgent):
         filter_name: Optional[str] = None,
     ) -> Optional[CalibrationCheck]:
         """Проверяет наличие и свежесть мастера."""
-        # ИСПРАВЛЕНО: Защита от None в критических параметрах
         if temperature is None:
             logger.debug(f"Skipping {master_type} check: temperature is None")
             return None
@@ -260,12 +237,10 @@ class CalibratorAgent(BaseAgent):
             "filter": filter_name,
         }
 
-        # Проверяем, что masters_auditor доступен
         if not self.masters_auditor:
-            logger.debug("Masters auditor not available, skipping calibration check")
+            logger.debug("Masters auditor not available")
             return None
 
-        # Ищем подходящий мастер
         try:
             matching_master = self.masters_auditor.find_matching_master(
                 image_type=master_type,
@@ -288,22 +263,16 @@ class CalibratorAgent(BaseAgent):
                 recommendation=f"Не найден подходящий {master_type} мастер. Требуется съемка.",
             )
 
-        # Проверяем свежесть
         date_obs = matching_master.get("date_obs", "")
         if date_obs:
             try:
-                # ИСПРАВЛЕНО: Безопасный парсинг даты с учетом timezone
-                # DATE-OBS может быть "2026-06-20T22:15:00" или "2026-06-20"
                 date_str = date_obs.replace("Z", "+00:00")
 
-                # Пробуем разные форматы
                 try:
                     master_date = datetime.fromisoformat(date_str)
                 except ValueError:
-                    # Если не ISO формат, пробуем только дату
                     master_date = datetime.strptime(date_obs[:10], "%Y-%m-%d")
 
-                # ИСПРАВЛЕНО: Убираем timezone для корректного сравнения
                 if master_date.tzinfo is not None:
                     master_date = master_date.replace(tzinfo=None)
 
@@ -331,7 +300,6 @@ class CalibratorAgent(BaseAgent):
             except (ValueError, TypeError) as e:
                 logger.debug(f"Cannot parse master date '{date_obs}': {e}")
 
-        # Если дата не указана, считаем мастер свежим
         return CalibrationCheck(
             master_type=master_type,
             params=params,

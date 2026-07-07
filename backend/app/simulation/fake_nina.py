@@ -200,7 +200,12 @@ class FakeNinaAPI:
             logger.error(f"Error in sequence generation: {e}")
 
     async def _generate_frame(self):
-        """Генерирует один кадр и публикует события."""
+        """
+        Генерирует один кадр и публикует события.
+
+        ИСПРАВЛЕНО: Использование обоих регистров ключей для совместимости
+        с N.I.N.A. (ЗАГЛАВНЫЕ) и внутренними структурами (строчные).
+        """
         self.frame_count += 1
 
         # Генерируем метрики для кадра
@@ -211,8 +216,9 @@ class FakeNinaAPI:
             "rms_total": self.metrics["rms_total"] + random.gauss(0, 0.05),
         }
 
-        # Создаем запись в ImageMetaData.json
+        # ИСПРАВЛЕНО: Публикуем в обоих регистрах для максимальной совместимости
         frame_data = {
+            # N.I.N.A. стандарт (ЗАГЛАВНЫЕ)
             "Index": self.frame_count,
             "ExposureTime": self.exposure_time,
             "Filter": self.current_filter,
@@ -226,6 +232,16 @@ class FakeNinaAPI:
             "ImageType": "LIGHT",
             "Date": datetime.now().strftime("%Y-%m-%d"),
             "Time": datetime.now().strftime("%H:%M:%S"),
+            # Дублируем строчными для совместимости
+            "index": self.frame_count,
+            "exposure_time": self.exposure_time,
+            "filter": self.current_filter,
+            "gain": self.gain,
+            "temperature": self.temperature_actual,
+            "hfr": frame_metrics["hfr"],
+            "fwhm": frame_metrics["fwhm"],
+            "stars": frame_metrics["stars"],
+            "rms_total": frame_metrics["rms_total"],
         }
 
         # Записываем в файл (для SessionWatcher)

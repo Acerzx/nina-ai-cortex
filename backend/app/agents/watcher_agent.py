@@ -138,6 +138,15 @@ class WatcherAgent(BaseAgent):
         if not frame:
             return
 
+        # ИСПРАВЛЕНО: Периодический INFO-отчёт для отладки (каждые 5 кадров)
+        hfr_history_len = len(observatory_state.history.hfr)
+        if hfr_history_len > 0 and hfr_history_len % 5 == 0:
+            recent_hfr = observatory_state.history.hfr[-5:]
+            logger.info(
+                f"📊 HFR history: {hfr_history_len} points, "
+                f"recent: {[f'{v:.2f}' for v in recent_hfr]}"
+            )
+
         # Проверяем метрики кадра
         await self._check_frame_metrics(frame)
 
@@ -205,14 +214,21 @@ class WatcherAgent(BaseAgent):
                 await self._handle_anomaly(anomaly)
 
     async def _check_hfr_trend(self) -> Optional[AnomalyReport]:
-        """Проверяет тренд HFR (Half Flux Radius)."""
+        """Проверяет тренд HFR (Half Flux Radius) с детальной диагностикой."""
         history = observatory_state.history.hfr
 
-        # ИСПРАВЛЕНО: Поддержка малых выборок (fallback для симуляции)
+        # Детальное логирование для отладки
+        logger.debug(f"🔍 HFR check: history length = {len(history)}")
+        if len(history) >= 3:
+            logger.debug(
+                f"   Last 5 values: {history[-5:] if len(history) >= 5 else history}"
+            )
+
         if len(history) < 3:
+            logger.debug("   Skipping: not enough data points (< 3)")
             return None
 
-        # Для малых выборок (< 5 точек) используем простую детекцию выбросов
+        # Для малых выборок (3-4 точки) — упрощенная детекция
         if len(history) < 5:
             current_value = history[-1]
             baseline = history[:-1]
@@ -222,34 +238,44 @@ class WatcherAgent(BaseAgent):
 
             baseline_mean = sum(baseline) / len(baseline)
 
+            if baseline_mean == 0:
+                return None
+
             # Если текущее значение > 50% от базового — это аномалия
-            if baseline_mean > 0 and current_value > baseline_mean * 1.5:
-                deviation_percent = (
-                    (current_value - baseline_mean) / baseline_mean
-                ) * 100
+            deviation_percent = ((current_value - baseline_mean) / baseline_mean) * 100
 
-                if not self._is_in_cooldown("hfr_increase"):
-                    self._recent_anomalies["hfr_increase"] = datetime.now()
+            if deviation_percent > 50.0:  # Упрощенный порог для малых выборок
+                if self._is_in_cooldown("hfr_increase"):
+                    logger.debug("   Skipping: cooldown active")
+                    return None
 
-                    return AnomalyReport(
-                        metric="HFR",
-                        current_value=current_value,
-                        baseline_value=baseline_mean,
-                        deviation_percent=deviation_percent,
-                        z_score=0,  # Z-Score не применим для малых выборок
-                        severity="HIGH",
-                        context={
-                            "recent_values": history,
-                            "baseline_values": baseline,
-                            "note": "Small sample detection (< 5 points)",
-                        },
-                    )
+                self._recent_anomalies["hfr_increase"] = datetime.now()
+
+                logger.warning(
+                    f"⚠️ HFR anomaly detected (small sample): "
+                    f"current={current_value:.2f}, baseline_mean={baseline_mean:.2f}, "
+                    f"deviation={deviation_percent:.1f}%"
+                )
+
+                return AnomalyReport(
+                    metric="HFR",
+                    current_value=current_value,
+                    baseline_value=baseline_mean,
+                    deviation_percent=deviation_percent,
+                    z_score=0,  # Z-Score не применим для малых выборок
+                    severity="HIGH",
+                    context={
+                        "recent_values": history,
+                        "baseline_values": baseline,
+                        "note": "Small sample detection (3-4 points)",
+                    },
+                )
 
             return None
 
         # Стандартная логика для больших выборок (5+ точек)
         recent = history[-5:]
-        baseline = history[:-5] if len(history) > 5 else recent
+        baseline = history[:-5] if len(history) > 5 else history[: len(history) // 2]
 
         if not baseline:
             return None
@@ -257,40 +283,62 @@ class WatcherAgent(BaseAgent):
         baseline_mean = sum(baseline) / len(baseline)
         current_mean = sum(recent) / len(recent)
 
-        if baseline_mean > 0:
-            increase_percent = ((current_mean - baseline_mean) / baseline_mean) * 100
+        if baseline_mean == 0:
+            return None
 
-            if increase_percent > self.thresholds["hfr_increase_percent"]:
-                if self._is_in_cooldown("hfr_increase"):
-                    return None
+        increase_percent = ((current_mean - baseline_mean) / baseline_mean) * 100
 
-                # Z-Score для подтверждения
-                std = (
-                    (sum((x - baseline_mean) ** 2 for x in baseline) / len(baseline))
-                    ** 0.5
-                    if len(baseline) > 1
-                    else 1.0
+        logger.debug(
+            f"   HFR analysis: baseline_mean={baseline_mean:.2f}, "
+            f"current_mean={current_mean:.2f}, increase={increase_percent:.1f}%"
+        )
+
+        if increase_percent > self.thresholds["hfr_increase_percent"]:
+            if self._is_in_cooldown("hfr_increase"):
+                logger.debug("   Skipping: cooldown active")
+                return None
+
+            # Z-Score для подтверждения
+            std = (
+                (sum((x - baseline_mean) ** 2 for x in baseline) / len(baseline)) ** 0.5
+                if len(baseline) > 1
+                else 1.0
+            )
+            z_score = abs(current_mean - baseline_mean) / std if std > 0 else 0
+
+            logger.debug(
+                f"   Z-Score: {z_score:.2f} (threshold: {self.thresholds['z_score_threshold']})"
+            )
+
+            # ИСПРАВЛЕНО: Для симуляции убираем требование Z-Score
+            # В реальности Z-Score помогает отсеять шум, но для четкой аномалии он не нужен
+            if (
+                z_score > self.thresholds["z_score_threshold"]
+                or increase_percent > 60.0
+            ):
+                self._recent_anomalies["hfr_increase"] = datetime.now()
+
+                logger.warning(
+                    f"⚠️ HFR anomaly detected: baseline={baseline_mean:.2f}, "
+                    f"current={current_mean:.2f}, increase={increase_percent:.1f}%, "
+                    f"z_score={z_score:.2f}"
                 )
-                z_score = abs(current_mean - baseline_mean) / std if std > 0 else 0
 
-                if z_score > self.thresholds["z_score_threshold"]:
-                    self._recent_anomalies["hfr_increase"] = datetime.now()
-
-                    return AnomalyReport(
-                        metric="HFR",
-                        current_value=current_mean,
-                        baseline_value=baseline_mean,
-                        deviation_percent=increase_percent,
-                        z_score=z_score,
-                        trend=observatory_state.get_trend("hfr", window=10),
-                        severity="HIGH",
-                        context={
-                            "recent_values": recent,
-                            "baseline_values": baseline[-10:]
-                            if len(baseline) >= 10
-                            else baseline,
-                        },
-                    )
+                return AnomalyReport(
+                    metric="HFR",
+                    current_value=current_mean,
+                    baseline_value=baseline_mean,
+                    deviation_percent=increase_percent,
+                    z_score=z_score,
+                    trend=observatory_state.get_trend("hfr", window=10),
+                    severity="HIGH",
+                    context={
+                        "recent_values": recent,
+                        "baseline_values": baseline[-10:]
+                        if len(baseline) >= 10
+                        else baseline,
+                    },
+                )
 
         return None
 

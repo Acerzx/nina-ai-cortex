@@ -67,6 +67,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# ИСПРАВЛЕНО: Включаем DEBUG для WatcherAgent для отладки детекции аномалий
+logging.getLogger("WatcherAgent").setLevel(logging.DEBUG)
+
 logger = logging.getLogger("CortexMain")
 
 # ============================================================================
@@ -1104,3 +1108,36 @@ async def trigger_meridian_flip_simulation():
 
     await fake_nina.trigger_meridian_flip()
     return {"status": "success", "message": "Meridian flip triggered"}
+
+
+@app.post("/api/v1/simulation/reset-cooldowns", tags=["Simulation"])
+async def reset_agent_cooldowns():
+    """Сбрасывает cooldown всех агентов (для тестирования)."""
+    watcher_agent._recent_anomalies.clear()
+    calibrator_agent._recent_alerts.clear()
+
+    return {
+        "status": "success",
+        "message": "All agent cooldowns reset",
+        "watcher_anomalies_cleared": True,
+        "calibrator_alerts_cleared": True,
+    }
+
+
+@app.get("/api/v1/triggers", tags=["Execution Layer"])
+async def list_available_triggers():
+    """Возвращает список всех доступных триггеров с путями."""
+    return trigger_emulator.list_available_triggers()
+
+
+@app.get("/api/v1/triggers/{trigger_name}", tags=["Execution Layer"])
+async def get_trigger_info(trigger_name: str):
+    """Возвращает информацию о конкретном триггере."""
+    triggers = trigger_emulator.list_available_triggers()
+    if trigger_name not in triggers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Trigger '{trigger_name}' not found. "
+            f"Available: {', '.join(sorted(triggers.keys()))}",
+        )
+    return triggers[trigger_name]
