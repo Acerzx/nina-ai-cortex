@@ -118,7 +118,10 @@ class ObservatoryState:
         if self._subscribed:
             return
 
-        # Prometheus метрики
+        # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB ===
+        event_bus.subscribe("INFLUXDB_UPDATE", self._on_influxdb_update)
+
+        # === РЕЗЕРВНЫЙ ИСТОЧНИК: Prometheus ===
         event_bus.subscribe("PROMETHEUS_UPDATE", self._on_prometheus_update)
 
         # Session Metadata (новые кадры)
@@ -140,11 +143,88 @@ class ObservatoryState:
         # События гида и безопасности из логов
         event_bus.subscribe("LOG_EVENT", self._on_log_event)
 
-        # LiveStack статус
-        event_bus.subscribe("LIVESTACK_STATUS", self._on_livestack_status)
-
         self._subscribed = True
         logger.info("🧠 ObservatoryState initialized and subscribed to events")
+
+    async def _on_influxdb_update(self, data: Dict[str, Any]):
+        """
+        Обновление метрик из InfluxDB (ОСНОВНОЙ ИСТОЧНИК).
+
+        Маппинг метрик InfluxDB на внутренние имена ObservatoryState.
+        """
+        # === Camera ===
+        if "camera_temp" in data:
+            self.current_metrics["camera_temp"] = data["camera_temp"]
+            self._append_history("temperature", data["camera_temp"])
+
+        # === Focuser ===
+        if "focuser_position" in data:
+            self.current_metrics["focuser_position"] = data["focuser_position"]
+
+        # === Guider (PHD2) ===
+        if "guider_rms_ra" in data:
+            self.current_metrics["rms_ra"] = data["guider_rms_ra"]
+            self._append_history("rms_ra", data["guider_rms_ra"])
+
+        if "guider_rms_dec" in data:
+            self.current_metrics["rms_dec"] = data["guider_rms_dec"]
+            self._append_history("rms_dec", data["guider_rms_dec"])
+
+        if "guider_rms_total" in data:
+            self.current_metrics["rms_total"] = data["guider_rms_total"]
+
+        # === Mount ===
+        if "mount_altitude" in data:
+            self.current_metrics["mount_altitude"] = data["mount_altitude"]
+
+        if "mount_azimuth" in data:
+            self.current_metrics["mount_azimuth"] = data["mount_azimuth"]
+
+        # === Rotator ===
+        if "rotator_angle" in data:
+            self.current_metrics["rotator_angle"] = data["rotator_angle"]
+
+        # === Weather ===
+        if "wx_temperature" in data:
+            self.weather["temperature"] = data["wx_temperature"]
+
+        if "wx_humidity" in data:
+            self.weather["humidity"] = data["wx_humidity"]
+            self._append_history("humidity", data["wx_humidity"])
+
+        if "wx_dewpoint" in data:
+            self.weather["dewpoint"] = data["wx_dewpoint"]
+
+        if "wx_cloud_cover" in data:
+            self.weather["cloud_cover"] = data["wx_cloud_cover"]
+
+        if "wx_wind_speed" in data:
+            self.weather["wind_speed"] = data["wx_wind_speed"]
+            self._append_history("wind_speed", data["wx_wind_speed"])
+
+        if "wx_wind_gust" in data:
+            self.weather["wind_gust"] = data["wx_wind_gust"]
+
+        if "wx_wind_direction" in data:
+            self.weather["wind_direction"] = data["wx_wind_direction"]
+
+        if "wx_pressure" in data:
+            self.weather["pressure"] = data["wx_pressure"]
+
+        # === Image Quality ===
+        if "image_hfr" in data:
+            self.current_metrics["hfr"] = data["image_hfr"]
+            self._append_history("hfr", data["image_hfr"])
+
+        if "image_fwhm" in data:
+            self.current_metrics["fwhm"] = data["image_fwhm"]
+            self._append_history("fwhm", data["image_fwhm"])
+
+        if "image_stars" in data:
+            self.current_metrics["star_count"] = data["image_stars"]
+
+        if "image_median" in data:
+            self.current_metrics["median_adu"] = data["image_median"]
 
     async def _on_prometheus_update(self, data: Dict[str, Any]):
         """Обновление метрик из Prometheus."""

@@ -109,8 +109,15 @@ class WatcherManager:
             watcher.start()
         logger.info(f"   ✅ {len(self.watchers)} File Watchers started")
 
-        # 6. Pollers (Prometheus, LogTailer)
+        # 6. Pollers (Prometheus, LogTailer, InfluxDB)
         logger.info("🔄 Starting Pollers...")
+
+        # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB ===
+        from app.ingestion.providers.influxdb_metrics import influxdb_metrics_provider
+
+        await influxdb_metrics_provider.start()
+
+        # === РЕЗЕРВНЫЙ ИСТОЧНИК: Prometheus ===
         prometheus = PrometheusScraper()
         await prometheus.start()
         self.pollers.append(prometheus)
@@ -118,6 +125,7 @@ class WatcherManager:
         log_tailer = LogTailer()
         await log_tailer.start()
         self.pollers.append(log_tailer)
+
         logger.info(f"   ✅ {len(self.pollers)} Pollers started")
 
         # 7. Subscribers (InfluxDB)

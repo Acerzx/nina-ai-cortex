@@ -153,10 +153,17 @@ class CalibratorAgent(BaseAgent):
         """Проверяет все типы калибровок."""
         checks = []
 
-        # Получаем текущие параметры съемки
-        current_temp = observatory_state.current_metrics.get("camera_temp", -15.0)
-        current_exposure = observatory_state.current_metrics.get("exposure_time", 60.0)
-        current_gain = observatory_state.current_metrics.get("gain", 85)
+        # ИСПРАВЛЕНО: Безопасное получение текущих параметров
+        # get() возвращает None если ключ существует со значением None,
+        # поэтому используем "or" для fallback
+        current_temp = observatory_state.current_metrics.get("camera_temp")
+        if current_temp is None:
+            current_temp = -15.0  # Дефолтная температура для калибровок
+
+        current_exposure = (
+            observatory_state.current_metrics.get("exposure_time") or 60.0
+        )
+        current_gain = observatory_state.current_metrics.get("gain") or 85
         current_filter = observatory_state.current_metrics.get("filter")
 
         # Проверяем Bias
@@ -176,7 +183,7 @@ class CalibratorAgent(BaseAgent):
         if dark_check:
             checks.append(dark_check)
 
-        # Проверяем Flat
+        # Проверяем Flat (только если известен фильтр)
         if current_filter:
             flat_check = await self._check_master(
                 "FLAT",
@@ -219,6 +226,11 @@ class CalibratorAgent(BaseAgent):
         filter_name: Optional[str] = None,
     ) -> Optional[CalibrationCheck]:
         """Проверяет наличие и свежесть мастера."""
+        # ИСПРАВЛЕНО: Защита от None в критических параметрах
+        if temperature is None:
+            logger.debug(f"Skipping {master_type} check: temperature is None")
+            return None
+
         params = {
             "temperature": temperature,
             "exposure": exposure,
@@ -226,15 +238,24 @@ class CalibratorAgent(BaseAgent):
             "filter": filter_name,
         }
 
+        # Проверяем, что masters_auditor доступен
+        if not self.masters_auditor:
+            logger.debug("Masters auditor not available, skipping calibration check")
+            return None
+
         # Ищем подходящий мастер
-        matching_master = self.masters_auditor.find_matching_master(
-            image_type=master_type,
-            temperature=temperature,
-            exposure=exposure,
-            gain=gain,
-            filter_name=filter_name,
-            temp_tolerance=self.temperature_tolerance,
-        )
+        try:
+            matching_master = self.masters_auditor.find_matching_master(
+                image_type=master_type,
+                temperature=temperature,
+                exposure=exposure,
+                gain=gain,
+                filter_name=filter_name,
+                temp_tolerance=self.temperature_tolerance,
+            )
+        except Exception as e:
+            logger.error(f"Error finding matching {master_type} master: {e}")
+            return None
 
         if not matching_master:
             return CalibrationCheck(
@@ -249,7 +270,21 @@ class CalibratorAgent(BaseAgent):
         date_obs = matching_master.get("date_obs", "")
         if date_obs:
             try:
-                master_date = datetime.fromisoformat(date_obs.replace("Z", "+00:00"))
+                # ИСПРАВЛЕНО: Безопасный парсинг даты с учетом timezone
+                # DATE-OBS может быть "2026-06-20T22:15:00" или "2026-06-20"
+                date_str = date_obs.replace("Z", "+00:00")
+
+                # Пробуем разные форматы
+                try:
+                    master_date = datetime.fromisoformat(date_str)
+                except ValueError:
+                    # Если не ISO формат, пробуем только дату
+                    master_date = datetime.strptime(date_obs[:10], "%Y-%m-%d")
+
+                # ИСПРАВЛЕНО: Убираем timezone для корректного сравнения
+                if master_date.tzinfo is not None:
+                    master_date = master_date.replace(tzinfo=None)
+
                 age_days = (datetime.now() - master_date).days
 
                 threshold = self.freshness_thresholds.get(master_type, 30)
@@ -272,7 +307,7 @@ class CalibratorAgent(BaseAgent):
                 )
 
             except (ValueError, TypeError) as e:
-                logger.warning(f"Cannot parse master date: {date_obs}")
+                logger.debug(f"Cannot parse master date '{date_obs}': {e}")
 
         # Если дата не указана, считаем мастер свежим
         return CalibrationCheck(
@@ -280,5 +315,5 @@ class CalibratorAgent(BaseAgent):
             params=params,
             matching_master=matching_master,
             is_fresh=True,
-            recommendation="Мастер найден",
+            recommendation="Мастер найден (дата не указана)",
         )
