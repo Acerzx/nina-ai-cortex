@@ -1,8 +1,11 @@
 """
 Memory Manager Agent — управление долгосрочной памятью и контекстом для всех агентов.
 Обеспечивает согласованность контекста и очистку старых данных.
+
+ИСПРАВЛЕНО (audit 5.1): Сохранение ссылки на cleanup задачу.
 """
 
+import asyncio
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
@@ -37,10 +40,7 @@ class MemoryManagerAgent(BaseAgent):
     - Очистка устаревших записей
     - Предоставление контекста другим агентам
 
-    Типы памяти:
-    - Short-term: текущая сессия (сбрасывается при завершении)
-    - Medium-term: последние 30 дней (кэш в памяти)
-    - Long-term: вся история (Qdrant + InfluxDB)
+    ИСПРАВЛЕНО (audit 5.1): Сохранение ссылки на cleanup задачу.
     """
 
     def __init__(self):
@@ -52,8 +52,8 @@ class MemoryManagerAgent(BaseAgent):
         # Среднесрочная память (последние 30 дней)
         self._medium_term: Dict[str, MemoryEntry] = {}
 
-        # Задачи очистки
-        self._cleanup_task: Optional[Any] = None
+        # ИСПРАВЛЕНО (audit 5.1): Хранение ссылки на cleanup задачу
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     async def initialize(self):
         """Инициализация агента управления памятью."""
@@ -63,9 +63,7 @@ class MemoryManagerAgent(BaseAgent):
         event_bus.subscribe("SEQUENCE_STARTED", self._on_sequence_started)
         event_bus.subscribe("SEQUENCE_STOPPED", self._on_sequence_stopped)
 
-        # Запускаем периодическую очистку
-        import asyncio
-
+        # ИСПРАВЛЕНО (audit 5.1): Сохраняем ссылку на задачу
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
         logger.info("✅ Memory Manager Agent initialized")
@@ -75,12 +73,16 @@ class MemoryManagerAgent(BaseAgent):
         event_bus.unsubscribe("SEQUENCE_STARTED", self._on_sequence_started)
         event_bus.unsubscribe("SEQUENCE_STOPPED", self._on_sequence_stopped)
 
+        # ИСПРАВЛЕНО (audit 5.1): Корректная отмена cleanup задачи
         if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except Exception:
-                pass
+            if not self._cleanup_task.done():
+                self._cleanup_task.cancel()
+                try:
+                    await self._cleanup_task
+                except asyncio.CancelledError:
+                    pass
+                logger.debug("Cleanup task cancelled")
+            self._cleanup_task = None
 
         await super().shutdown()
 
@@ -103,12 +105,9 @@ class MemoryManagerAgent(BaseAgent):
 
     async def _periodic_cleanup(self):
         """Периодическая очистка устаревших записей."""
-        import asyncio
-
         while True:
             try:
                 await asyncio.sleep(3600)  # Каждый час
-
                 now = datetime.now()
 
                 # Очищаем краткосрочную память
@@ -138,6 +137,7 @@ class MemoryManagerAgent(BaseAgent):
                     )
 
             except asyncio.CancelledError:
+                logger.debug("Periodic cleanup cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in periodic cleanup: {e}")
@@ -285,7 +285,7 @@ class MemoryManagerAgent(BaseAgent):
             except Exception as e:
                 logger.error(f"Failed to get RAG context: {e}")
 
-        return "\n\n".join(context_parts) if context_parts else "Контекст не найден"
+        return "\n".join(context_parts) if context_parts else "Контекст не найден"
 
     async def prune_old_memories(self) -> int:
         """
@@ -327,4 +327,7 @@ class MemoryManagerAgent(BaseAgent):
             "medium_term_count": len(self._medium_term),
             "short_term_keys": list(self._short_term.keys())[:10],
             "medium_term_keys": list(self._medium_term.keys())[:10],
+            "cleanup_task_running": (
+                self._cleanup_task is not None and not self._cleanup_task.done()
+            ),
         }

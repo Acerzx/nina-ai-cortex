@@ -1,11 +1,15 @@
 """
 Watcher Manager — централизованный хаб для управления всеми watchers, pollers и subscribers.
 Устраняет проблему дублирования инициализации и обеспечивает единый lifecycle management.
+
+ИСПРАВЛЕНО (audit 5.1): Сохранение ссылок на фоновые задачи для предотвращения
+их отмены сборщиком мусора в Python 3.12+
 """
 
 import asyncio
 import logging
 from pathlib import Path
+from typing import Set
 from app.core.config import settings
 from app.core.events import event_bus
 from app.core.capability_registry import CapabilityRegistry
@@ -45,6 +49,9 @@ class WatcherManager:
     """
     Централизованный менеджер для всех watchers, pollers и subscribers.
     Обеспечивает единый lifecycle management и Dependency Injection.
+
+    ИСПРАВЛЕНО (audit 5.1): Добавлен набор _background_tasks для хранения
+    ссылок на все фоновые задачи, предотвращая их сбор мусором.
     """
 
     def __init__(self):
@@ -53,7 +60,10 @@ class WatcherManager:
         self.ws_client = None
         self.influx = None
         self.registry = None
-        self.masters_auditor = None  # ИСПРАВЛЕНО: сохраняем ссылку на аудитор
+        self.masters_auditor = None
+
+        # ИСПРАВЛЕНО (audit 5.1): Хранение ссылок на фоновые задачи
+        self._background_tasks: Set[asyncio.Task] = set()
 
     async def start(self):
         """
@@ -102,7 +112,7 @@ class WatcherManager:
                 AutoFocusAnalysisWatcher(self.registry),
                 NightSummaryWatcher(self.registry),
                 AIWeatherWatcher(self.registry),
-                DynamicSequencerWatcher(self.registry),  # ИСПРАВЛЕНО: добавлен
+                DynamicSequencerWatcher(self.registry),
             ]
         )
         for watcher in self.watchers:
@@ -111,7 +121,6 @@ class WatcherManager:
 
         # 6. Pollers (Prometheus, LogTailer, InfluxDB)
         logger.info("🔄 Starting Pollers...")
-
         # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB ===
         from app.ingestion.providers.influxdb_metrics import influxdb_metrics_provider
 
@@ -125,7 +134,6 @@ class WatcherManager:
         log_tailer = LogTailer()
         await log_tailer.start()
         self.pollers.append(log_tailer)
-
         logger.info(f"   ✅ {len(self.pollers)} Pollers started")
 
         # 7. Subscribers (InfluxDB)
@@ -135,8 +143,13 @@ class WatcherManager:
 
         # 8. Masters Library Audit (background task)
         logger.info("📚 Starting Masters Library Audit in background...")
-        self.masters_auditor = MastersLibraryAuditor()  # ИСПРАВЛЕНО: сохраняем ссылку
-        asyncio.create_task(self.masters_auditor.scan_library())
+        self.masters_auditor = MastersLibraryAuditor()
+
+        # ИСПРАВЛЕНО (audit 5.1): Сохраняем ссылку на задачу
+        scan_task = asyncio.create_task(self.masters_auditor.scan_library())
+        self._background_tasks.add(scan_task)
+        scan_task.add_done_callback(self._background_tasks.discard)
+        logger.info("   ✅ Masters Library Audit task scheduled")
 
         # 9. WebSocket Client (к N.I.N.A.)
         logger.info("📡 Starting WebSocket Client to N.I.N.A....")
@@ -154,8 +167,25 @@ class WatcherManager:
     async def stop(self):
         """
         Корректно останавливает все компоненты в обратном порядке.
+
+        ИСПРАВЛЕНО (audit 5.1): Отменяет все фоновые задачи перед остановкой.
         """
         logger.info("🛑 Stopping all Cortex components...")
+
+        # ИСПРАВЛЕНО (audit 5.1): Отменяем все фоновые задачи
+        if self._background_tasks:
+            logger.info(
+                f"   ⏹️ Cancelling {len(self._background_tasks)} background tasks..."
+            )
+            for task in list(self._background_tasks):
+                if not task.done():
+                    task.cancel()
+
+            # Ждем завершения всех задач
+            if self._background_tasks:
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+            logger.info("   ✅ All background tasks cancelled")
 
         # Останавливаем watchers
         for watcher in self.watchers:
@@ -171,7 +201,7 @@ class WatcherManager:
             except Exception as e:
                 logger.error(f"Error stopping poller: {e}")
 
-        # ИСПРАВЛЕНО: Останавливаем InfluxDB Metrics Provider
+        # Останавливаем InfluxDB Metrics Provider
         try:
             from app.ingestion.providers.influxdb_metrics import (
                 influxdb_metrics_provider,
@@ -203,5 +233,4 @@ class WatcherManager:
 
         # Останавливаем EventBus
         await event_bus.stop()
-
         logger.info("✅ All Cortex components stopped gracefully.")
