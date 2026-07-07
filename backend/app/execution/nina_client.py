@@ -94,6 +94,29 @@ class NinaAdvancedClient:
                     self._client = None
                     self._is_started = False
 
+    async def health_check(self) -> bool:
+        """
+        Проверяет доступность N.I.N.A. API.
+
+        ИСПРАВЛЕНО (для audit 12.3): используется APIHealthGate в preflight.py.
+
+        Returns:
+            True если API доступен, False в противном случае
+        """
+        try:
+            client = await self._get_client()
+            response = await client.get("/v2/api/version")
+            return response.status_code == 200
+        except httpx.ConnectError:
+            logger.debug("N.I.N.A. API not reachable (connection refused)")
+            return False
+        except httpx.TimeoutException:
+            logger.debug("N.I.N.A. API timeout during health check")
+            return False
+        except Exception as e:
+            logger.debug(f"N.I.N.A. health check error: {e}")
+            return False
+
     def _calculate_backoff(self, attempt: int) -> float:
         """
         Вычисляет задержку для exponential backoff с jitter.

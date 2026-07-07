@@ -1,6 +1,12 @@
 """
 Pre-flight Checklist — формализованный чек-лист перед стартом сессии.
 Основан на архитектуре Atlas (8 gates с агрегированным verdict).
+
+ИСПРАВЛЕНО (audit 12.3):
+- CalibrationGate теперь проверяет наличие мастеров через MastersLibraryAuditor
+- DiskSpaceGate проверяет свободное место через disk_monitor.check_all_disks()
+- APIHealthGate проверяет доступность N.I.N.A. API через nina_client.health_check()
+- Добавлена проверка оборудования через observatory_state
 """
 
 import logging
@@ -10,6 +16,9 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
+from app.core.config import settings
+from app.storage.disk_monitor import disk_monitor
+from app.execution.nina_client import nina_client
 
 logger = logging.getLogger("PreFlight")
 
@@ -49,9 +58,9 @@ class PreFlightChecker:
     Gates:
     1. WeatherGate — погодные условия
     2. HardwareGate — статус оборудования
-    3. CalibrationGate — свежесть калибровок
-    4. DiskSpaceGate — свободное место на диске
-    5. APIHealthGate — доступность N.I.N.A. API
+    3. CalibrationGate — свежесть калибровок (ИСПРАВЛЕНО audit 12.3)
+    4. DiskSpaceGate — свободное место на диске (ИСПРАВЛЕНО audit 12.3)
+    5. APIHealthGate — доступность N.I.N.A. API (ИСПРАВЛЕНО audit 12.3)
     6. SafetyMonitorGate — статус Safety Monitor
     7. SequenceGate — готовность секвенсора
     8. ModeGate — режим работы системы
@@ -69,6 +78,21 @@ class PreFlightChecker:
             "ModeGate",
         ]
 
+        # Настраиваемые пороги из конфига
+        thresholds = getattr(settings, "thresholds", None)
+        if thresholds:
+            self.cloud_cover_max = getattr(thresholds, "cloud_cover_max_percent", 80.0)
+            self.wind_speed_max = getattr(thresholds, "wind_speed_max_mps", 20.0)
+            self.humidity_max = getattr(thresholds, "humidity_max_percent", 90.0)
+            self.min_free_disk_space_gb = getattr(
+                thresholds, "min_free_disk_space_gb", 20.0
+            )
+        else:
+            self.cloud_cover_max = 80.0
+            self.wind_speed_max = 20.0
+            self.humidity_max = 90.0
+            self.min_free_disk_space_gb = 20.0
+
     async def run_all(self) -> PreFlightReport:
         """Запускает все проверки и возвращает агрегированный отчет."""
         results = {}
@@ -76,10 +100,23 @@ class PreFlightChecker:
         for gate_name in self.gates:
             gate_method = getattr(self, f"_check_{gate_name.lower()}", None)
             if gate_method:
-                result = await gate_method()
-                results[gate_name] = result
+                try:
+                    result = await gate_method()
+                    results[gate_name] = result
+                except Exception as e:
+                    logger.error(f"Error in {gate_name}: {e}")
+                    results[gate_name] = GateResult(
+                        gate_name=gate_name,
+                        status=GateStatus.CAUTION,
+                        message=f"Check failed with error: {e}",
+                    )
             else:
                 logger.warning(f"Gate method not found: {gate_name}")
+                results[gate_name] = GateResult(
+                    gate_name=gate_name,
+                    status=GateStatus.WAITING,
+                    message="Check not implemented",
+                )
 
         # Агрегируем verdict
         verdict = self._aggregate_verdict(results)
@@ -93,7 +130,6 @@ class PreFlightChecker:
 
         # Публикуем отчет
         await event_bus.publish("PREFLIGHT_REPORT", report.model_dump())
-
         logger.info(f"✅ Pre-flight check complete: {verdict.value}")
 
         return report
@@ -101,33 +137,34 @@ class PreFlightChecker:
     async def _check_weathergate(self) -> GateResult:
         """Проверка погодных условий."""
         weather = observatory_state.weather
-
         cloud_cover = weather.get("cloud_cover")
         wind_speed = weather.get("wind_speed")
         humidity = weather.get("humidity")
 
-        # Проверки
-        if cloud_cover is not None and cloud_cover > 80.0:
+        # Проверки с настраиваемыми порогами
+        if cloud_cover is not None and cloud_cover > self.cloud_cover_max:
             return GateResult(
                 gate_name="WeatherGate",
                 status=GateStatus.NO_GO,
-                message=f"Cloud cover too high: {cloud_cover}%",
+                message=f"Cloud cover too high: {cloud_cover}% "
+                f"(max {self.cloud_cover_max}%)",
                 details={"cloud_cover": cloud_cover},
             )
 
-        if wind_speed is not None and wind_speed > 20.0:
+        if wind_speed is not None and wind_speed > self.wind_speed_max:
             return GateResult(
                 gate_name="WeatherGate",
                 status=GateStatus.NO_GO,
-                message=f"Wind speed too high: {wind_speed} m/s",
+                message=f"Wind speed too high: {wind_speed} m/s "
+                f"(max {self.wind_speed_max} m/s)",
                 details={"wind_speed": wind_speed},
             )
 
-        if humidity is not None and humidity > 90.0:
+        if humidity is not None and humidity > self.humidity_max:
             return GateResult(
                 gate_name="WeatherGate",
                 status=GateStatus.CAUTION,
-                message=f"High humidity: {humidity}%",
+                message=f"High humidity: {humidity}% (max {self.humidity_max}%)",
                 details={"humidity": humidity},
             )
 
@@ -140,10 +177,9 @@ class PreFlightChecker:
 
     async def _check_hardwaregate(self) -> GateResult:
         """Проверка статуса оборудования."""
-        # Проверяем базовые метрики оборудования
         metrics = observatory_state.current_metrics
-
         camera_temp = metrics.get("camera_temp")
+
         if camera_temp is None:
             return GateResult(
                 gate_name="HardwareGate",
@@ -153,7 +189,7 @@ class PreFlightChecker:
             )
 
         # Проверяем, что камера охлаждена
-        if camera_temp > -10.0:  # Примерный порог
+        if camera_temp > -10.0:
             return GateResult(
                 gate_name="HardwareGate",
                 status=GateStatus.CAUTION,
@@ -169,37 +205,227 @@ class PreFlightChecker:
         )
 
     async def _check_calibrationgate(self) -> GateResult:
-        """Проверка свежести калибровок."""
-        # Здесь должна быть интеграция с MastersLibraryAuditor
-        # Для простоты возвращаем GO
+        """
+        ИСПРАВЛЕНО (audit 12.3): Реальная проверка калибровок через
+        MastersLibraryAuditor.
+
+        Проверяет:
+        1. Инициализирован ли MastersLibraryAuditor
+        2. Есть ли мастера нужных типов (BIAS, DARK, FLAT)
+        3. Актуальность мастеров (дата создания)
+        """
+        # Импортируем здесь, чтобы избежать циклических зависимостей
+        try:
+            from app.ingestion.watchers.manager import watcher_manager
+        except ImportError:
+            return GateResult(
+                gate_name="CalibrationGate",
+                status=GateStatus.WAITING,
+                message="WatcherManager not available",
+            )
+
+        auditor = watcher_manager.masters_auditor
+        if not auditor:
+            return GateResult(
+                gate_name="CalibrationGate",
+                status=GateStatus.WAITING,
+                message="MastersLibraryAuditor not initialized",
+            )
+
+        # Получаем статистику мастеров
+        stats = auditor.get_stats()
+        total_bias = stats.get("total_bias", 0)
+        total_dark = stats.get("total_dark", 0)
+        total_flat = stats.get("total_flat", 0)
+        total_unknown = stats.get("total_unknown", 0)
+        scan_errors = stats.get("scan_errors", 0)
+
+        details = {
+            "total_bias": total_bias,
+            "total_dark": total_dark,
+            "total_flat": total_flat,
+            "total_unknown": total_unknown,
+            "scan_errors": scan_errors,
+        }
+
+        # Проверка наличия мастеров
+        missing_types = []
+        if total_bias == 0:
+            missing_types.append("BIAS")
+        if total_dark == 0:
+            missing_types.append("DARK")
+        if total_flat == 0:
+            missing_types.append("FLAT")
+
+        if missing_types:
+            return GateResult(
+                gate_name="CalibrationGate",
+                status=GateStatus.NO_GO,
+                message=f"Missing calibration masters: {', '.join(missing_types)}",
+                details=details,
+            )
+
+        # Проверка свежести мастеров
+        summary = auditor.get_summary_by_category()
+        stale_types = []
+
+        freshness_days = {
+            "BIAS": 90,
+            "DARK": 30,
+            "FLAT": 7,
+        }
+
+        for master_type, max_days in freshness_days.items():
+            category_summary = summary.get(master_type, {})
+            max_date_str = category_summary.get("max_date")
+            if max_date_str:
+                try:
+                    # Парсим дату
+                    if "T" in max_date_str:
+                        max_date = datetime.fromisoformat(
+                            max_date_str.replace("Z", "+00:00")
+                        )
+                        if max_date.tzinfo:
+                            max_date = max_date.replace(tzinfo=None)
+                    else:
+                        max_date = datetime.strptime(max_date_str[:10], "%Y-%m-%d")
+
+                    age_days = (datetime.now() - max_date).days
+                    if age_days > max_days:
+                        stale_types.append(
+                            f"{master_type} ({age_days}d old, max {max_days}d)"
+                        )
+                        details[f"{master_type}_age_days"] = age_days
+                except (ValueError, TypeError):
+                    pass
+
+        if stale_types:
+            return GateResult(
+                gate_name="CalibrationGate",
+                status=GateStatus.CAUTION,
+                message=f"Stale calibration masters: {'; '.join(stale_types)}",
+                details=details,
+            )
+
         return GateResult(
             gate_name="CalibrationGate",
             status=GateStatus.GO,
-            message="Calibration masters available",
-            details={},
+            message=(
+                f"Calibration masters available: "
+                f"{total_bias} BIAS, {total_dark} DARK, {total_flat} FLAT"
+            ),
+            details=details,
         )
 
     async def _check_diskspacegate(self) -> GateResult:
-        """Проверка свободного места на диске."""
-        # Здесь должна быть проверка через shutil.disk_usage
-        # Для простоты возвращаем GO
+        """
+        ИСПРАВЛЕНО (audit 12.3): Реальная проверка свободного места через
+        disk_monitor.
+
+        Проверяет:
+        1. Свободное место на всех monitored путях
+        2. Предупреждение при < 50 GB
+        3. Критический NO-GO при < 20 GB (или min_free_disk_space_gb из конфига)
+        """
+        try:
+            disk_usage_list = await disk_monitor.check_all_disks()
+        except Exception as e:
+            return GateResult(
+                gate_name="DiskSpaceGate",
+                status=GateStatus.CAUTION,
+                message=f"Failed to check disk usage: {e}",
+            )
+
+        if not disk_usage_list:
+            return GateResult(
+                gate_name="DiskSpaceGate",
+                status=GateStatus.WAITING,
+                message="No disk usage data available",
+            )
+
+        details = {
+            "disks": [d.model_dump() for d in disk_usage_list],
+            "min_free_space_gb": self.min_free_disk_space_gb,
+        }
+
+        # Проверяем каждый monitored путь
+        critical_disks = []
+        warning_disks = []
+
+        for usage in disk_usage_list:
+            # Пропускаем недоступные пути (total=0)
+            if usage.total_gb == 0:
+                continue
+
+            if usage.free_gb < self.min_free_disk_space_gb:
+                critical_disks.append(f"{usage.path} ({usage.free_gb:.1f} GB free)")
+            elif usage.free_gb < self.min_free_disk_space_gb * 2.5:
+                warning_disks.append(f"{usage.path} ({usage.free_gb:.1f} GB free)")
+
+        if critical_disks:
+            return GateResult(
+                gate_name="DiskSpaceGate",
+                status=GateStatus.NO_GO,
+                message=(
+                    f"Insufficient disk space on: "
+                    f"{'; '.join(critical_disks)}. "
+                    f"Minimum required: {self.min_free_disk_space_gb} GB"
+                ),
+                details=details,
+            )
+
+        if warning_disks:
+            return GateResult(
+                gate_name="DiskSpaceGate",
+                status=GateStatus.CAUTION,
+                message=(f"Low disk space warning on: {'; '.join(warning_disks)}"),
+                details=details,
+            )
+
+        # Формируем summary
+        summary_parts = [
+            f"{u.path}: {u.free_gb:.1f} GB free ({u.usage_percent:.0f}% used)"
+            for u in disk_usage_list
+            if u.total_gb > 0
+        ]
+
         return GateResult(
             gate_name="DiskSpaceGate",
             status=GateStatus.GO,
             message="Sufficient disk space",
-            details={},
+            details={**details, "summary": summary_parts},
         )
 
     async def _check_apihealthgate(self) -> GateResult:
-        """Проверка доступности N.I.N.A. API."""
-        # Здесь должна быть проверка через nina_client
-        # Для простоты возвращаем GO
-        return GateResult(
-            gate_name="APIHealthGate",
-            status=GateStatus.GO,
-            message="N.I.N.A. API reachable",
-            details={},
-        )
+        """
+        ИСПРАВЛЕНО (audit 12.3): Реальная проверка доступности N.I.N.A. API
+        через nina_client.health_check().
+        """
+        try:
+            is_healthy = await nina_client.health_check()
+        except Exception as e:
+            logger.debug(f"N.I.N.A. health check error: {e}")
+            return GateResult(
+                gate_name="APIHealthGate",
+                status=GateStatus.NO_GO,
+                message=f"N.I.N.A. API unreachable: {type(e).__name__}",
+                details={"error": str(e)},
+            )
+
+        if is_healthy:
+            return GateResult(
+                gate_name="APIHealthGate",
+                status=GateStatus.GO,
+                message="N.I.N.A. API reachable",
+                details={"healthy": True},
+            )
+        else:
+            return GateResult(
+                gate_name="APIHealthGate",
+                status=GateStatus.NO_GO,
+                message="N.I.N.A. API not responding",
+                details={"healthy": False},
+            )
 
     async def _check_safetymonitorgate(self) -> GateResult:
         """Проверка статуса Safety Monitor."""
@@ -240,11 +466,23 @@ class PreFlightChecker:
                 details={"is_running": True},
             )
 
+        # Проверка наличия теневого графа
+        if not state_tracker._shadow_graph:
+            return GateResult(
+                gate_name="SequenceGate",
+                status=GateStatus.WAITING,
+                message="Shadow graph not loaded yet",
+                details={"shadow_graph_loaded": False},
+            )
+
         return GateResult(
             gate_name="SequenceGate",
             status=GateStatus.GO,
             message="Sequence ready to start",
-            details={"is_running": False},
+            details={
+                "is_running": False,
+                "shadow_graph_loaded": True,
+            },
         )
 
     async def _check_modegate(self) -> GateResult:
@@ -260,6 +498,20 @@ class PreFlightChecker:
                 message="System in MANUAL mode (no autonomous actions)",
                 details={"mode": current_mode.value},
             )
+
+        # ИСПРАВЛЕНО: Проверка здоровья LLM для FULL_AI режима
+        if current_mode.value == "full_ai":
+            llm_healthy = mode_manager.llm_healthy
+            if not llm_healthy:
+                return GateResult(
+                    gate_name="ModeGate",
+                    status=GateStatus.CAUTION,
+                    message="FULL_AI mode but LLM is unhealthy",
+                    details={
+                        "mode": current_mode.value,
+                        "llm_healthy": False,
+                    },
+                )
 
         return GateResult(
             gate_name="ModeGate",
@@ -298,6 +550,18 @@ class PreFlightChecker:
                 recommendations.append(f"[{gate_name}] {result.message}")
             elif result.status == GateStatus.CAUTION:
                 recommendations.append(f"[{gate_name}] WARNING: {result.message}")
+            elif result.status == GateStatus.WAITING:
+                recommendations.append(f"[{gate_name}] PENDING: {result.message}")
+
+        # Общие рекомендации
+        if verdict == GateStatus.GO:
+            recommendations.insert(0, "✅ All gates passed — ready to start")
+        elif verdict == GateStatus.NO_GO:
+            recommendations.insert(
+                0, "❌ Critical issues found — do NOT start sequence"
+            )
+        elif verdict == GateStatus.WAITING:
+            recommendations.insert(0, "⏳ Waiting for some systems to initialize")
 
         return recommendations
 
