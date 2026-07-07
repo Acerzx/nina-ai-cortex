@@ -1,10 +1,15 @@
 """
 Orchestrator — центральный координатор всех AI-агентов.
 Управляет приоритетами, маршрутизацией задач и workflow.
+
+ИСПРАВЛЕНО (audit 10.2): _decisions_log теперь использует collections.deque
+с ограничением maxlen=1000 для предотвращения утечки памяти.
+Решения одновременно persist-ятся в Decision Audit Trail (SQLite).
 """
 
 import asyncio
 import logging
+from collections import deque
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
@@ -12,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.core.events import event_bus
 from app.agents.observatory_state import observatory_state
 from app.agents.base_agent import AgentDecision, AgentContext
+from app.storage.decision_audit import decision_audit, DecisionRecord
 
 logger = logging.getLogger("Orchestrator")
 
@@ -42,18 +48,19 @@ class Orchestrator:
     Архитектура (Orchestrator-Worker Pattern):
     - Маршрутизирует задачи между агентами
     - Управляет приоритетами (Safety > Quality > Optimization)
-    - Логирует все решения в Decision Audit Trail
+    - Логирует все решения в Decision Audit Trail (persistent)
+    - Хранит ограниченную историю в памяти (deque maxlen=1000)
     - Реализует паттерн Supervisor
 
-    Workflow:
-    1. Scheduler строит план на ночь
-    2. Watcher мониторит метрики в реальном времени
-    3. При аномалии → Diagnostician анализирует причину
-    4. Strategist предлагает оптимизацию
-    5. Guardian проверяет безопасность
-    6. Auditor генерирует Session Digest после завершения
-    7. Calibrator управляет мастер-кадрами
+    ИСПРАВЛЕНО (audit 10.2): _decisions_log использует deque с maxlen=1000
+    вместо list с ручной обрезкой до 10000. Это:
+    - Предотвращает утечку памяти при длительной работе
+    - Устраняет costly list re-creation (срез [-10000:])
+    - O(1) амортизированное добавление вместо O(n)
     """
+
+    # Максимальное количество решений в памяти (in-memory cache)
+    DECISIONS_MEMORY_LIMIT: int = 1000
 
     def __init__(self):
         self.agents: Dict[str, Any] = {}
@@ -61,7 +68,13 @@ class Orchestrator:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._decision_queue: asyncio.Queue = asyncio.Queue()
-        self._decisions_log: List[AgentDecision] = []
+
+        # ИСПРАВЛЕНО (audit 10.2): используем deque с maxlen вместо list
+        # deque автоматически удаляет самые старые элементы при превышении лимита
+        self._decisions_log: deque = deque(maxlen=self.DECISIONS_MEMORY_LIMIT)
+
+        # Счетчик всех обработанных решений (включая выгруженные из памяти)
+        self._total_decisions_processed: int = 0
 
         # Приоритеты агентов
         self.agent_priorities = {
@@ -79,7 +92,6 @@ class Orchestrator:
         """Запускает Orchestrator."""
         if self._running:
             return
-
         self._running = True
         logger.info("🎯 Orchestrator started")
 
@@ -89,13 +101,12 @@ class Orchestrator:
         event_bus.subscribe("SEQUENCE_STARTED", self._handle_sequence_started)
         event_bus.subscribe("SEQUENCE_STOPPED", self._handle_sequence_stopped)
 
-        # Запускаем main loop
+        # Запускаем main loop, сохраняя ссылку на задачу (audit 5.1)
         self._task = asyncio.create_task(self._main_loop())
 
     async def stop(self):
         """Останавливает Orchestrator."""
         self._running = False
-
         if self._task:
             self._task.cancel()
             try:
@@ -104,10 +115,13 @@ class Orchestrator:
                 pass
 
         # Отписываемся от событий
-        event_bus.unsubscribe("ALERT", self._handle_alert)
-        event_bus.unsubscribe("NEW_FRAME", self._handle_new_frame)
-        event_bus.unsubscribe("SEQUENCE_STARTED", self._handle_sequence_started)
-        event_bus.unsubscribe("SEQUENCE_STOPPED", self._handle_sequence_stopped)
+        try:
+            event_bus.unsubscribe("ALERT", self._handle_alert)
+            event_bus.unsubscribe("NEW_FRAME", self._handle_new_frame)
+            event_bus.unsubscribe("SEQUENCE_STARTED", self._handle_sequence_started)
+            event_bus.unsubscribe("SEQUENCE_STOPPED", self._handle_sequence_stopped)
+        except Exception as e:
+            logger.debug(f"Error unsubscribing from events: {e}")
 
         logger.info("🎯 Orchestrator stopped")
 
@@ -120,7 +134,6 @@ class Orchestrator:
         """Устанавливает режим работы системы."""
         old_mode = self.mode
         self.mode = mode
-
         logger.info(f"🔄 Mode changed: {old_mode.value} -> {mode.value}")
 
         # Публикуем событие смены режима
@@ -157,7 +170,13 @@ class Orchestrator:
         return True
 
     async def _main_loop(self):
-        """Основной цикл обработки решений."""
+        """
+        Основной цикл обработки решений.
+
+        ИСПРАВЛЕНО (audit 10.2): решения добавляются в deque (O(1)),
+        а также persist-ятся в Decision Audit Trail (SQLite) для
+        долгосрочного хранения и анализа.
+        """
         while self._running:
             try:
                 # Получаем решение из очереди
@@ -168,10 +187,12 @@ class Orchestrator:
                 # Выполняем решение
                 await self._execute_decision(decision)
 
-                # Логируем решение
+                # 1. In-memory cache (deque автоматически удаляет старые)
                 self._decisions_log.append(decision)
-                if len(self._decisions_log) > 10000:
-                    self._decisions_log = self._decisions_log[-10000:]
+                self._total_decisions_processed += 1
+
+                # 2. Persist в SQLite (для долгосрочного хранения и анализа)
+                await self._persist_decision(decision)
 
             except asyncio.TimeoutError:
                 # Очередь пуста, продолжаем
@@ -179,8 +200,34 @@ class Orchestrator:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
+                logger.error(f"Error in main loop: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
+
+    async def _persist_decision(self, decision: AgentDecision) -> None:
+        """
+        Persist решение в Decision Audit Trail (SQLite).
+        Это обеспечивает долгосрочное хранение и возможность анализа
+        решений постфактум (hindsight verdict).
+        """
+        try:
+            record = DecisionRecord(
+                timestamp=decision.timestamp,
+                agent=decision.agent,
+                decision_type=decision.decision_type,
+                inputs=decision.inputs,
+                outputs=decision.outputs,
+                rationale=decision.rationale,
+                confidence=decision.confidence,
+                outcome=decision.outcome,
+                hindsight_verdict=decision.hindsight_verdict,
+                context={"mode": self.mode.value},
+            )
+            await decision_audit.log_decision(record)
+        except Exception as e:
+            logger.warning(
+                f"Failed to persist decision to audit trail: {e}. "
+                f"Decision still cached in memory."
+            )
 
     async def _execute_decision(self, decision: AgentDecision):
         """Выполняет решение агента."""
@@ -195,10 +242,17 @@ class Orchestrator:
 
         try:
             success = await agent.execute(decision)
-
             # Обновляем outcome
             outcome = "SUCCESS" if success else "FAILED"
             await agent.update_outcome(decision, outcome)
+
+            # Обновляем outcome в Decision Audit Trail для hindsight
+            if decision.id:
+                try:
+                    hindsight = "CORRECT" if success else "WRONG"
+                    await decision_audit.update_outcome(decision.id, outcome, hindsight)
+                except Exception as e:
+                    logger.debug(f"Failed to update outcome in audit: {e}")
 
         except Exception as e:
             logger.error(f"Error executing decision: {e}")
@@ -208,7 +262,6 @@ class Orchestrator:
         """Обработка алертов."""
         level = data.get("level", "INFO")
         message = data.get("message", "")
-
         logger.info(f"🚨 Alert [{level}]: {message}")
 
         # Маршрутизация в зависимости от уровня
@@ -227,20 +280,16 @@ class Orchestrator:
     async def _handle_sequence_started(self, data: Dict[str, Any]):
         """Обработка начала секвенсора."""
         logger.info("🚀 Sequence started")
-
         # Scheduler обновляет план
         await self._route_to_agent("Scheduler", "on_sequence_started", data)
-
         # Watcher начинает мониторинг
         await self._route_to_agent("Watcher", "start_monitoring", data)
 
     async def _handle_sequence_stopped(self, data: Dict[str, Any]):
         """Обработка остановки секвенсора."""
         logger.info("🛑 Sequence stopped")
-
         # Auditor генерирует Session Digest
         await self._route_to_agent("Auditor", "generate_session_digest", data)
-
         # Watcher останавливает мониторинг
         await self._route_to_agent("Watcher", "stop_monitoring", data)
 
@@ -266,14 +315,44 @@ class Orchestrator:
             "mode": self.mode.value,
             "running": self._running,
             "agents_registered": len(self.agents),
-            "agents": [name for name in self.agents.keys()],
-            "decisions_processed": len(self._decisions_log),
+            "agents": list(self.agents.keys()),
+            "decisions_in_memory": len(self._decisions_log),
+            "decisions_memory_limit": self.DECISIONS_MEMORY_LIMIT,
+            "decisions_total_processed": self._total_decisions_processed,
             "queue_size": self._decision_queue.qsize(),
         }
 
     def get_recent_decisions(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Возвращает последние N решений."""
-        return [d.model_dump() for d in self._decisions_log[-limit:]]
+        """
+        Возвращает последние N решений из in-memory cache.
+
+        Для получения полной истории решений использовать
+        Decision Audit Trail через API /api/v1/audit/decisions
+        """
+        # deque поддерживает итерацию в обратном порядке
+        recent = list(self._decisions_log)[-limit:]
+        return [d.model_dump() for d in recent]
+
+    async def get_historical_decisions(
+        self,
+        agent: Optional[str] = None,
+        decision_type: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Получает решения из Decision Audit Trail (SQLite).
+        Используется для анализа полной истории решений.
+        """
+        records = await decision_audit.get_decisions(
+            agent=agent,
+            decision_type=decision_type,
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
+        )
+        return [r.model_dump() for r in records]
 
 
 # Singleton instance
