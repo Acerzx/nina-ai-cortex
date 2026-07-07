@@ -292,35 +292,39 @@ _api_spec: Optional[APISpec] = None
 _api_client: Optional[DynamicAPIClient] = None
 
 
+# ИСПРАВЛЕНО (audit 8.2): Используем settings.network.nina_api_host вместо хардкода
 async def get_nina_api_client(
     spec_path: Optional[Path] = None,
-    base_url: str = "http://localhost:1888",
+    base_url: Optional[str] = None,  # ← Было: "http://localhost:1888"
 ) -> DynamicAPIClient:
     """
     Получает или создаёт API клиент для N.I.N.A.
 
     Args:
         spec_path: Путь к файлу OpenAPI спецификации
-        base_url: Базовый URL N.I.N.A. API
+        base_url: Базовый URL N.I.N.A. API (по умолчанию из settings)
 
     Returns:
         DynamicAPIClient instance
     """
-    global _api_spec, _api_client
+    from app.core.config import settings
 
+    global _api_spec, _api_client
     if _api_client is not None:
         return _api_client
 
+    # ИСПРАВЛЕНО (audit 8.2): Используем настройки вместо хардкода
+    if base_url is None:
+        base_url = settings.network.nina_api_host
+
     # Загружаем спецификацию
     if spec_path is None:
-        # Ищем в стандартных местах
         possible_paths = [
             Path("config/nina_api_spec.yaml"),
             Path("config/nina_api_spec.json"),
             Path("../config/nina_api_spec.yaml"),
             Path("../config/nina_api_spec.json"),
         ]
-
         for path in possible_paths:
             if path.exists():
                 spec_path = path
@@ -334,9 +338,10 @@ async def get_nina_api_client(
         )
 
     logger.info(f"📖 Loading N.I.N.A. API spec from: {spec_path}")
+    logger.info(f"🌐 Using base URL: {base_url}")
+
     _api_spec = OpenAPILoader.load_from_file(spec_path)
 
-    # Создаём клиент
     _api_client = DynamicAPIClient(
         spec=_api_spec,
         base_url=base_url,
