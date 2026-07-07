@@ -189,8 +189,10 @@ class FakeNinaAPI:
                 # Генерируем кадр
                 await self._generate_frame()
 
-                # Задержка между кадрами (экспозиция + overhead)
-                await asyncio.sleep(self.exposure_time + 5.0)
+                # ИСПРАВЛЕНО: Ускоренная симуляция (2 секунды вместо 65)
+                # В реальности: exposure_time + overhead (~65s)
+                # В симуляции: 2 секунды для быстрого тестирования
+                await asyncio.sleep(2.0)  # ← Было: self.exposure_time + 5.0
 
         except asyncio.CancelledError:
             pass

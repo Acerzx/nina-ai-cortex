@@ -57,6 +57,10 @@ class CalibratorAgent(BaseAgent):
         # Температурный допуск для Dark
         self.temperature_tolerance = 2.0  # °C
 
+        # ИСПРАВЛЕНО: Throttling для повторяющихся алертов
+        self._recent_alerts: Dict[str, datetime] = {}
+        self._alert_cooldown_seconds = 600  # 10 минут между одинаковыми алертами
+
     async def initialize(self):
         """Инициализация агента калибровки."""
         await super().initialize()
@@ -131,7 +135,25 @@ class CalibratorAgent(BaseAgent):
         check = await self._check_calibration_for_frame(frame)
 
         if check and not check.is_fresh:
+            # ИСПРАВЛЕНО: Throttling для повторяющихся алертов
+            alert_key = f"{check.master_type}_{check.recommendation}"
+
+            if self._is_alert_in_cooldown(alert_key):
+                logger.debug(f"Calibration alert throttled: {alert_key}")
+                return
+
+            self._recent_alerts[alert_key] = datetime.now()
             logger.warning(f"Stale calibration for frame: {check.recommendation}")
+
+    def _is_alert_in_cooldown(self, alert_key: str) -> bool:
+        """Проверяет, находится ли алерт в cooldown периоде."""
+        last_time = self._recent_alerts.get(alert_key)
+
+        if not last_time:
+            return False
+
+        elapsed = (datetime.now() - last_time).total_seconds()
+        return elapsed < self._alert_cooldown_seconds
 
     async def _on_masters_indexed(self, data: Dict[str, Any]) -> None:
         """Обработка события индексации мастеров."""

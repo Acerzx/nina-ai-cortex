@@ -208,31 +208,69 @@ class WatcherAgent(BaseAgent):
         """Проверяет тренд HFR (Half Flux Radius)."""
         history = observatory_state.history.hfr
 
-        if len(history) < 5:
+        # ИСПРАВЛЕНО: Поддержка малых выборок (fallback для симуляции)
+        if len(history) < 3:
             return None
 
-        # Последние 5 значений
+        # Для малых выборок (< 5 точек) используем простую детекцию выбросов
+        if len(history) < 5:
+            current_value = history[-1]
+            baseline = history[:-1]
+
+            if not baseline:
+                return None
+
+            baseline_mean = sum(baseline) / len(baseline)
+
+            # Если текущее значение > 50% от базового — это аномалия
+            if baseline_mean > 0 and current_value > baseline_mean * 1.5:
+                deviation_percent = (
+                    (current_value - baseline_mean) / baseline_mean
+                ) * 100
+
+                if not self._is_in_cooldown("hfr_increase"):
+                    self._recent_anomalies["hfr_increase"] = datetime.now()
+
+                    return AnomalyReport(
+                        metric="HFR",
+                        current_value=current_value,
+                        baseline_value=baseline_mean,
+                        deviation_percent=deviation_percent,
+                        z_score=0,  # Z-Score не применим для малых выборок
+                        severity="HIGH",
+                        context={
+                            "recent_values": history,
+                            "baseline_values": baseline,
+                            "note": "Small sample detection (< 5 points)",
+                        },
+                    )
+
+            return None
+
+        # Стандартная логика для больших выборок (5+ точек)
         recent = history[-5:]
         baseline = history[:-5] if len(history) > 5 else recent
 
         if not baseline:
             return None
 
-        # Среднее базовое значение
-        baseline_mean = np.mean(baseline)
-        current_mean = np.mean(recent)
+        baseline_mean = sum(baseline) / len(baseline)
+        current_mean = sum(recent) / len(recent)
 
-        # Процент роста
         if baseline_mean > 0:
             increase_percent = ((current_mean - baseline_mean) / baseline_mean) * 100
 
             if increase_percent > self.thresholds["hfr_increase_percent"]:
-                # Проверяем cooldown
                 if self._is_in_cooldown("hfr_increase"):
                     return None
 
                 # Z-Score для подтверждения
-                std = np.std(baseline) if len(baseline) > 1 else 1.0
+                std = (
+                    (sum((x - baseline_mean) ** 2 for x in baseline) / len(baseline))
+                    ** 0.5
+                    if len(baseline) > 1
+                    else 1.0
+                )
                 z_score = abs(current_mean - baseline_mean) / std if std > 0 else 0
 
                 if z_score > self.thresholds["z_score_threshold"]:
