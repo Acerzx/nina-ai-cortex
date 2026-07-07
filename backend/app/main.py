@@ -47,39 +47,79 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
     logger.info("🚀 N.I.N.A. AI Cortex v2.0 Starting Up...")
     logger.info("=" * 70)
-
     try:
         # 1. Запуск всех компонентов Ingestion, Shadow Engine и Execution
-        # Включает: парсинг Sequence.json, запуск всех watchers, pollers, WebSocket client
         await watcher_manager.start()
 
-        # 2. Инициализация RAG Engine (Qdrant + Ollama embeddings)
+        # 2. Инициализация RAG Engine
         logger.info("Initializing RAG Engine...")
         await rag_engine.initialize()
 
-        # 3. Запуск WebSocket Broadcast Manager для Frontend
+        # 3. Запуск WebSocket Broadcast Manager
         logger.info("Starting WebSocket Broadcast Manager...")
         await ws_broadcast_manager.start()
 
+        # 4. Инициализация Mode Manager
+        logger.info("Starting Mode Manager...")
+        await mode_manager.start()
+
+        # 5. Инициализация и регистрация AI-агентов
+        logger.info("🤖 Initializing AI Agents...")
+
+        # Инициализируем всех агентов
+        await watcher_agent.initialize()
+        await guardian_agent.initialize()
+        await diagnostician_agent.initialize()
+        await strategist_agent.initialize()
+        await auditor_agent.initialize()
+        await calibrator_agent.initialize()
+        await scheduler_agent.initialize()
+        await copilot_agent.initialize()
+        await memory_manager_agent.initialize()
+
+        # Регистрируем агентов в Orchestrator
+        orchestrator.register_agent("Watcher", watcher_agent)
+        orchestrator.register_agent("Guardian", guardian_agent)
+        orchestrator.register_agent("Diagnostician", diagnostician_agent)
+        orchestrator.register_agent("Strategist", strategist_agent)
+        orchestrator.register_agent("Auditor", auditor_agent)
+        orchestrator.register_agent("Calibrator", calibrator_agent)
+        orchestrator.register_agent("Scheduler", scheduler_agent)
+        orchestrator.register_agent("Copilot", copilot_agent)
+        orchestrator.register_agent("MemoryManager", memory_manager_agent)
+
+        # Запускаем Orchestrator
+        await orchestrator.start()
+
+        logger.info("✅ All AI Agents initialized and registered")
         logger.info("✅ Cortex is fully operational and ready to accept connections.")
         logger.info(f"🌐 API Docs available at: http://localhost:8000/docs")
         logger.info(
             f"🔌 WebSocket endpoint: ws://localhost:8000{settings.ws_broadcast.path}"
         )
-
     except Exception as e:
         logger.critical(f"❌ FATAL: Failed to start Cortex: {e}", exc_info=True)
         raise
 
-    yield  # <-- Приложение работает здесь (обрабатывает HTTP/WS запросы)
+    yield  # <-- Приложение работает здесь
 
     # Shutdown
     logger.info("=" * 70)
     logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
-
     try:
         # Остановка в обратном порядке
+        await orchestrator.stop()
+        await memory_manager_agent.shutdown()
+        await copilot_agent.shutdown()
+        await scheduler_agent.shutdown()
+        await calibrator_agent.shutdown()
+        await auditor_agent.shutdown()
+        await strategist_agent.shutdown()
+        await diagnostician_agent.shutdown()
+        await guardian_agent.shutdown()
+        await watcher_agent.shutdown()
+        await mode_manager.stop()
         await ws_broadcast_manager.stop()
         await rag_engine.close()
         await watcher_manager.stop()
@@ -417,3 +457,195 @@ async def find_matching_master(
 async def ws_stats():
     """Возвращает статистику WebSocket подключений."""
     return ws_broadcast_manager.get_stats()
+
+
+# ============================================================================
+# AI AGENTS INITIALIZATION
+# ============================================================================
+from app.agents.orchestrator import orchestrator, OperationMode
+from app.agents.watcher_agent import WatcherAgent
+from app.agents.guardian_agent import GuardianAgent
+from app.agents.diagnostician_agent import DiagnosticianAgent
+from app.agents.strategist_agent import StrategistAgent
+from app.agents.auditor_agent import AuditorAgent
+from app.agents.calibrator_agent import CalibratorAgent
+from app.agents.scheduler_agent import SchedulerAgent
+from app.agents.copilot_agent import CopilotAgent
+from app.agents.memory_manager_agent import MemoryManagerAgent
+from app.core.mode_manager import mode_manager
+from app.safety.preflight import preflight_checker
+
+# Глобальные экземпляры агентов
+watcher_agent = WatcherAgent()
+guardian_agent = GuardianAgent()
+diagnostician_agent = DiagnosticianAgent()
+strategist_agent = StrategistAgent()
+auditor_agent = AuditorAgent()
+calibrator_agent = CalibratorAgent(masters_auditor=watcher_manager.masters_auditor)
+scheduler_agent = SchedulerAgent()
+copilot_agent = CopilotAgent()
+memory_manager_agent = MemoryManagerAgent()
+
+
+# ============================================================================
+# AI AGENTS MANAGEMENT ENDPOINTS
+# ============================================================================
+@app.get("/api/v1/agents/status", tags=["AI Agents"])
+async def get_agents_status():
+    """Возвращает статус всех AI-агентов."""
+    return {
+        "orchestrator": orchestrator.get_stats(),
+        "mode_manager": mode_manager.get_stats(),
+        "agents": {
+            "Watcher": watcher_agent.get_stats(),
+            "Guardian": guardian_agent.get_stats(),
+            "Diagnostician": diagnostician_agent.get_stats(),
+            "Strategist": strategist_agent.get_stats(),
+            "Auditor": auditor_agent.get_stats(),
+            "Calibrator": calibrator_agent.get_stats(),
+            "Scheduler": scheduler_agent.get_stats(),
+            "Copilot": copilot_agent.get_stats(),
+            "MemoryManager": memory_manager_agent.get_stats(),
+        },
+    }
+
+
+@app.post("/api/v1/agents/mode", tags=["AI Agents"])
+async def set_operation_mode(mode: str):
+    """Устанавливает режим работы системы."""
+    try:
+        operation_mode = OperationMode(mode)
+        await mode_manager.set_mode(operation_mode, reason="Manual API call")
+        await orchestrator.set_mode(operation_mode)
+        return {"status": "success", "mode": mode}
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode: {mode}. Valid modes: {[m.value for m in OperationMode]}",
+        )
+
+
+@app.get("/api/v1/agents/decisions", tags=["AI Agents"])
+async def get_recent_decisions(limit: int = Query(20, ge=1, le=100)):
+    """Возвращает последние решения агентов."""
+    return {
+        "decisions": orchestrator.get_recent_decisions(limit=limit),
+        "total": len(orchestrator._decisions_log),
+    }
+
+
+@app.post("/api/v1/safety/preflight", tags=["Safety"])
+async def run_preflight_check():
+    """Запускает pre-flight проверку перед стартом сессии."""
+    report = await preflight_checker.run_all()
+    return report
+
+
+@app.get("/api/v1/security/vault", tags=["Security"])
+async def list_vault_secrets():
+    """Возвращает список всех секретов в Vault (без значений)."""
+    from app.security.vault import CredentialVault
+    from pathlib import Path
+
+    vault_path = Path("./data/vault.json")
+    if not vault_path.exists():
+        return {"secrets": [], "message": "Vault not initialized"}
+
+    # Для безопасности не показываем master_password в коде
+    # В реальности должен быть защищенный способ инициализации
+    return {"message": "Vault access requires master password authentication"}
+
+
+# ============================================================================
+# SIMULATION MODE ENDPOINTS
+# ============================================================================
+@app.post("/api/v1/simulation/start", tags=["Simulation"])
+async def start_simulation(target: str = "M31", frames: int = 10):
+    """Запускает симуляцию сессии (Fake NINA)."""
+    from app.simulation.fake_nina import fake_nina
+
+    await fake_nina.start()
+    await fake_nina.start_sequence(target=target, frames=frames)
+
+    return {
+        "status": "success",
+        "message": f"Simulation started: {target} ({frames} frames)",
+    }
+
+
+@app.post("/api/v1/simulation/stop", tags=["Simulation"])
+async def stop_simulation():
+    """Останавливает симуляцию."""
+    from app.simulation.fake_nina import fake_nina
+
+    await fake_nina.stop_sequence()
+    await fake_nina.stop()
+
+    return {"status": "success", "message": "Simulation stopped"}
+
+
+@app.post("/api/v1/simulation/inject-anomaly", tags=["Simulation"])
+async def inject_anomaly(anomaly_type: str):
+    """Инжектирует аномалию для тестирования агентов."""
+    from app.simulation.fake_nina import fake_nina
+
+    valid_types = [
+        "hfr_spike",
+        "rms_spike",
+        "temp_drift",
+        "guiding_lost",
+        "safety_unsafe",
+    ]
+    if anomaly_type not in valid_types:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid anomaly type. Valid types: {valid_types}"
+        )
+
+    await fake_nina.inject_anomaly(anomaly_type)
+
+    return {"status": "success", "message": f"Anomaly '{anomaly_type}' injected"}
+
+
+@app.post("/api/v1/simulation/trigger-autofocus", tags=["Simulation"])
+async def trigger_autofocus_simulation():
+    """Симулирует запуск автофокуса."""
+    from app.simulation.fake_nina import fake_nina
+
+    await fake_nina.trigger_autofocus()
+
+    return {"status": "success", "message": "Autofocus triggered"}
+
+
+@app.post("/api/v1/simulation/trigger-meridian-flip", tags=["Simulation"])
+async def trigger_meridian_flip_simulation():
+    """Симулирует Meridian Flip."""
+    from app.simulation.fake_nina import fake_nina
+
+    await fake_nina.trigger_meridian_flip()
+
+    return {"status": "success", "message": "Meridian flip triggered"}
+
+
+# ============================================================================
+# DISK MANAGEMENT ENDPOINTS
+# ============================================================================
+@app.get("/api/v1/storage/disk-usage", tags=["Storage"])
+async def get_disk_usage():
+    """Возвращает информацию об использовании дискового пространства."""
+    from app.storage.disk_monitor import disk_monitor
+
+    stats = await disk_monitor.get_stats()
+    return stats
+
+
+@app.post("/api/v1/storage/cleanup", tags=["Storage"])
+async def apply_retention_policy(policy_name: str):
+    """Применяет политику удаления старых данных."""
+    from app.storage.disk_monitor import disk_monitor
+
+    result = await disk_monitor.apply_retention_policy(policy_name)
+
+    if result:
+        return result
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown policy: {policy_name}")
