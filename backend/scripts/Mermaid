@@ -1,0 +1,53 @@
+"""
+Скрипт для генерации Mermaid диаграммы гибридного workflow.
+Запуск: python scripts/generate_workflow_diagram.py
+"""
+
+from app.agents.hybrid_langgraph_orchestrator import hybrid_orchestrator
+
+
+def generate_mermaid_diagram():
+    """Генерация Mermaid диаграммы графа"""
+
+    mermaid_code = """
+graph TD
+    A[Trigger: Complex Scenario] --> B[analyze_context]
+    B --> C[route_workflow]
+    
+    C -->|diagnostic| D[diagnostic_analysis]
+    C -->|post_mortem| E[post_mortem_analysis]
+    C -->|adaptive| F[adaptive_response]
+    
+    D --> G[generate_recommendations]
+    E --> G
+    F --> G
+    
+    G --> H[execute_actions]
+    H --> I[monitor_results]
+    
+    I -->|success| J[finalize]
+    I -->|retry| K[retry_decision]
+    I -->|fail| J
+    
+    K -->|retry| H
+    K -->|give_up| J
+    
+    J --> END
+    
+    style A fill:#e1f5ff
+    style J fill:#c8e6c9
+    style END fill:#ffebee
+"""
+
+    # Сохраняем в файл
+    with open("docs/workflow_diagram.md", "w") as f:
+        f.write("# Hybrid Workflow Diagram\n\n")
+        f.write("```mermaid\n")
+        f.write(mermaid_code)
+        f.write("```\n")
+
+    print("✅ Mermaid diagram generated: docs/workflow_diagram.md")
+
+
+if __name__ == "__main__":
+    generate_mermaid_diagram()

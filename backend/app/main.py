@@ -2,47 +2,40 @@
 N.I.N.A. AI Cortex - Main Application Entry Point
 FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
 
-ИСПРАВЛЕНО (audit v2):
-- 11.2: Добавлены Prometheus метрики через middleware и EventBus подписки
-- 11.1: Маскирование чувствительных данных в логах (global_var_injector)
-- C4: JWT-аутентификация и авторизация по ролям
-- C5: Обязательный мастер-пароль Vault в production
-- F2: CORS whitelist из settings.yaml
-- F3: Rate limiting через slowapi
+УПРОЩЕНО (рефакторинг v3):
+- Удалена избыточная безопасность (JWT, API keys, rate limiting)
+- Удален Credential Vault (локальное использование не требует шифрования)
+- Удален MemoryManagerAgent (не используется)
+- Добавлена интеграция с Hybrid LangGraph Orchestrator
+- Все endpoints теперь открытые (локальная сеть)
 """
 
 import asyncio
 import logging
-import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-
 from fastapi import (
     FastAPI,
     HTTPException,
     WebSocket,
     WebSocketDisconnect,
     Query,
-    Depends,
     Request,
     Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 
 from app.core.config import settings
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
 from app.core.ws_broadcast import ws_broadcast_manager
-from app.core.metrics import cortex_metrics  # ← НОВОЕ (audit 11.2)
+from app.core.metrics import cortex_metrics
 from app.ingestion.watchers.manager import WatcherManager
 from app.shadow_engine.state_tracker import state_tracker
 from app.agents.observatory_state import observatory_state
@@ -59,30 +52,14 @@ from app.agents.auditor_agent import AuditorAgent
 from app.agents.calibrator_agent import CalibratorAgent
 from app.agents.scheduler_agent import SchedulerAgent
 from app.agents.copilot_agent import CopilotAgent
-from app.agents.memory_manager_agent import MemoryManagerAgent
+from app.agents.hybrid_langgraph_orchestrator import hybrid_orchestrator
 from app.core.mode_manager import mode_manager
 from app.safety.preflight import preflight_checker
 from app.agents.llm_client import llm_client
 
-# Storage & Security
+# Storage
 from app.storage.disk_monitor import disk_monitor
 from app.storage.decision_audit import decision_audit
-from app.security.vault import CredentialVault
-
-# ИСПРАВЛЕНО (audit C4): импорты модуля аутентификации
-from app.security.auth import (
-    UserRole,
-    TokenData,
-    TokenResponse,
-    create_access_token,
-    get_current_user,
-    require_role,
-    authorize_request,
-    list_api_keys,
-    register_api_key,
-    revoke_api_key,
-)
-
 
 # ============================================================================
 # LOGGING SETUP
@@ -95,13 +72,12 @@ logging.basicConfig(
 logging.getLogger("WatcherAgent").setLevel(logging.DEBUG)
 logger = logging.getLogger("CortexMain")
 
-
 # ============================================================================
 # GLOBAL INSTANCES
 # ============================================================================
 watcher_manager = WatcherManager()
 
-# 10 AI-агентов
+# 9 AI-агентов (убран MemoryManager)
 watcher_agent = WatcherAgent()
 guardian_agent = GuardianAgent()
 diagnostician_agent = DiagnosticianAgent()
@@ -110,20 +86,13 @@ auditor_agent = AuditorAgent()
 calibrator_agent: Optional[CalibratorAgent] = None
 scheduler_agent = SchedulerAgent()
 copilot_agent = CopilotAgent()
-memory_manager_agent = MemoryManagerAgent()
-
-# Credential Vault (инициализируется в lifespan)
-credential_vault: Optional[CredentialVault] = None
 
 
 # ============================================================================
-# EVENT BUS METRICS SUBSCRIBERS (audit 11.2)
+# EVENT BUS METRICS SUBSCRIBERS
 # ============================================================================
 async def _on_event_bus_event(event_type: str, data: Dict[str, Any]):
-    """
-    Автоматический сбор метрик из EventBus.
-    Вызывается для каждого опубликованного события.
-    """
+    """Автоматический сбор метрик из EventBus."""
     cortex_metrics.events_total.labels(event_type=event_type).inc()
 
 
@@ -132,7 +101,6 @@ async def _on_decision_made(data: Dict[str, Any]):
     agent = data.get("agent", "unknown")
     decision_type = data.get("decision_type", "unknown")
     confidence = data.get("confidence", 0.5)
-
     cortex_metrics.decisions_total.labels(
         agent=agent, decision_type=decision_type, outcome="pending"
     ).inc()
@@ -144,7 +112,6 @@ async def _on_trigger_fired(data: Dict[str, Any]):
     trigger_name = data.get("trigger", "unknown")
     status = data.get("status", "unknown")
     duration = data.get("duration_seconds", 0.0)
-
     cortex_metrics.triggers_fired.labels(trigger_name=trigger_name, status=status).inc()
     if duration > 0:
         cortex_metrics.trigger_duration.labels(trigger_name=trigger_name).observe(
@@ -159,7 +126,6 @@ async def _on_llm_response(data: Dict[str, Any]):
     fallback = "true" if data.get("from_fallback", False) else "false"
     duration = data.get("duration_seconds", 0.0)
     tokens = data.get("tokens_used", 0)
-
     cortex_metrics.llm_requests_total.labels(
         model=model, status=status, fallback=fallback
     ).inc()
@@ -174,10 +140,9 @@ async def _on_llm_response(data: Dict[str, Any]):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения."""
-    global calibrator_agent, credential_vault
-
+    global calibrator_agent
     logger.info("=" * 70)
-    logger.info("🚀 N.I.N.A. AI Cortex v2.0 Starting Up...")
+    logger.info("🚀 N.I.N.A. AI Cortex v3.0 Starting Up...")
     logger.info("=" * 70)
 
     try:
@@ -200,42 +165,13 @@ async def lifespan(app: FastAPI):
         logger.info("🤖 Initializing LLM Client (Ollama connection)...")
         await llm_client.initialize()
 
-        # 6. Credential Vault — ИСПРАВЛЕНО (audit C5)
-        logger.info("🔐 Initializing Credential Vault...")
-        vault_path = Path("./data/vault.json")
-        vault_path.parent.mkdir(parents=True, exist_ok=True)
-
-        master_password = os.getenv("VAULT_MASTER_PASSWORD")
-        is_production = os.getenv("ENVIRONMENT", "development") == "production"
-
-        if not master_password:
-            if is_production:
-                raise RuntimeError(
-                    "❌ FATAL: VAULT_MASTER_PASSWORD environment variable "
-                    "MUST be set in production."
-                )
-            else:
-                logger.warning(
-                    "⚠️ VAULT_MASTER_PASSWORD not set — using development default."
-                )
-                master_password = "dev-master-password-DO-NOT-USE-IN-PROD"
-        else:
-            if len(master_password) < 16:
-                logger.warning("⚠️ VAULT_MASTER_PASSWORD is shorter than 16 chars")
-            if master_password == "dev-master-password-change-me":
-                logger.warning("⚠️ Using known default master password!")
-
-        credential_vault = CredentialVault(
-            master_password=master_password, vault_path=vault_path
-        )
-
-        # 7. Calibrator Agent
+        # 6. Calibrator Agent
         calibrator_agent = CalibratorAgent(
             masters_auditor=watcher_manager.masters_auditor
         )
 
-        # 8. Инициализация агентов
-        logger.info("🤖 Initializing 10 AI Agents...")
+        # 7. Инициализация агентов
+        logger.info("🤖 Initializing 9 AI Agents...")
         await watcher_agent.initialize()
         await guardian_agent.initialize()
         await diagnostician_agent.initialize()
@@ -244,9 +180,8 @@ async def lifespan(app: FastAPI):
         await calibrator_agent.initialize()
         await scheduler_agent.initialize()
         await copilot_agent.initialize()
-        await memory_manager_agent.initialize()
 
-        # 9. Регистрация в Orchestrator
+        # 8. Регистрация в Orchestrator
         orchestrator.register_agent("Watcher", watcher_agent)
         orchestrator.register_agent("Guardian", guardian_agent)
         orchestrator.register_agent("Diagnostician", diagnostician_agent)
@@ -255,15 +190,12 @@ async def lifespan(app: FastAPI):
         orchestrator.register_agent("Calibrator", calibrator_agent)
         orchestrator.register_agent("Scheduler", scheduler_agent)
         orchestrator.register_agent("Copilot", copilot_agent)
-        orchestrator.register_agent("MemoryManager", memory_manager_agent)
 
-        # 10. Запуск Orchestrator
+        # 9. Запуск Orchestrator
         await orchestrator.start()
 
-        # 11. ИСПРАВЛЕНО (audit 11.2): Подписка на события для сбора метрик
+        # 10. Подписка на события для сбора метрик
         logger.info("📊 Subscribing to EventBus for metrics collection...")
-
-        # Подписываемся на все события для общего счётчика
         for event_type in [
             "SEQUENCE_STARTED",
             "SEQUENCE_STOPPED",
@@ -286,7 +218,6 @@ async def lifespan(app: FastAPI):
                 event_type, lambda data, et=event_type: _on_event_bus_event(et, data)
             )
 
-        # Специальные подписки для детальных метрик
         event_bus.subscribe("DECISION_MADE", _on_decision_made)
         event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
         event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
@@ -315,7 +246,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
 
     try:
-        # 1. Отписка от событий метрик (audit 11.2)
+        # 1. Отписка от событий метрик
         for event_type in [
             "SEQUENCE_STARTED",
             "SEQUENCE_STOPPED",
@@ -351,7 +282,6 @@ async def lifespan(app: FastAPI):
 
         # 2. Останавливаем агентов
         await orchestrator.stop()
-        await memory_manager_agent.shutdown()
         await copilot_agent.shutdown()
         await scheduler_agent.shutdown()
         if calibrator_agent:
@@ -377,7 +307,9 @@ async def lifespan(app: FastAPI):
 
         # 7. Даем время на закрытие всех соединений
         await asyncio.sleep(0.5)
+
         logger.info("✅ Cortex stopped gracefully.")
+
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
 
@@ -389,20 +321,15 @@ app = FastAPI(
     title="N.I.N.A. AI Cortex API",
     description=(
         "Когнитивная надстройка над N.I.N.A. с Multi-Agent AI архитектурой. "
-        "10 AI-агентов, LangGraph координация, RAG-система, Pre-flight Checklist, "
-        "Credential Vault, Simulation Mode. "
-        "🔒 Требуется JWT Bearer token или X-API-Key для большинства endpoints."
+        "9 AI-агентов, LangGraph координация, RAG-система, Pre-flight Checklist. "
+        "Локальное использование без аутентификации."
     ),
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
-# Rate limiter
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
 # ============================================================================
-# CORS MIDDLEWARE — ИСПРАВЛЕНО (audit F2)
+# CORS MIDDLEWARE
 # ============================================================================
 if settings.cors.enabled:
     app.add_middleware(
@@ -421,41 +348,26 @@ else:
 
 
 # ============================================================================
-# METRICS MIDDLEWARE (audit 11.2)
+# METRICS MIDDLEWARE
 # ============================================================================
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
-    """
-    Middleware для сбора метрик API запросов.
-    Считает количество запросов, время ответа, статусы.
-    """
+    """Middleware для сбора метрик API запросов."""
     start_time = time.time()
-
-    # Выполняем запрос
     response = await call_next(request)
-
-    # Считаем метрики
     duration = time.time() - start_time
     method = request.method
     path = request.url.path
     status_code = response.status_code
 
-    # Обновляем метрики
     cortex_metrics.api_requests_total.labels(
         method=method, path=path, status_code=str(status_code)
     ).inc()
-
     cortex_metrics.api_request_duration.labels(method=method, path=path).observe(
         duration
     )
 
     return response
-
-
-# ============================================================================
-# AUTH DEPENDENCY (audit C4)
-# ============================================================================
-AuthDep = Depends(authorize_request)
 
 
 # ============================================================================
@@ -478,43 +390,18 @@ class RAGSearchRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
 
 
-class SecretRequest(BaseModel):
-    name: str
-    value: str
-    description: Optional[str] = None
-
-
-class TokenRequest(BaseModel):
-    subject: str
-    role: str = "readonly"
-    expires_minutes: int = 60 * 24
-
-
-class APIKeyRequest(BaseModel):
-    name: str
-    role: str = "readonly"
-    scopes: List[str] = []
-
-
 # ============================================================================
 # SYSTEM ENDPOINTS (public)
 # ============================================================================
 @app.get("/health", tags=["System"])
-@limiter.limit("60/minute")
-async def health_check(request: Request):
-    """
-    Health Check эндпоинт (public).
-    Проверяет статус всех критических компонентов ядра.
-
-    ИСПРАВЛЕНО (audit 11.2): Добавлены метрики компонентов.
-    """
+async def health_check():
+    """Health Check эндпоинт."""
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
     metrics_summary = cortex_metrics.get_summary()
-
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "timestamp": datetime.now().isoformat(),
         "components": {
             "event_bus": event_bus._running,
@@ -525,7 +412,6 @@ async def health_check(request: Request):
             "ws_connections": ws_stats.get("total_connections", 0),
             "llm_available": llm_client.is_available(),
             "operation_mode": mode_manager.current_mode.value,
-            "auth_enabled": settings.auth.enabled,
         },
         "metrics": metrics_summary,
         "uptime_seconds": time.time() - cortex_metrics._start_time,
@@ -541,39 +427,25 @@ async def root():
 @app.get("/api", tags=["System"], include_in_schema=False)
 @app.get("/api/v1", tags=["System"], include_in_schema=False)
 async def api_root():
-    """Корневой API эндпоинт — список всех доступных endpoints."""
+    """Корневой API эндпоинт."""
     return {
         "name": "N.I.N.A. AI Cortex API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "documentation": "/docs",
         "health": "/health",
         "metrics": "/metrics",
-        "authentication": {
-            "methods": ["Bearer JWT", "X-API-Key"],
-            "token_endpoint": "/api/v1/auth/token (admin)",
-            "api_key_endpoint": "/api/v1/auth/api-key (admin)",
-        },
     }
 
 
 # ============================================================================
-# PROMETHEUS /metrics ENDPOINT — ИСПРАВЛЕНО (audit 11.2)
+# PROMETHEUS /metrics ENDPOINT
 # ============================================================================
 @app.get("/metrics", tags=["Observability"], include_in_schema=False)
-@limiter.limit("30/minute")
-async def prometheus_metrics(request: Request):
-    """
-    Prometheus exposition format endpoint.
-    Экспортирует метрики самого Cortex для мониторинга.
-
-    ИСПРАВЛЕНО (audit 11.2): Использует cortex_metrics.expose() для
-    генерации полного набора метрик в Prometheus формате.
-    """
-    # Обновляем динамические метрики перед экспортом
+async def prometheus_metrics():
+    """Prometheus exposition format endpoint."""
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
 
-    # Обновляем gauge метрики
     cortex_metrics.active_ws_connections.set(ws_stats.get("total_connections", 0))
     cortex_metrics.sequence_running.set(1 if state_tracker.state.is_running else 0)
     cortex_metrics.flat_mode_active.set(1 if state_tracker.state.is_flat_mode else 0)
@@ -581,45 +453,36 @@ async def prometheus_metrics(request: Request):
         1 if llm_client.is_available() else 0
     )
 
-    # Обновляем RAG метрики
     if "points_count" in rag_stats:
         cortex_metrics.rag_documents_total.set(rag_stats["points_count"])
 
-    # Обновляем operation_mode
     mode_value = {"manual": 0, "safe": 1, "full_ai": 2, "simulation": 3}.get(
         mode_manager.current_mode.value, -1
     )
     cortex_metrics.operation_mode.set(mode_value)
 
-    # Обновляем safety_status
     safety_value = {"SAFE": 0, "UNSAFE": 1, "UNKNOWN": -1}.get(
         observatory_state.safety_status, -1
     )
     cortex_metrics.safety_status.set(safety_value)
 
-    # Обновляем количество активных watchers
     cortex_metrics.watchers_active.set(len(watcher_manager.watchers))
-
-    # Обновляем количество активных агентов
     cortex_metrics.agents_active.set(len(orchestrator.agents))
 
-    # Генерируем Prometheus exposition
     output = cortex_metrics.expose()
-
     return Response(content=output, media_type="text/plain; version=0.0.4")
 
 
 # ============================================================================
-# WEBSOCKET BROADCAST ENDPOINT (public, auth handled inside)
+# WEBSOCKET BROADCAST ENDPOINT
 # ============================================================================
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket, client_id: Optional[str] = Query(None)
 ):
-    """WebSocket endpoint для real-time broadcasting событий на Frontend."""
+    """WebSocket endpoint для real-time broadcasting."""
     if not client_id:
         client_id = str(uuid.uuid4())[:8]
-
     conn = await ws_broadcast_manager.connect(websocket, client_id)
     try:
         while True:
@@ -638,114 +501,24 @@ async def websocket_endpoint(
 
 
 @app.get("/api/v1/ws/stats", tags=["WebSocket"])
-@limiter.limit("30/minute")
-async def ws_stats(request: Request, _user: TokenData = AuthDep):
+async def ws_stats():
     """Возвращает статистику WebSocket подключений."""
     return ws_broadcast_manager.get_stats()
-
-
-# ============================================================================
-# AUTH ENDPOINTS — НОВЫЕ (audit C4)
-# ============================================================================
-@app.post("/api/v1/auth/token", tags=["Authentication"], response_model=TokenResponse)
-@limiter.limit("10/minute")
-async def issue_token(
-    request: Request,
-    body: TokenRequest,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Выпускает JWT access token."""
-    try:
-        role = UserRole(body.role)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid role: {body.role}. Valid: {[r.value for r in UserRole]}",
-        )
-
-    token = create_access_token(
-        subject=body.subject,
-        role=role,
-        expires_delta=timedelta(minutes=body.expires_minutes),
-    )
-    return TokenResponse(
-        access_token=token,
-        expires_in=body.expires_minutes * 60,
-        role=role,
-    )
-
-
-@app.post("/api/v1/auth/api-key", tags=["Authentication"])
-@limiter.limit("5/minute")
-async def create_api_key(
-    request: Request,
-    body: APIKeyRequest,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Создаёт API-ключ для machine-to-machine."""
-    try:
-        role = UserRole(body.role)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid role: {body.role}")
-
-    raw_key = register_api_key(name=body.name, role=role, scopes=body.scopes)
-    return {
-        "name": body.name,
-        "api_key": raw_key,
-        "role": role.value,
-        "warning": "⚠️ Save this key now — it will NOT be shown again.",
-    }
-
-
-@app.get("/api/v1/auth/api-keys", tags=["Authentication"])
-@limiter.limit("30/minute")
-async def get_api_keys(
-    request: Request,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Список API-ключей (без секретов)."""
-    return {"keys": list_api_keys()}
-
-
-@app.delete("/api/v1/auth/api-key/{name}", tags=["Authentication"])
-@limiter.limit("10/minute")
-async def delete_api_key(
-    request: Request,
-    name: str,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Отзыв API-ключа."""
-    if revoke_api_key(name):
-        return {"status": "revoked", "name": name}
-    raise HTTPException(status_code=404, detail=f"API key '{name}' not found")
-
-
-@app.get("/api/v1/auth/whoami", tags=["Authentication"])
-@limiter.limit("60/minute")
-async def whoami(request: Request, user: TokenData = AuthDep):
-    """Показывает информацию о текущем аутентифицированном пользователе."""
-    return {
-        "subject": user.sub,
-        "role": user.role.value,
-        "scopes": user.scopes,
-    }
 
 
 # ============================================================================
 # SHADOW ENGINE ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/sequence/shadow", tags=["Shadow Engine"])
-@limiter.limit("60/minute")
-async def get_sequence_shadow(request: Request, _user: TokenData = AuthDep):
-    """Возвращает полный теневой граф секвенсора (DAG)."""
+async def get_sequence_shadow():
+    """Возвращает полный теневой граф секвенсора."""
     if not state_tracker._shadow_graph:
         raise HTTPException(status_code=404, detail="Sequence shadow graph not loaded")
     return state_tracker._shadow_graph
 
 
 @app.get("/api/v1/sequence/state", tags=["Shadow Engine"])
-@limiter.limit("60/minute")
-async def get_sequence_state(request: Request, _user: TokenData = AuthDep):
+async def get_sequence_state():
     """Возвращает текущее состояние выполнения секвенсора."""
     return state_tracker.get_state()
 
@@ -754,22 +527,19 @@ async def get_sequence_state(request: Request, _user: TokenData = AuthDep):
 # AI AGENTS ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/observatory/state", tags=["AI Agents"])
-@limiter.limit("120/minute")
-async def get_observatory_full_state(request: Request, _user: TokenData = AuthDep):
-    """Возвращает единое состояние обсерватории (ObservatoryState)."""
+async def get_observatory_full_state():
+    """Возвращает единое состояние обсерватории."""
     return observatory_state.get_full_state()
 
 
 @app.get("/api/v1/observatory/session-summary", tags=["AI Agents"])
-@limiter.limit("60/minute")
-async def get_session_summary(request: Request, _user: TokenData = AuthDep):
-    """Возвращает краткую сводку текущей сессии для LLM контекста."""
+async def get_session_summary():
+    """Возвращает краткую сводку текущей сессии."""
     return observatory_state.get_session_summary()
 
 
 @app.get("/api/v1/agents/status", tags=["AI Agents"])
-@limiter.limit("60/minute")
-async def get_agents_status(request: Request, _user: TokenData = AuthDep):
+async def get_agents_status():
     """Возвращает статус всех AI-агентов."""
     return {
         "orchestrator": orchestrator.get_stats(),
@@ -783,19 +553,13 @@ async def get_agents_status(request: Request, _user: TokenData = AuthDep):
             "Calibrator": calibrator_agent.get_stats() if calibrator_agent else {},
             "Scheduler": scheduler_agent.get_stats(),
             "Copilot": copilot_agent.get_stats(),
-            "MemoryManager": memory_manager_agent.get_stats(),
         },
     }
 
 
 @app.post("/api/v1/agents/mode", tags=["AI Agents"])
-@limiter.limit("10/minute")
-async def set_operation_mode(
-    request: Request,
-    mode: str,
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Устанавливает режим работы системы."""
+async def set_operation_mode(mode: str):
+    """Устанавливает режим работы системы."""
     try:
         operation_mode = OperationMode(mode)
         await mode_manager.set_mode(operation_mode, reason="Manual API call")
@@ -809,13 +573,8 @@ async def set_operation_mode(
 
 
 @app.get("/api/v1/agents/decisions", tags=["AI Agents"])
-@limiter.limit("60/minute")
-async def get_recent_decisions(
-    request: Request,
-    limit: int = Query(20, ge=1, le=100),
-    _user: TokenData = AuthDep,
-):
-    """Возвращает последние решения агентов из Decision Audit Trail."""
+async def get_recent_decisions(limit: int = Query(20, ge=1, le=100)):
+    """Возвращает последние решения агентов."""
     return {
         "decisions": orchestrator.get_recent_decisions(limit=limit),
         "total": len(orchestrator._decisions_log),
@@ -823,25 +582,21 @@ async def get_recent_decisions(
 
 
 @app.get("/api/v1/agents/llm-status", tags=["AI Agents"])
-@limiter.limit("30/minute")
-async def get_llm_status(request: Request, _user: TokenData = AuthDep):
-    """Проверяет доступность локального LLM (Ollama)."""
+async def get_llm_status():
+    """Проверяет доступность локального LLM."""
     return {
         "available": llm_client.is_available(),
-        "model": settings.ai_settings.model_name,
+        "model": settings.ai_settings.primary_model,
         "host": settings.ai_settings.ollama_host,
     }
 
 
 @app.post("/api/v1/agents/test-llm", tags=["AI Agents"])
-@limiter.limit(f"{settings.auth.llm_rate_limit_per_minute}/minute")
 async def test_llm_generation(
-    request: Request,
     prompt: str = Query(..., description="Тестовый промпт"),
-    agent: str = Query("Copilot", description="Имя агента для системного промпта"),
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
+    agent: str = Query("Copilot", description="Имя агента"),
 ):
-    """🔒 OPERATOR+: Тестовый эндпоинт для проверки генерации LLM."""
+    """Тестовый эндпоинт для проверки генерации LLM."""
     if not llm_client.is_available():
         raise HTTPException(status_code=503, detail="LLM (Ollama) is not available")
     response = await llm_client.generate(
@@ -854,19 +609,16 @@ async def test_llm_generation(
 # METRICS ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/metrics", tags=["Metrics"])
-@limiter.limit("120/minute")
-async def get_metrics(request: Request, _user: TokenData = AuthDep):
+async def get_metrics():
     """Возвращает текущие метрики обсерватории."""
     metrics = observatory_state.current_metrics
     weather = observatory_state.weather
     astronomy = observatory_state.astronomy
-
     trends = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec", "temperature"]:
         trend = observatory_state.get_trend(metric_name, window=10)
         if trend is not None:
             trends[metric_name] = trend
-
     history_stats = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec"]:
         history_list = getattr(observatory_state.history, metric_name, [])
@@ -877,7 +629,6 @@ async def get_metrics(request: Request, _user: TokenData = AuthDep):
                 "max": max(history_list),
                 "avg": sum(history_list) / len(history_list),
             }
-
     return {
         "timestamp": datetime.now().isoformat(),
         "metrics": metrics,
@@ -895,31 +646,27 @@ async def get_metrics(request: Request, _user: TokenData = AuthDep):
 
 
 @app.get("/api/v1/metrics/history", tags=["Metrics"])
-@limiter.limit("60/minute")
 async def get_metrics_history(
-    request: Request,
     metric: str = Query(..., description="Имя метрики"),
     limit: int = Query(100, ge=1, le=1000),
-    _user: TokenData = AuthDep,
 ):
     """Возвращает историю конкретной метрики."""
     history_list = getattr(observatory_state.history, metric, None)
     if history_list is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Metric '{metric}' not found. Available: hfr, fwhm, rms_ra, rms_dec, temperature, wind_speed, humidity",
+            detail=f"Metric '{metric}' not found.",
         )
-
     limited_history = (
         history_list[-limit:] if len(history_list) > limit else history_list
     )
-
     timestamps = []
     now = datetime.now()
+    from datetime import timedelta
+
     for i in range(len(limited_history)):
         timestamp = now - timedelta(seconds=(len(limited_history) - i) * 3)
         timestamps.append(timestamp.isoformat())
-
     return {
         "metric": metric,
         "count": len(limited_history),
@@ -937,20 +684,12 @@ async def get_metrics_history(
 
 
 # ============================================================================
-# EXECUTION LAYER ENDPOINTS — 🔒 OPERATOR+ (audit C4)
+# EXECUTION LAYER ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/execution/trigger", tags=["Execution Layer"])
-@limiter.limit(f"{settings.auth.trigger_rate_limit_per_minute}/minute")
-async def fire_trigger(
-    request: Request,
-    body: TriggerRequest,
-    user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Ручной вызов триггера через API."""
-    logger.info(
-        f"API Request: Fire trigger '{body.trigger_name}' "
-        f"(user={user.sub}, role={user.role.value})"
-    )
+async def fire_trigger(body: TriggerRequest):
+    """Ручной вызов триггера через API."""
+    logger.info(f"API Request: Fire trigger '{body.trigger_name}'")
     success = await trigger_emulator.fire_trigger(body.trigger_name, body.reason)
     if success:
         observatory_state.log_ai_action(
@@ -968,16 +707,9 @@ async def fire_trigger(
 
 
 @app.post("/api/v1/execution/variable", tags=["Execution Layer"])
-@limiter.limit(f"{settings.auth.trigger_rate_limit_per_minute}/minute")
-async def set_variable(
-    request: Request,
-    body: VariableRequest,
-    user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Изменение глобальной переменной Sequencer+."""
-    logger.info(
-        f"API Request: Set variable '{body.name}' = {body.value} (user={user.sub})"
-    )
+async def set_variable(body: VariableRequest):
+    """Изменение глобальной переменной Sequencer+."""
+    logger.info(f"API Request: Set variable '{body.name}' = {body.value}")
     success = await global_var_injector.set_variable(body.name, body.value, body.reason)
     if success:
         observatory_state.log_ai_action(
@@ -998,12 +730,7 @@ async def set_variable(
 # RAG ENGINE ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/rag/search", tags=["RAG Engine"])
-@limiter.limit("30/minute")
-async def rag_search(
-    request: Request,
-    body: RAGSearchRequest,
-    _user: TokenData = AuthDep,
-):
+async def rag_search(body: RAGSearchRequest):
     """Семантический поиск по базе знаний RAG."""
     logger.info(f"RAG Search: '{body.query}' (top_k={body.top_k})")
     results = await rag_engine.search(
@@ -1017,12 +744,9 @@ async def rag_search(
 
 
 @app.get("/api/v1/rag/context", tags=["RAG Engine"])
-@limiter.limit("30/minute")
 async def rag_get_context(
-    request: Request,
     query: str = Query(..., description="Поисковый запрос"),
     max_tokens: int = Query(2000, description="Максимальное количество токенов"),
-    _user: TokenData = AuthDep,
 ):
     """Получает контекст для LLM на основе запроса."""
     context = await rag_engine.get_context(query=query, max_tokens=max_tokens)
@@ -1034,8 +758,7 @@ async def rag_get_context(
 
 
 @app.get("/api/v1/rag/stats", tags=["RAG Engine"])
-@limiter.limit("30/minute")
-async def rag_stats(request: Request, _user: TokenData = AuthDep):
+async def rag_stats():
     """Возвращает статистику RAG-базы знаний."""
     return await rag_engine.get_stats()
 
@@ -1044,15 +767,13 @@ async def rag_stats(request: Request, _user: TokenData = AuthDep):
 # DISCOVERY & MASTERS LIBRARY ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/plugins", tags=["Discovery"])
-@limiter.limit("30/minute")
-async def get_discovered_plugins(request: Request, _user: TokenData = AuthDep):
-    """Возвращает список всех обнаруженных плагинов из Capability Registry."""
+async def get_discovered_plugins():
+    """Возвращает список всех обнаруженных плагинов."""
     registry = watcher_manager.registry
     if not registry:
         raise HTTPException(
             status_code=503, detail="Capability Registry not initialized"
         )
-
     plugins_summary = {}
     for guid, plugin_settings in registry._registry.items():
         plugins_summary[guid] = {
@@ -1066,8 +787,7 @@ async def get_discovered_plugins(request: Request, _user: TokenData = AuthDep):
 
 
 @app.get("/api/v1/masters/catalog", tags=["Masters Library"])
-@limiter.limit("30/minute")
-async def get_masters_catalog(request: Request, _user: TokenData = AuthDep):
+async def get_masters_catalog():
     """Возвращает каталог доступных мастер-кадров."""
     if not watcher_manager.masters_auditor:
         raise HTTPException(
@@ -1080,9 +800,7 @@ async def get_masters_catalog(request: Request, _user: TokenData = AuthDep):
 
 
 @app.get("/api/v1/masters/find", tags=["Masters Library"])
-@limiter.limit("30/minute")
 async def find_matching_master(
-    request: Request,
     image_type: str = Query(..., description="Тип кадра: BIAS, DARK, FLAT"),
     temperature: float = Query(..., description="Температура сенсора"),
     exposure: Optional[float] = Query(None),
@@ -1090,14 +808,12 @@ async def find_matching_master(
     offset: Optional[int] = Query(None),
     filter_name: Optional[str] = Query(None),
     temp_tolerance: float = Query(2.0),
-    _user: TokenData = AuthDep,
 ):
     """Ищет наиболее подходящий мастер-кадр."""
     if not watcher_manager.masters_auditor:
         raise HTTPException(
             status_code=503, detail="Masters Auditor not initialized yet"
         )
-
     master = watcher_manager.masters_auditor.find_matching_master(
         image_type=image_type,
         temperature=temperature,
@@ -1119,106 +835,26 @@ async def find_matching_master(
 # SAFETY ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/safety/preflight", tags=["Safety"])
-@limiter.limit("10/minute")
-async def run_preflight_check(
-    request: Request,
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Запускает pre-flight проверку перед стартом сессии."""
+async def run_preflight_check():
+    """Запускает pre-flight проверку перед стартом сессии."""
     report = await preflight_checker.run_all()
     return report
-
-
-# ============================================================================
-# SECURITY ENDPOINTS (Credential Vault) — 🔒 ADMIN ONLY (audit C4)
-# ============================================================================
-@app.get("/api/v1/security/vault", tags=["Security"])
-@limiter.limit("30/minute")
-async def list_vault_secrets(
-    request: Request,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Список секретов в Vault (без значений)."""
-    if not credential_vault:
-        raise HTTPException(status_code=503, detail="Credential Vault not initialized")
-    return {
-        "secrets": credential_vault.list_secrets(),
-        "stats": credential_vault.get_stats(),
-    }
-
-
-@app.post("/api/v1/security/vault/store", tags=["Security"])
-@limiter.limit("10/minute")
-async def store_secret(
-    request: Request,
-    body: SecretRequest,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Сохраняет секрет в Vault."""
-    if not credential_vault:
-        raise HTTPException(status_code=503, detail="Credential Vault not initialized")
-    success = credential_vault.store_secret(
-        name=body.name,
-        value=body.value,
-        description=body.description,
-    )
-    if success:
-        return {"status": "success", "message": f"Secret '{body.name}' stored"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to store secret")
-
-
-@app.get("/api/v1/security/vault/{name}", tags=["Security"])
-@limiter.limit("30/minute")
-async def get_secret(
-    request: Request,
-    name: str,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Извлекает секрет из Vault."""
-    if not credential_vault:
-        raise HTTPException(status_code=503, detail="Credential Vault not initialized")
-    value = credential_vault.get_secret(name)
-    if value is None:
-        raise HTTPException(status_code=404, detail=f"Secret '{name}' not found")
-    return {"name": name, "value": value}
-
-
-@app.delete("/api/v1/security/vault/{name}", tags=["Security"])
-@limiter.limit("10/minute")
-async def delete_secret(
-    request: Request,
-    name: str,
-    _admin: TokenData = Depends(require_role(UserRole.ADMIN)),
-):
-    """🔒 ADMIN ONLY: Удаляет секрет из Vault."""
-    if not credential_vault:
-        raise HTTPException(status_code=503, detail="Credential Vault not initialized")
-    success = credential_vault.delete_secret(name)
-    if success:
-        return {"status": "success", "message": f"Secret '{name}' deleted"}
-    else:
-        raise HTTPException(status_code=404, detail=f"Secret '{name}' not found")
 
 
 # ============================================================================
 # STORAGE ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/storage/disk-usage", tags=["Storage"])
-@limiter.limit("30/minute")
-async def get_disk_usage(request: Request, _user: TokenData = AuthDep):
+async def get_disk_usage():
     """Возвращает информацию об использовании дискового пространства."""
     return await disk_monitor.get_stats()
 
 
 @app.post("/api/v1/storage/cleanup", tags=["Storage"])
-@limiter.limit("5/minute")
 async def apply_retention_policy(
-    request: Request,
     policy_name: str = Query(..., description="Имя политики"),
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
 ):
-    """🔒 OPERATOR+: Применяет политику удаления старых данных."""
+    """Применяет политику удаления старых данных."""
     result = await disk_monitor.apply_retention_policy(policy_name)
     if result:
         return result
@@ -1234,15 +870,12 @@ async def apply_retention_policy(
 # DECISION AUDIT TRAIL ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/audit/decisions", tags=["Decision Audit"])
-@limiter.limit("30/minute")
 async def get_audit_decisions(
-    request: Request,
     agent: Optional[str] = Query(None),
     decision_type: Optional[str] = Query(None),
     session_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    _user: TokenData = AuthDep,
 ):
     """Возвращает историю решений из Decision Audit Trail."""
     records = await decision_audit.get_decisions(
@@ -1259,24 +892,20 @@ async def get_audit_decisions(
 
 
 @app.get("/api/v1/audit/stats", tags=["Decision Audit"])
-@limiter.limit("30/minute")
-async def get_audit_stats(request: Request, _user: TokenData = AuthDep):
+async def get_audit_stats():
     """Возвращает статистику Decision Audit Trail."""
     return await decision_audit.get_stats()
 
 
 # ============================================================================
-# SIMULATION MODE ENDPOINTS — 🔒 OPERATOR+ (audit C4)
+# SIMULATION MODE ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/simulation/start", tags=["Simulation"])
-@limiter.limit("10/minute")
 async def start_simulation(
-    request: Request,
     target: str = Query("M31", description="Имя цели"),
     frames: int = Query(10, description="Количество кадров"),
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
 ):
-    """🔒 OPERATOR+: Запускает симуляцию сессии (Fake NINA)."""
+    """Запускает симуляцию сессии (Fake NINA)."""
     from app.simulation.fake_nina import fake_nina
 
     await fake_nina.start()
@@ -1291,12 +920,8 @@ async def start_simulation(
 
 
 @app.post("/api/v1/simulation/stop", tags=["Simulation"])
-@limiter.limit("10/minute")
-async def stop_simulation(
-    request: Request,
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Останавливает симуляцию."""
+async def stop_simulation():
+    """Останавливает симуляцию."""
     from app.simulation.fake_nina import fake_nina
 
     await fake_nina.stop_sequence()
@@ -1308,13 +933,10 @@ async def stop_simulation(
 
 
 @app.post("/api/v1/simulation/inject-anomaly", tags=["Simulation"])
-@limiter.limit("20/minute")
 async def inject_anomaly(
-    request: Request,
     anomaly_type: str = Query(..., description="Тип аномалии"),
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
 ):
-    """🔒 OPERATOR+: Инжектирует аномалию для тестирования."""
+    """Инжектирует аномалию для тестирования."""
     from app.simulation.fake_nina import fake_nina
 
     valid_types = [
@@ -1334,12 +956,8 @@ async def inject_anomaly(
 
 
 @app.post("/api/v1/simulation/trigger-autofocus", tags=["Simulation"])
-@limiter.limit("10/minute")
-async def trigger_autofocus_simulation(
-    request: Request,
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Симулирует запуск автофокуса."""
+async def trigger_autofocus_simulation():
+    """Симулирует запуск автофокуса."""
     from app.simulation.fake_nina import fake_nina
 
     await fake_nina.trigger_autofocus()
@@ -1347,12 +965,8 @@ async def trigger_autofocus_simulation(
 
 
 @app.post("/api/v1/simulation/trigger-meridian-flip", tags=["Simulation"])
-@limiter.limit("10/minute")
-async def trigger_meridian_flip_simulation(
-    request: Request,
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Симулирует Meridian Flip."""
+async def trigger_meridian_flip_simulation():
+    """Симулирует Meridian Flip."""
     from app.simulation.fake_nina import fake_nina
 
     await fake_nina.trigger_meridian_flip()
@@ -1360,12 +974,8 @@ async def trigger_meridian_flip_simulation(
 
 
 @app.post("/api/v1/simulation/reset-cooldowns", tags=["Simulation"])
-@limiter.limit("10/minute")
-async def reset_agent_cooldowns(
-    request: Request,
-    _user: TokenData = Depends(require_role(UserRole.OPERATOR)),
-):
-    """🔒 OPERATOR+: Сбрасывает cooldown всех агентов (для тестирования)."""
+async def reset_agent_cooldowns():
+    """Сбрасывает cooldown всех агентов (для тестирования)."""
     watcher_agent._recent_anomalies.clear()
     if calibrator_agent:
         calibrator_agent._recent_alerts.clear()
@@ -1381,19 +991,13 @@ async def reset_agent_cooldowns(
 # TRIGGERS ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/triggers", tags=["Execution Layer"])
-@limiter.limit("30/minute")
-async def list_available_triggers(request: Request, _user: TokenData = AuthDep):
+async def list_available_triggers():
     """Возвращает список всех доступных триггеров."""
     return trigger_emulator.list_available_triggers()
 
 
 @app.get("/api/v1/triggers/{trigger_name}", tags=["Execution Layer"])
-@limiter.limit("30/minute")
-async def get_trigger_info(
-    request: Request,
-    trigger_name: str,
-    _user: TokenData = AuthDep,
-):
+async def get_trigger_info(trigger_name: str):
     """Возвращает информацию о конкретном триггере."""
     triggers = trigger_emulator.list_available_triggers()
     if trigger_name not in triggers:
@@ -1403,3 +1007,73 @@ async def get_trigger_info(
             f"Available: {', '.join(sorted(triggers.keys()))}",
         )
     return triggers[trigger_name]
+
+
+# ============================================================================
+# LANGGRAPH ORCHESTRATOR ENDPOINTS
+# ============================================================================
+@app.get("/api/v1/langgraph/workflows", tags=["LangGraph"])
+async def list_langgraph_workflows():
+    """Возвращает список активных LangGraph workflows."""
+    active = hybrid_orchestrator.list_active_workflows()
+    workflows = []
+    for wf_id in active:
+        state = hybrid_orchestrator.get_workflow_status(wf_id)
+        if state:
+            workflows.append(
+                {
+                    "workflow_id": wf_id,
+                    "type": state["workflow_type"],
+                    "status": state["status"],
+                    "created_at": state["created_at"],
+                }
+            )
+    return {
+        "active_workflows": len(active),
+        "workflows": workflows,
+    }
+
+
+@app.get("/api/v1/langgraph/workflow/{workflow_id}", tags=["LangGraph"])
+async def get_langgraph_workflow(workflow_id: str):
+    """Возвращает статус конкретного LangGraph workflow."""
+    state = hybrid_orchestrator.get_workflow_status(workflow_id)
+    if not state:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Workflow '{workflow_id}' not found",
+        )
+    return state
+
+
+@app.post("/api/v1/langgraph/start", tags=["LangGraph"])
+async def start_langgraph_workflow(
+    workflow_type: str = Query(
+        ..., description="Тип workflow: diagnostic, post_mortem, adaptive"
+    ),
+    trigger_event: str = Query("manual", description="Событие-триггер"),
+):
+    """Запускает новый LangGraph workflow."""
+    from app.agents.hybrid_langgraph_orchestrator import WorkflowType
+
+    try:
+        wf_type = WorkflowType(workflow_type)
+    except ValueError:
+        valid_types = [t.value for t in WorkflowType]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid workflow type: {workflow_type}. Valid types: {valid_types}",
+        )
+
+    workflow_id = await hybrid_orchestrator.start_workflow(
+        workflow_type=wf_type,
+        trigger_event={"type": trigger_event, "source": "api"},
+        context={"source": "manual_api_call"},
+    )
+
+    return {
+        "status": "success",
+        "workflow_id": workflow_id,
+        "workflow_type": workflow_type,
+        "message": f"Workflow {workflow_id} started",
+    }

@@ -1,14 +1,10 @@
 """
-Disk Monitor + Retention Engine — автоматическое управление дисковым
-пространством.
+Disk Monitor + Retention Engine — автоматическое управление дисковым пространством.
 
-Основан на архитектуре Atlas для предотвращения переполнения диска.
-
-ИСПРАВЛЕНО (audit 12.2):
-- Политика удаления теперь проверяет активные сессии через state_tracker
-- Не удаляются сессии, соответствующие активным целям в observatory_state
-- Добавлен whitelist для защиты критически важных данных
-- Все пропуски логируются для аудита
+ИСПРАВЛЕНО (рефакторинг v3):
+- Все пороги (50 GB, 20 GB) вынесены в settings.thresholds.storage
+- retention_keep_last_days читается из конфига
+- Защита активных сессий от удаления сохранена
 """
 
 import logging
@@ -17,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Set
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field
+
 from app.core.config import settings
 from app.core.events import event_bus
 from app.shadow_engine.state_tracker import state_tracker
@@ -53,10 +50,10 @@ class RetentionResult(BaseModel):
     policy_name: str
     files_deleted: int
     sessions_deleted: int = 0
-    sessions_skipped_active: int = 0  # ИСПРАВЛЕНО (audit 12.2)
-    sessions_skipped_whitelist: int = 0  # ИСПРАВЛЕНО (audit 12.2)
+    sessions_skipped_active: int = 0
+    sessions_skipped_whitelist: int = 0
     space_freed_gb: float
-    blocked_by_running_sequence: bool = False  # ИСПРАВЛЕНО (audit 12.2)
+    blocked_by_running_sequence: bool = False
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -64,17 +61,10 @@ class DiskMonitor:
     """
     Мониторинг дискового пространства.
 
-    Features:
-    - Проверка свободного места на всех дисках
-    - Алерты при низком свободном месте
-    - Автоматическая очистка по политикам
-    - Интеграция с Auditor для определения качества сессий
-    - ИСПРАВЛЕНО (audit 12.2): Защита активных сессий от удаления
-
-    ИСПРАВЛЕНО (audit 12.2):
-    - Перед удалением проверяется state_tracker.state.is_running
-    - Сессии активных целей (observatory_state.active_targets) не удаляются
-    - Добавлен whitelist для защиты критически важных сессий
+    ИСПРАВЛЕНО (v3):
+    - warning_threshold_gb и critical_threshold_gb читаются из settings
+    - retention_keep_last_days читается из settings
+    - Все политики используют конфиг вместо хардкода
     """
 
     def __init__(self):
@@ -82,19 +72,23 @@ class DiskMonitor:
         self.monitored_paths = [
             settings.nina_environment.sessions_root,
             settings.nina_environment.masters_root,
-            Path("./data"),  # Базы данных, логи
+            Path("./data"),
         ]
 
-        # Пороговые значения
-        self.warning_threshold_gb = 50.0  # Предупреждение при < 50 GB
-        self.critical_threshold_gb = 20.0  # Критический алерт при < 20 GB
+        # ИСПРАВЛЕНО (v3): Пороги из settings.thresholds.storage
+        storage_cfg = settings.thresholds.storage
+        self.warning_threshold_gb = storage_cfg.warning_threshold_gb
+        self.critical_threshold_gb = storage_cfg.critical_threshold_gb
 
-        # Политики хранения
+        # ИСПРАВЛЕНО (v3): retention_keep_last_days из конфига
+        retention_days = storage_cfg.retention_keep_last_days
+
+        # Политики хранения (с использованием конфига)
         self.policies = {
             "keep_last_30_days": RetentionPolicy(
                 name="keep_last_30_days",
-                description="Хранить сессии за последние 30 дней",
-                keep_last_days=30,
+                description=f"Хранить сессии за последние {retention_days} дней",
+                keep_last_days=retention_days,
                 min_free_space_gb=100.0,
             ),
             "keep_best_quality": RetentionPolicy(
@@ -115,20 +109,18 @@ class DiskMonitor:
         # История очисток
         self._cleanup_history: List[RetentionResult] = []
 
-        # ИСПРАВЛЕНО (audit 12.2): Whitelist сессий, которые никогда не удаляются
-        # session_id -> reason
+        # Whitelist сессий, которые никогда не удаляются
         self._whitelist: Dict[str, str] = {}
 
-        logger.info("💾 Disk Monitor initialized (with active session protection)")
+        logger.info(
+            f"💾 Disk Monitor initialized "
+            f"(warning: {self.warning_threshold_gb} GB, "
+            f"critical: {self.critical_threshold_gb} GB, "
+            f"retention: {retention_days} days)"
+        )
 
     def add_to_whitelist(self, session_id: str, reason: str = "manual") -> None:
-        """
-        Добавляет сессию в whitelist (защита от удаления).
-
-        Args:
-            session_id: Идентификатор сессии
-            reason: Причина защиты
-        """
+        """Добавляет сессию в whitelist (защита от удаления)."""
         self._whitelist[session_id] = reason
         logger.info(f"🛡️ Session added to whitelist: {session_id} (reason: {reason})")
 
@@ -141,34 +133,22 @@ class DiskMonitor:
         return False
 
     def _get_active_session_ids(self) -> Set[str]:
-        """
-        ИСПРАВЛЕНО (audit 12.2): Возвращает множество ID активных сессий.
-
-        Источники:
-        1. observatory_state.active_targets — текущие цели съёмки
-        2. state_tracker.state — запущенная последовательность
-        """
+        """Возвращает множество ID активных сессий."""
         active_ids: Set[str] = set()
 
-        # 1. Цели из observatory_state
         for target in observatory_state.active_targets:
             target_name = target.get("name") or target.get("target_name")
             if target_name:
-                # Формируем session_id как "target_YYYY-MM-DD"
                 date_str = datetime.now().strftime("%Y-%m-%d")
                 active_ids.add(f"{target_name}_{date_str}")
-                # Также добавляем просто имя цели (на случай разных форматов)
                 active_ids.add(target_name)
 
             session_id = target.get("session_id")
             if session_id:
                 active_ids.add(session_id)
 
-        # 2. Текущая запущенная последовательность
         if state_tracker.state.is_running:
-            # Пытаемся определить текущую сессию из пути контейнеров
             if state_tracker.state.container_path:
-                # Первая часть пути часто содержит имя цели
                 for part in state_tracker.state.container_path[:2]:
                     active_ids.add(part)
                     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -176,15 +156,13 @@ class DiskMonitor:
 
         return active_ids
 
-    def _is_session_active(self, session_dir: Path) -> tuple[bool, str]:
+    def _is_session_active(self, session_dir: Path) -> tuple:
         """
-        ИСПРАВЛЕНО (audit 12.2): Проверяет, является ли сессия активной.
-
-        Returns:
-            Tuple (is_active: bool, reason: str)
+        Проверяет, является ли сессия активной.
+        Returns: Tuple (is_active: bool, reason: str)
         """
         session_id = session_dir.name
-        session_parent = session_dir.parent.name  # Часто это имя цели
+        session_parent = session_dir.parent.name
 
         # 1. Проверка whitelist
         if session_id in self._whitelist:
@@ -194,7 +172,6 @@ class DiskMonitor:
 
         # 2. Проверка активных целей
         active_ids = self._get_active_session_ids()
-
         if session_id in active_ids:
             return True, "active target"
         if session_parent in active_ids:
@@ -202,7 +179,6 @@ class DiskMonitor:
 
         # 3. Проверка последовательности
         if state_tracker.state.is_running:
-            # Если последовательность запущена и сессия создана сегодня — пропускаем
             try:
                 mtime = datetime.fromtimestamp(session_dir.stat().st_mtime)
                 if mtime.date() == datetime.now().date():
@@ -224,7 +200,6 @@ class DiskMonitor:
             usage = self._get_disk_usage(path)
             results.append(usage)
 
-            # Проверяем пороги
             if usage.free_gb < self.critical_threshold_gb:
                 await self._send_critical_alert(usage)
             elif usage.free_gb < self.warning_threshold_gb:
@@ -255,7 +230,9 @@ class DiskMonitor:
             "ALERT",
             {
                 "level": "WARNING",
-                "message": f"Low disk space: {usage.free_gb:.1f} GB free on {usage.path}",
+                "message": (
+                    f"Low disk space: {usage.free_gb:.1f} GB free on {usage.path}"
+                ),
                 "agent": "DiskMonitor",
                 "timestamp": datetime.now().isoformat(),
                 "context": usage.model_dump(),
@@ -288,10 +265,8 @@ class DiskMonitor:
         """
         Применяет политику удаления старых данных.
 
-        ИСПРАВЛЕНО (audit 12.2):
-        - Перед удалением проверяется state_tracker.state.is_running
-        - Активные сессии пропускаются с логированием
-        - Whitelist защищает критически важные сессии
+        ИСПРАВЛЕНО (v3): keep_last_days берётся из политики (которая
+        инициализирована из settings.thresholds.storage.retention_keep_last_days).
         """
         policy = self.policies.get(policy_name)
         if not policy:
@@ -300,7 +275,6 @@ class DiskMonitor:
 
         logger.info(f"🗑️ Applying retention policy: {policy_name}")
 
-        # ИСПРАВЛЕНО (audit 12.2): Проверка запущенной последовательности
         if state_tracker.state.is_running:
             logger.warning(
                 "🛑 Sequence is running — retention policy will SKIP "
@@ -313,16 +287,12 @@ class DiskMonitor:
         sessions_skipped_whitelist = 0
         space_freed = 0
 
-        # Получаем список сессий
         sessions_root = settings.nina_environment.sessions_root
         if not sessions_root.exists():
             logger.warning(f"Sessions root does not exist: {sessions_root}")
             return None
 
-        # Сканируем папки сессий
         cutoff_date = datetime.now() - timedelta(days=policy.keep_last_days)
-
-        # ИСПРАВЛЕНО (audit 12.2): Получаем список активных сессий один раз
         active_session_ids = self._get_active_session_ids()
         logger.debug(f"Active session IDs detected: {active_session_ids or 'none'}")
 
@@ -330,7 +300,6 @@ class DiskMonitor:
             if not session_dir.is_dir():
                 continue
 
-            # ИСПРАВЛЕНО (audit 12.2): Проверка активности сессии
             is_active, reason = self._is_session_active(session_dir)
             if is_active:
                 if "whitelist" in reason:
@@ -347,17 +316,14 @@ class DiskMonitor:
                     )
                 continue
 
-            # Проверяем дату сессии
             try:
                 dir_mtime = datetime.fromtimestamp(session_dir.stat().st_mtime)
                 if dir_mtime >= cutoff_date:
-                    # Сессия новее cutoff — пропускаем
                     continue
             except (OSError, ValueError) as e:
                 logger.debug(f"Cannot read mtime for {session_dir}: {e}")
                 continue
 
-            # Подсчитываем размер перед удалением
             try:
                 dir_size = sum(
                     f.stat().st_size for f in session_dir.rglob("*") if f.is_file()
@@ -366,13 +332,8 @@ class DiskMonitor:
                 logger.warning(f"Cannot calculate size of {session_dir}: {e}")
                 continue
 
-            # Применяем политику
             should_delete = False
             if policy.keep_best_quality:
-                # ИСПРАВЛЕНО: Проверка quality_score из Auditor
-                # (в полной реализации нужен запрос к Auditor/Decision Audit)
-                # Пока используем эвристику: считаем качественные сессии
-                # по наличию файлов stack/preview
                 has_stack = any(
                     (session_dir / f).exists()
                     for f in ["stack.fit", "preview.jpg", "Session_Digest.md"]
@@ -382,20 +343,16 @@ class DiskMonitor:
                     logger.debug(f"⏭️ Keeping high-quality session: {session_dir.name}")
                     continue
             elif policy.delete_raw_keep_stacked:
-                # Удаляем RAW файлы, оставляем стеки
                 should_delete = True
             else:
-                # Просто удаляем старые сессии
                 should_delete = True
 
             if not should_delete:
                 continue
 
-            # Удаляем папку
             try:
                 shutil.rmtree(session_dir)
                 sessions_deleted += 1
-                # Приблизительное количество файлов
                 files_deleted += max(1, dir_size // (50 * 1024 * 1024))
                 space_freed += dir_size
                 logger.info(
@@ -425,14 +382,13 @@ class DiskMonitor:
             f"{sessions_skipped_whitelist} whitelisted skipped"
         )
 
-        # Публикуем событие
         await event_bus.publish("DISK_CLEANUP_COMPLETED", result.model_dump())
-
         return result
 
     async def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику дискового пространства."""
         disk_usage = await self.check_all_disks()
+
         return {
             "monitored_paths": [str(p) for p in self.monitored_paths],
             "disk_usage": [u.model_dump() for u in disk_usage],

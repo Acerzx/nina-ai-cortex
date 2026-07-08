@@ -1,6 +1,0 @@
-Ссылки на предыдущие ветки чата:
-
-1. https://chat.qwen.ai/s/ef89423a-0991-44f4-9045-7026f46b58c5?fev=0.2.68
-2. https://chat.qwen.ai/s/d4e0e48c-6f4d-4ca0-9339-139f2cb20888?fev=0.2.68
-3. https://chat.qwen.ai/s/84a93e2e-ed98-48bd-82a5-9c3d5afe0437?fev=0.2.68
-4. https://chat.qwen.ai/s/84689da2-e3d1-4cc4-964b-73f14643b7b9?fev=0.2.71

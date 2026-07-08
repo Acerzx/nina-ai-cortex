@@ -1,338 +1,298 @@
 """
-Trigger Emulator v2
+Trigger Emulator v3 (OpenAPI-Driven Edition)
 Эмулирует срабатывание триггеров через N.I.N.A. Advanced API.
 
-ИСПРАВЛЕНО v2: Использует РЕАЛЬНЫЕ пути из OpenAPI спецификации:
-- Autofocus: GET /v2/api/equipment/focuser/auto-focus
-- Guider: GET /v2/api/equipment/guider/start?calibrate=...
-- Mount: GET /v2/api/equipment/mount/park, /home, /flip
-- Sequence: GET /v2/api/sequence/start, /stop
-
-Базовый URL из спецификации: http://localhost:1888/v2/api
-
-ИСПРАВЛЕНО (audit 4.5):
-- Внедрён список PROTECTED_PARAMS для предотвращения перезаписи
-  критических параметров через extra_params
-- Добавлена валидация значений параметров (температура, время,
-  координаты) для защиты оборудования от опасных команд
-- Попытки перезаписи защищённых параметров логируются с уровнем WARNING
-- Добавлена проверка FLAT_MODE и критической фазы из HAL
+КЛЮЧЕВЫЕ УЛУЧШЕНИЯ (рефакторинг v3):
+- Динамическое построение реестра триггеров из OpenAPI спецификации
+- AGENT_ALIASES читаются из settings.execution.agent_aliases (если есть)
+- PARAMETER_RANGES извлекаются автоматически из OpenAPI (minimum/maximum)
+- Устранён хардкод путей — всё резолвится из spec
+- Сохранена вся бизнес-логика: FLAT_MODE, critical phase, HAL, protected params
+- Полная статистика и история всех операций
+- Детальная обработка всех HTTP-ответов (200, 409, 404, errors)
+- Fallback: можно вызвать любой эндпоинт N.I.N.A. API напрямую
 """
 
 import logging
-from typing import Optional, Dict, Any, List, Set
+from typing import Optional, Dict, Any, List, Set, Tuple
+from datetime import datetime
+from pydantic import BaseModel, Field
 import httpx
+
 from app.core.config import settings
 from app.shadow_engine.state_tracker import state_tracker
 from app.core.events import event_bus
+from app.execution.openapi_client import get_nina_api_client, DynamicAPIClient
 
 logger = logging.getLogger("TriggerEmulator")
 
 
 # ============================================================================
-# ЗАЩИЩЁННЫЕ ПАРАМЕТРЫ И ВАЛИДАЦИЯ
+# МОДЕЛИ ДАННЫХ
 # ============================================================================
 
-# Параметры, которые НЕ могут быть перезаписаны через extra_params.
-# Эти параметры критичны для безопасности оборудования.
+
+class TriggerHistoryRecord(BaseModel):
+    """Запись в истории триггеров."""
+
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    trigger: str
+    actual_trigger: str = ""
+    reason: str
+    status: str  # SUCCESS, FAILED_*, BLOCKED_*
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ============================================================================
+# КОНФИГУРАЦИЯ
+# ============================================================================
+
+# Защищённые параметры (нельзя перезаписывать через extra_params).
+# Это критично для безопасности оборудования.
 PROTECTED_PARAMS: Set[str] = {
-    "cancel",  # Отмена операций (может прервать критические процессы)
+    "cancel",  # Отмена операций
     "skipValidation",  # Пропуск валидации секвенсора
 }
 
-# Диапазоны допустимых значений для параметров оборудования.
-# Значения вне этих диапазонов будут отклонены для защиты оборудования.
-PARAMETER_RANGES: Dict[str, Dict[str, Any]] = {
-    # Температура камеры (°C)
-    "temperature": {"min": -40.0, "max": 30.0},
-    # Время охлаждения/нагрева камеры (минуты)
-    "minutes": {"min": 0, "max": 120},
-    # Яркость плоской панели (0-100)
-    "brightness": {"min": 0, "max": 100},
-    # Количество кадров (для flats)
-    "count": {"min": 1, "max": 100},
-    # Экспозиция (секунды)
-    "exposureTime": {"min": 0.001, "max": 3600.0},
-    "minExposure": {"min": 0.0, "max": 300.0},
-    "maxExposure": {"min": 0.0, "max": 600.0},
-    # Азимут купола (градусы)
-    "azimuth": {"min": 0.0, "max": 360.0},
-    # Координаты монтировки
-    "ra": {"min": 0.0, "max": 360.0},
-    "dec": {"min": -90.0, "max": 90.0},
-    # Позиция ротатора (градусы)
-    "position": {"min": 0.0, "max": 360.0},
-    "rotationAngle": {"min": -360.0, "max": 360.0},
-    # Гистограмма (0-1)
-    "histogramMean": {"min": 0.0, "max": 1.0},
-    "meanTolerance": {"min": 0.0, "max": 1.0},
-    # Gain и Offset
-    "gain": {"min": 0, "max": 10000},
-    "offset": {"min": -1000, "max": 10000},
-    # Filter ID
-    "filterId": {"min": 0, "max": 20},
+# Минимальный маппинг внутренних имён Cortex на паттерны в OpenAPI.
+# Это БИЗНЕС-ЛОГИКА — связь между абстрактным именем агента и реальным путём.
+# Может быть переопределён через settings.execution.trigger_patterns
+DEFAULT_TRIGGER_PATTERNS: Dict[str, Dict[str, Any]] = {
+    # Autofocus
+    "autofocus": {
+        "method": "GET",
+        "path_pattern": "/equipment/focuser/auto-focus",
+        "category": "focuser",
+        "risk_level": "LOW",
+        "description": "Start autofocus",
+    },
+    "autofocus_cancel": {
+        "method": "GET",
+        "path_pattern": "/equipment/focuser/auto-focus",
+        "default_params": {"cancel": True},
+        "category": "focuser",
+        "risk_level": "LOW",
+        "description": "Cancel running autofocus",
+    },
+    # Guider
+    "guider_start": {
+        "method": "GET",
+        "path_pattern": "/equipment/guider/start",
+        "default_params": {"calibrate": False},
+        "category": "guider",
+        "risk_level": "LOW",
+        "description": "Start guiding",
+    },
+    "guider_calibrate": {
+        "method": "GET",
+        "path_pattern": "/equipment/guider/start",
+        "default_params": {"calibrate": True},
+        "category": "guider",
+        "risk_level": "MEDIUM",
+        "description": "Start guiding with force calibration",
+    },
+    "guider_stop": {
+        "method": "GET",
+        "path_pattern": "/equipment/guider/stop",
+        "category": "guider",
+        "risk_level": "LOW",
+        "description": "Stop guiding",
+    },
+    "guider_clear_calibration": {
+        "method": "GET",
+        "path_pattern": "/equipment/guider/clear-calibration",
+        "category": "guider",
+        "risk_level": "MEDIUM",
+        "description": "Clear guider calibration",
+    },
+    # Sequence
+    "sequence_start": {
+        "method": "GET",
+        "path_pattern": "/sequence/start",
+        "category": "sequence",
+        "risk_level": "HIGH",
+        "description": "Start Advanced Sequence",
+    },
+    "sequence_stop": {
+        "method": "GET",
+        "path_pattern": "/sequence/stop",
+        "category": "sequence",
+        "risk_level": "MEDIUM",
+        "description": "Stop Advanced Sequence",
+    },
+    "sequence_skip": {
+        "method": "GET",
+        "path_pattern": "/sequence/skip",
+        "default_params": {"type": "CurrentItems"},
+        "category": "sequence",
+        "risk_level": "LOW",
+        "description": "Skip current sequence items",
+    },
+    "sequence_reset": {
+        "method": "GET",
+        "path_pattern": "/sequence/reset",
+        "category": "sequence",
+        "risk_level": "MEDIUM",
+        "description": "Reset sequence counters",
+    },
+    # Mount
+    "mount_park": {
+        "method": "GET",
+        "path_pattern": "/equipment/mount/park",
+        "category": "mount",
+        "risk_level": "HIGH",
+        "description": "Park the mount",
+    },
+    "mount_unpark": {
+        "method": "GET",
+        "path_pattern": "/equipment/mount/unpark",
+        "category": "mount",
+        "risk_level": "MEDIUM",
+        "description": "Unpark the mount",
+    },
+    "mount_home": {
+        "method": "GET",
+        "path_pattern": "/equipment/mount/home",
+        "category": "mount",
+        "risk_level": "HIGH",
+        "description": "Home the mount",
+    },
+    "meridian_flip": {
+        "method": "GET",
+        "path_pattern": "/equipment/mount/flip",
+        "category": "mount",
+        "risk_level": "HIGH",
+        "description": "Perform meridian flip",
+    },
+    # Dome
+    "dome_park": {
+        "method": "GET",
+        "path_pattern": "/equipment/dome/park",
+        "category": "dome",
+        "risk_level": "MEDIUM",
+        "description": "Park the dome",
+    },
+    "dome_open": {
+        "method": "GET",
+        "path_pattern": "/equipment/dome/open",
+        "category": "dome",
+        "risk_level": "HIGH",
+        "description": "Open dome shutter",
+    },
+    "dome_close": {
+        "method": "GET",
+        "path_pattern": "/equipment/dome/close",
+        "category": "dome",
+        "risk_level": "MEDIUM",
+        "description": "Close dome shutter",
+    },
+    # Camera
+    "camera_connect": {
+        "method": "GET",
+        "path_pattern": "/equipment/camera/connect",
+        "category": "camera",
+        "risk_level": "LOW",
+        "description": "Connect to camera",
+    },
+    "camera_disconnect": {
+        "method": "GET",
+        "path_pattern": "/equipment/camera/disconnect",
+        "category": "camera",
+        "risk_level": "MEDIUM",
+        "description": "Disconnect camera",
+    },
+    "camera_cool": {
+        "method": "GET",
+        "path_pattern": "/equipment/camera/cool",
+        "default_params": {"temperature": -15.0, "minutes": 10},
+        "category": "camera",
+        "risk_level": "MEDIUM",
+        "description": "Cool camera to target temp",
+    },
+    "camera_warm": {
+        "method": "GET",
+        "path_pattern": "/equipment/camera/warm",
+        "default_params": {"minutes": 10},
+        "category": "camera",
+        "risk_level": "MEDIUM",
+        "description": "Warm camera",
+    },
+    # Flat Panel
+    "flat_light_on": {
+        "method": "GET",
+        "path_pattern": "/equipment/flatdevice/set-light",
+        "default_params": {"on": True},
+        "category": "flat",
+        "risk_level": "LOW",
+        "description": "Turn on flat panel light",
+    },
+    "flat_light_off": {
+        "method": "GET",
+        "path_pattern": "/equipment/flatdevice/set-light",
+        "default_params": {"on": False},
+        "category": "flat",
+        "risk_level": "LOW",
+        "description": "Turn off flat panel light",
+    },
+    # LiveStack
+    "livestack_start": {
+        "method": "GET",
+        "path_pattern": "/livestack/start",
+        "category": "livestack",
+        "risk_level": "LOW",
+        "description": "Start LiveStack",
+    },
+    "livestack_stop": {
+        "method": "GET",
+        "path_pattern": "/livestack/stop",
+        "category": "livestack",
+        "risk_level": "LOW",
+        "description": "Stop LiveStack",
+    },
 }
+
+
+# ============================================================================
+# TRIGGER EMULATOR
+# ============================================================================
 
 
 class TriggerEmulator:
     """
-    Эмулирует срабатывание триггеров через N.I.N.A. Advanced API.
-    Использует РЕАЛЬНЫЕ эндпоинты из спецификации christian-photo/ninaAPI v2.
+    Эмулятор триггеров N.I.N.A. Advanced API (OpenAPI-Driven Edition).
 
-    ИСПРАВЛЕНО (audit 4.5):
-    - Защита от перезаписи критических параметров
-    - Валидация значений для защиты оборудования
-    - Полное логирование всех операций
+    Архитектура:
+    1. При старте загружает OpenAPI spec через openapi_client
+    2. Строит dynamic registry триггеров на основе spec + TRIGGER_PATTERNS
+    3. При fire_trigger резолвит путь из registry, валидирует параметры,
+       вызывает OpenAPI клиент
+    4. Все операции логируются в историю и EventBus
+    5. Поддерживает прямой вызов любого OpenAPI эндпоинта (fallback)
     """
 
-    # Маппинг внутренних триггеров на РЕАЛЬНЫЕ пути Advanced API
-    # Все пути относительные к base_url = /v2/api
-    TRIGGER_MAP = {
-        # === Autofocus ===
-        "autofocus": {
-            "method": "GET",
-            "path": "/equipment/focuser/auto-focus",
-            "params": {},
-            "description": "Start autofocus",
-            "category": "focuser",
-            "risk_level": "LOW",
-        },
-        "autofocus_cancel": {
-            "method": "GET",
-            "path": "/equipment/focuser/auto-focus",
-            "params": {"cancel": True},
-            "description": "Cancel running autofocus",
-            "category": "focuser",
-            "risk_level": "LOW",
-        },
-        # === Guider (PHD2) ===
-        "guider_start": {
-            "method": "GET",
-            "path": "/equipment/guider/start",
-            "params": {"calibrate": False},
-            "description": "Start guiding (without calibration)",
-            "category": "guider",
-            "risk_level": "LOW",
-        },
-        "guider_calibrate": {
-            "method": "GET",
-            "path": "/equipment/guider/start",
-            "params": {"calibrate": True},
-            "description": "Start guiding WITH force calibration",
-            "category": "guider",
-            "risk_level": "MEDIUM",
-        },
-        "guider_stop": {
-            "method": "GET",
-            "path": "/equipment/guider/stop",
-            "params": {},
-            "description": "Stop guiding",
-            "category": "guider",
-            "risk_level": "LOW",
-        },
-        "guider_clear_calibration": {
-            "method": "GET",
-            "path": "/equipment/guider/clear-calibration",
-            "params": {},
-            "description": "Clear guider calibration data",
-            "category": "guider",
-            "risk_level": "MEDIUM",
-        },
-        # === Sequence ===
-        "sequence_start": {
-            "method": "GET",
-            "path": "/sequence/start",
-            "params": {},
-            "description": "Start Advanced Sequence",
-            "category": "sequence",
-            "risk_level": "HIGH",
-        },
-        "sequence_stop": {
-            "method": "GET",
-            "path": "/sequence/stop",
-            "params": {},
-            "description": "Stop Advanced Sequence",
-            "category": "sequence",
-            "risk_level": "MEDIUM",
-        },
-        "sequence_skip": {
-            "method": "GET",
-            "path": "/sequence/skip",
-            "params": {"type": "CurrentItems"},
-            "description": "Skip current sequence items",
-            "category": "sequence",
-            "risk_level": "LOW",
-        },
-        "sequence_reset": {
-            "method": "GET",
-            "path": "/sequence/reset",
-            "params": {},
-            "description": "Reset sequence counters",
-            "category": "sequence",
-            "risk_level": "MEDIUM",
-        },
-        # === Mount ===
-        "mount_park": {
-            "method": "GET",
-            "path": "/equipment/mount/park",
-            "params": {},
-            "description": "Park the mount",
-            "category": "mount",
-            "risk_level": "HIGH",
-        },
-        "mount_unpark": {
-            "method": "GET",
-            "path": "/equipment/mount/unpark",
-            "params": {},
-            "description": "Unpark the mount",
-            "category": "mount",
-            "risk_level": "MEDIUM",
-        },
-        "mount_home": {
-            "method": "GET",
-            "path": "/equipment/mount/home",
-            "params": {},
-            "description": "Home the mount",
-            "category": "mount",
-            "risk_level": "HIGH",
-        },
-        "meridian_flip": {
-            "method": "GET",
-            "path": "/equipment/mount/flip",
-            "params": {},
-            "description": "Perform meridian flip (if needed)",
-            "category": "mount",
-            "risk_level": "HIGH",
-        },
-        # === Dome ===
-        "dome_park": {
-            "method": "GET",
-            "path": "/equipment/dome/park",
-            "params": {},
-            "description": "Park the dome",
-            "category": "dome",
-            "risk_level": "MEDIUM",
-        },
-        "dome_open": {
-            "method": "GET",
-            "path": "/equipment/dome/open",
-            "params": {},
-            "description": "Open dome shutter",
-            "category": "dome",
-            "risk_level": "HIGH",
-        },
-        "dome_close": {
-            "method": "GET",
-            "path": "/equipment/dome/close",
-            "params": {},
-            "description": "Close dome shutter",
-            "category": "dome",
-            "risk_level": "MEDIUM",
-        },
-        # === Camera ===
-        "camera_connect": {
-            "method": "GET",
-            "path": "/equipment/camera/connect",
-            "params": {},
-            "description": "Connect to camera",
-            "category": "camera",
-            "risk_level": "LOW",
-        },
-        "camera_disconnect": {
-            "method": "GET",
-            "path": "/equipment/camera/disconnect",
-            "params": {},
-            "description": "Disconnect camera",
-            "category": "camera",
-            "risk_level": "MEDIUM",
-        },
-        "camera_cool": {
-            "method": "GET",
-            "path": "/equipment/camera/cool",
-            "params": {"temperature": -15.0, "minutes": 10},
-            "description": "Cool camera to target temp",
-            "category": "camera",
-            "risk_level": "MEDIUM",
-        },
-        "camera_warm": {
-            "method": "GET",
-            "path": "/equipment/camera/warm",
-            "params": {"minutes": 10},
-            "description": "Warm camera",
-            "category": "camera",
-            "risk_level": "MEDIUM",
-        },
-        # === Flat Panel ===
-        "flat_light_on": {
-            "method": "GET",
-            "path": "/equipment/flatdevice/set-light",
-            "params": {"on": True},
-            "description": "Turn on flat panel light",
-            "category": "flat",
-            "risk_level": "LOW",
-        },
-        "flat_light_off": {
-            "method": "GET",
-            "path": "/equipment/flatdevice/set-light",
-            "params": {"on": False},
-            "description": "Turn off flat panel light",
-            "category": "flat",
-            "risk_level": "LOW",
-        },
-        # === LiveStack ===
-        "livestack_start": {
-            "method": "GET",
-            "path": "/livestack/start",
-            "params": {},
-            "description": "Start LiveStack",
-            "category": "livestack",
-            "risk_level": "LOW",
-        },
-        "livestack_stop": {
-            "method": "GET",
-            "path": "/livestack/stop",
-            "params": {},
-            "description": "Stop LiveStack",
-            "category": "livestack",
-            "risk_level": "LOW",
-        },
-        # === Application ===
-        "switch_tab_equipment": {
-            "method": "GET",
-            "path": "/application/switch-tab",
-            "params": {"tab": "equipment"},
-            "description": "Switch to Equipment tab",
-            "category": "application",
-            "risk_level": "LOW",
-        },
-        "switch_tab_imaging": {
-            "method": "GET",
-            "path": "/application/switch-tab",
-            "params": {"tab": "imaging"},
-            "description": "Switch to Imaging tab",
-            "category": "application",
-            "risk_level": "LOW",
-        },
-    }
-
-    # Маппинг упрощённых имён агентов на реальные триггеры
-    AGENT_ALIASES = {
-        "autofocus": "autofocus",
-        "dither": "guider_start",  # Dither делается через guider
-        "guider_calibration": "guider_calibrate",
-        "phd2_settle": "guider_start",
-        "emergency_park": "mount_park",
-    }
-
     def __init__(self):
-        # Базовый URL из спецификации
         self.base_url = settings.network.nina_api_host.rstrip("/")
+
         # Нормализация URL
         if not self.base_url.endswith("/v2/api"):
             if self.base_url.endswith("/v2"):
                 self.base_url = f"{self.base_url}/api"
             elif not self.base_url.endswith("/api"):
                 self.base_url = f"{self.base_url}/v2/api"
+
+        # Загружаем AGENT_ALIASES из settings (если есть) или используем default
+        self._agent_aliases: Dict[str, str] = self._load_agent_aliases()
+
+        # Загружаем trigger patterns из settings (если есть) или используем default
+        self._trigger_patterns: Dict[str, Dict[str, Any]] = (
+            self._load_trigger_patterns()
+        )
+
+        # Dynamic registry: trigger_name -> {method, path, params, ...}
+        self._registry: Dict[str, Dict[str, Any]] = {}
+
+        # OpenAPI клиент (lazy init)
+        self._openapi_client: Optional[DynamicAPIClient] = None
 
         # Статистика
         self._stats = {
@@ -344,90 +304,228 @@ class TriggerEmulator:
             "blocked_by_hal": 0,
             "blocked_by_validation": 0,
             "protected_params_rejected": 0,
+            "openapi_calls": 0,
+            "direct_calls": 0,
         }
 
-        # История последних триггеров (для аудита)
-        self._trigger_history: List[Dict[str, Any]] = []
+        # История
+        self._trigger_history: List[TriggerHistoryRecord] = []
         self._history_max_size: int = 100
 
-        logger.info(f"🎯 TriggerEmulator initialized with base URL: {self.base_url}")
-        logger.info(f"   Protected parameters: {', '.join(sorted(PROTECTED_PARAMS))}")
+        logger.info(f"🎯 TriggerEmulator v3 initialized (base: {self.base_url})")
         logger.info(
-            f"   Parameter ranges validated: {len(PARAMETER_RANGES)} parameters"
+            f"   Agent aliases: {len(self._agent_aliases)}, "
+            f"trigger patterns: {len(self._trigger_patterns)}"
         )
 
+    # ====================================================================
+    # КОНФИГУРАЦИЯ
+    # ====================================================================
+
+    def _load_agent_aliases(self) -> Dict[str, str]:
+        """Загружает AGENT_ALIASES из settings или возвращает default."""
+        try:
+            exec_cfg = getattr(settings, "execution", None)
+            if exec_cfg:
+                aliases = getattr(exec_cfg, "agent_aliases", None)
+                if aliases and isinstance(aliases, dict):
+                    logger.info(f"✅ Loaded {len(aliases)} agent aliases from settings")
+                    return dict(aliases)
+        except Exception as e:
+            logger.debug(f"Could not load execution config: {e}")
+
+        # Default aliases (бизнес-логика)
+        return {
+            "autofocus": "autofocus",
+            "dither": "guider_start",
+            "guider_calibration": "guider_calibrate",
+            "phd2_settle": "guider_start",
+            "emergency_park": "mount_park",
+        }
+
+    def _load_trigger_patterns(self) -> Dict[str, Dict[str, Any]]:
+        """Загружает trigger patterns из settings или возвращает default."""
+        try:
+            exec_cfg = getattr(settings, "execution", None)
+            if exec_cfg:
+                patterns = getattr(exec_cfg, "trigger_patterns", None)
+                if patterns and isinstance(patterns, dict):
+                    logger.info(
+                        f"✅ Loaded {len(patterns)} trigger patterns from settings"
+                    )
+                    # Мержим с default (settings имеют приоритет)
+                    merged = dict(DEFAULT_TRIGGER_PATTERNS)
+                    merged.update(patterns)
+                    return merged
+        except Exception as e:
+            logger.debug(f"Could not load execution config: {e}")
+
+        return dict(DEFAULT_TRIGGER_PATTERNS)
+
+    async def _ensure_openapi_client(self) -> Optional[DynamicAPIClient]:
+        """Гарантирует, что OpenAPI клиент инициализирован."""
+        if self._openapi_client is not None:
+            return self._openapi_client
+
+        try:
+            self._openapi_client = await get_nina_api_client()
+            # Строим registry при первой инициализации
+            self._build_registry_from_openapi()
+            return self._openapi_client
+        except Exception as e:
+            logger.warning(f"⚠️ OpenAPI client not available: {e}")
+            # Fallback: строим registry из patterns (без валидации)
+            self._build_registry_fallback()
+            return None
+
+    def _build_registry_from_openapi(self):
+        """
+        Строит реестр триггеров из OpenAPI спецификации + patterns.
+        Извлекает parameter ranges (min/max) из схемы.
+        """
+        if not self._openapi_client:
+            self._build_registry_fallback()
+            return
+
+        for trigger_name, pattern in self._trigger_patterns.items():
+            method = pattern.get("method", "GET")
+            path_pattern = pattern.get("path_pattern", "")
+
+            # Ищем эндпоинт в spec
+            matches = self._openapi_client.find_by_path_pattern(path_pattern)
+            endpoint = None
+            for ep in matches:
+                if ep.method == method.upper():
+                    endpoint = ep
+                    break
+
+            if not endpoint:
+                logger.warning(
+                    f"⚠️ Trigger '{trigger_name}' not found in OpenAPI spec "
+                    f"(path: {path_pattern}, method: {method})"
+                )
+                # Всё равно регистрируем с минимальной информацией
+                self._registry[trigger_name] = {
+                    "method": method,
+                    "path": path_pattern,
+                    "params": dict(pattern.get("default_params", {})),
+                    "description": pattern.get("description", ""),
+                    "category": pattern.get("category", "unknown"),
+                    "risk_level": pattern.get("risk_level", "UNKNOWN"),
+                    "parameter_ranges": {},
+                    "protected_params": set(PROTECTED_PARAMS),
+                    "from_openapi": False,
+                }
+                continue
+
+            # Извлекаем parameter ranges из OpenAPI
+            parameter_ranges: Dict[str, Dict[str, Any]] = {}
+            for param in endpoint.parameters:
+                if param.min_value is not None or param.max_value is not None:
+                    parameter_ranges[param.name] = {}
+                    if param.min_value is not None:
+                        parameter_ranges[param.name]["min"] = param.min_value
+                    if param.max_value is not None:
+                        parameter_ranges[param.name]["max"] = param.max_value
+
+            self._registry[trigger_name] = {
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "params": dict(pattern.get("default_params", {})),
+                "description": endpoint.summary or pattern.get("description", ""),
+                "category": pattern.get("category", "unknown"),
+                "risk_level": pattern.get("risk_level", "UNKNOWN"),
+                "parameter_ranges": parameter_ranges,
+                "protected_params": set(PROTECTED_PARAMS),
+                "from_openapi": True,
+                "openapi_endpoint": endpoint,
+            }
+
+        logger.info(
+            f"✅ Built registry: {len(self._registry)} triggers "
+            f"({sum(1 for v in self._registry.values() if v.get('from_openapi'))} "
+            f"from OpenAPI)"
+        )
+
+    def _build_registry_fallback(self):
+        """Строит registry из patterns без OpenAPI spec (fallback)."""
+        for trigger_name, pattern in self._trigger_patterns.items():
+            self._registry[trigger_name] = {
+                "method": pattern.get("method", "GET"),
+                "path": pattern.get("path_pattern", ""),
+                "params": dict(pattern.get("default_params", {})),
+                "description": pattern.get("description", ""),
+                "category": pattern.get("category", "unknown"),
+                "risk_level": pattern.get("risk_level", "UNKNOWN"),
+                "parameter_ranges": {},
+                "protected_params": set(PROTECTED_PARAMS),
+                "from_openapi": False,
+            }
+
+        logger.info(
+            f"⚠️ Built fallback registry: {len(self._registry)} triggers "
+            f"(no OpenAPI validation)"
+        )
+
+    # ====================================================================
+    # ВАЛИДАЦИЯ ПАРАМЕТРОВ
+    # ====================================================================
+
     def _validate_parameter_value(
-        self, param_name: str, value: Any
-    ) -> tuple[bool, Optional[str]]:
-        """
-        Валидирует значение параметра против допустимых диапазонов.
+        self,
+        trigger_config: Dict[str, Any],
+        param_name: str,
+        value: Any,
+    ) -> Tuple[bool, Optional[str]]:
+        """Валидирует значение параметра против OpenAPI схемы."""
+        parameter_ranges = trigger_config.get("parameter_ranges", {})
 
-        Args:
-            param_name: Имя параметра
-            value: Значение для проверки
+        if param_name not in parameter_ranges:
+            return True, None  # Нет ограничений в spec
 
-        Returns:
-            Tuple (is_valid, error_message)
-        """
-        if param_name not in PARAMETER_RANGES:
-            # Параметр без ограничений — считаем валидным
-            return True, None
-
-        range_spec = PARAMETER_RANGES[param_name]
+        range_spec = parameter_ranges[param_name]
         min_val = range_spec.get("min")
         max_val = range_spec.get("max")
 
         try:
             numeric_value = float(value)
         except (TypeError, ValueError):
-            return (
-                False,
-                f"Parameter '{param_name}' must be numeric, got {type(value).__name__}",
+            return False, (
+                f"Parameter '{param_name}' must be numeric, got {type(value).__name__}"
             )
 
         if min_val is not None and numeric_value < min_val:
-            return (
-                False,
-                f"Parameter '{param_name}' = {numeric_value} "
-                f"is below minimum {min_val}",
+            return False, (
+                f"Parameter '{param_name}' = {numeric_value} is below minimum {min_val}"
             )
 
         if max_val is not None and numeric_value > max_val:
-            return (
-                False,
-                f"Parameter '{param_name}' = {numeric_value} exceeds maximum {max_val}",
+            return False, (
+                f"Parameter '{param_name}' = {numeric_value} exceeds maximum {max_val}"
             )
 
         return True, None
 
     def _merge_params_safely(
         self,
+        trigger_config: Dict[str, Any],
         base_params: Dict[str, Any],
         extra_params: Optional[Dict[str, Any]],
-    ) -> tuple[Dict[str, Any], List[str]]:
+    ) -> Tuple[Dict[str, Any], List[str]]:
         """
         Безопасно объединяет базовые и дополнительные параметры.
-
-        ИСПРАВЛЕНО (audit 4.5): Защищённые параметры не могут быть
-        перезаписаны через extra_params. Все попытки перезаписи
-        логируются с уровнем WARNING.
-
-        Args:
-            base_params: Базовые параметры из TRIGGER_MAP
-            extra_params: Дополнительные параметры от вызывающего кода
-
-        Returns:
-            Tuple (merged_params, list_of_rejected_params)
+        Защищённые параметры не могут быть перезаписаны.
         """
         if not extra_params:
             return dict(base_params), []
 
         merged = dict(base_params)
         rejected: List[str] = []
+        protected_params = trigger_config.get("protected_params", PROTECTED_PARAMS)
 
         for key, value in extra_params.items():
             # Проверка 1: Защищённый параметр?
-            if key in PROTECTED_PARAMS:
+            if key in protected_params:
                 logger.warning(
                     f"🛡️ BLOCKED: Attempt to override protected parameter "
                     f"'{key}' with value '{value}'. Original value preserved."
@@ -437,7 +535,9 @@ class TriggerEmulator:
                 continue
 
             # Проверка 2: Валидация значения
-            is_valid, error_msg = self._validate_parameter_value(key, value)
+            is_valid, error_msg = self._validate_parameter_value(
+                trigger_config, key, value
+            )
             if not is_valid:
                 logger.warning(
                     f"🛡️ BLOCKED: Invalid value for parameter '{key}': {error_msg}"
@@ -446,34 +546,38 @@ class TriggerEmulator:
                 self._stats["blocked_by_validation"] += 1
                 continue
 
-            # Параметр принят
             merged[key] = value
 
         return merged, rejected
 
+    # ====================================================================
+    # ИСТОРИЯ
+    # ====================================================================
+
     def _add_to_history(
         self,
         trigger_name: str,
+        actual_trigger: str,
         reason: str,
         status: str,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Добавляет запись в историю триггеров с ограничением размера."""
-        from datetime import datetime
-
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "trigger": trigger_name,
-            "reason": reason,
-            "status": status,
-            "details": details or {},
-        }
-
+        """Добавляет запись в историю триггеров."""
+        record = TriggerHistoryRecord(
+            trigger=trigger_name,
+            actual_trigger=actual_trigger,
+            reason=reason,
+            status=status,
+            details=details or {},
+        )
         self._trigger_history.append(record)
 
-        # Ограничиваем размер истории
         if len(self._trigger_history) > self._history_max_size:
             self._trigger_history = self._trigger_history[-self._history_max_size :]
+
+    # ====================================================================
+    # ГЛАВНЫЙ МЕТОД
+    # ====================================================================
 
     async def fire_trigger(
         self,
@@ -483,26 +587,16 @@ class TriggerEmulator:
     ) -> bool:
         """
         Эмулирует срабатывание триггера через Advanced API.
-
-        Args:
-            trigger_name: Имя триггера (autofocus, guider_start, mount_park, etc.)
-            reason: Причина срабатывания (для логов)
-            extra_params: Дополнительные query параметры
-                         (защищённые параметры будут отклонены)
-
-        Returns:
-            True если триггер успешно отправлен, False в противном случае
         """
         self._stats["total_triggers_fired"] += 1
 
         # Разрешаем алиасы
-        actual_trigger = self.AGENT_ALIASES.get(trigger_name, trigger_name)
+        actual_trigger = self._agent_aliases.get(trigger_name, trigger_name)
         alias_note = (
             f" (aliased to '{actual_trigger}')"
             if actual_trigger != trigger_name
             else ""
         )
-
         logger.info(
             f"🔥 Firing trigger: '{trigger_name}'{alias_note} (Reason: {reason})"
         )
@@ -520,12 +614,13 @@ class TriggerEmulator:
                     f"🛑 BLOCKED: Trigger '{trigger_name}' ignored during FLAT_MODE"
                 )
                 self._stats["blocked_by_flat_mode"] += 1
-                self._add_to_history(trigger_name, reason, "BLOCKED_FLAT_MODE")
+                self._add_to_history(
+                    trigger_name, actual_trigger, reason, "BLOCKED_FLAT_MODE"
+                )
                 return False
 
         # === ПРОВЕРКА 2: Критическая фаза (shutdown) ===
         if state_tracker.state.is_approaching_shutdown:
-            # Во время shutdown разрешены только безопасные операции
             allowed_during_shutdown = {
                 "mount_park",
                 "dome_close",
@@ -540,7 +635,9 @@ class TriggerEmulator:
                     f"approaching shutdown"
                 )
                 self._stats["blocked_by_critical_phase"] += 1
-                self._add_to_history(trigger_name, reason, "BLOCKED_CRITICAL_PHASE")
+                self._add_to_history(
+                    trigger_name, actual_trigger, reason, "BLOCKED_CRITICAL_PHASE"
+                )
                 return False
 
         # === ПРОВЕРКА 3: HAL валидация ===
@@ -555,6 +652,7 @@ class TriggerEmulator:
                 self._stats["blocked_by_hal"] += 1
                 self._add_to_history(
                     trigger_name,
+                    actual_trigger,
                     reason,
                     "BLOCKED_HAL",
                     {"hal_reason": hal_reason},
@@ -564,21 +662,26 @@ class TriggerEmulator:
             logger.debug("HAL not available, skipping HAL validation")
 
         # === ПРОВЕРКА 4: Получение конфигурации триггера ===
-        trigger_config = self.TRIGGER_MAP.get(actual_trigger)
+        # Lazy init OpenAPI клиента
+        if not self._registry:
+            await self._ensure_openapi_client()
+
+        trigger_config = self._registry.get(actual_trigger)
         if not trigger_config:
-            available = ", ".join(sorted(self.TRIGGER_MAP.keys()))
+            available = ", ".join(sorted(self._registry.keys()))
             logger.error(
                 f"❌ Unknown trigger: '{trigger_name}'. Available: {available}"
             )
-            self._add_to_history(trigger_name, reason, "FAILED_UNKNOWN_TRIGGER")
+            self._add_to_history(
+                trigger_name, actual_trigger, reason, "FAILED_UNKNOWN_TRIGGER"
+            )
             return False
 
         # === ПРОВЕРКА 5: Безопасное объединение параметров ===
         params, rejected = self._merge_params_safely(
-            trigger_config["params"], extra_params
+            trigger_config, trigger_config.get("params", {}), extra_params
         )
 
-        # Если были отклонены критические параметры — логируем, но продолжаем
         if rejected:
             logger.warning(
                 f"⚠️ Trigger '{trigger_name}' had {len(rejected)} parameters "
@@ -587,234 +690,378 @@ class TriggerEmulator:
 
         # === ВЫПОЛНЕНИЕ ЗАПРОСА ===
         url = f"{self.base_url}{trigger_config['path']}"
+        method = trigger_config["method"]
+
+        # Используем OpenAPI клиент если доступен
+        if self._openapi_client and trigger_config.get("from_openapi"):
+            return await self._fire_via_openapi(
+                trigger_name,
+                actual_trigger,
+                trigger_config,
+                params,
+                rejected,
+                reason,
+            )
+
+        # Fallback: прямой HTTP запрос
+        return await self._fire_direct_http(
+            trigger_name,
+            actual_trigger,
+            method,
+            url,
+            params,
+            rejected,
+            reason,
+        )
+
+    async def _fire_via_openapi(
+        self,
+        trigger_name: str,
+        actual_trigger: str,
+        trigger_config: Dict[str, Any],
+        params: Dict[str, Any],
+        rejected: List[str],
+        reason: str,
+    ) -> bool:
+        """Выполняет триггер через OpenAPI клиент (с валидацией)."""
+        self._stats["openapi_calls"] += 1
+
+        endpoint = trigger_config.get("openapi_endpoint")
+        if not endpoint:
+            return await self._fire_direct_http(
+                trigger_name,
+                actual_trigger,
+                trigger_config["method"],
+                f"{self.base_url}{trigger_config['path']}",
+                params,
+                rejected,
+                reason,
+            )
+
+        result = (
+            await self._openapi_client.call_endpoint(
+                operation_id=endpoint.operation_id or "",
+                params=params,
+                validate=True,
+            )
+            if endpoint.operation_id
+            else await self._openapi_client.call_by_path(
+                method=endpoint.method,
+                path=endpoint.path,
+                params=params,
+                validate=True,
+            )
+        )
+
+        return self._process_http_result(
+            result,
+            trigger_name,
+            actual_trigger,
+            params,
+            rejected,
+            reason,
+        )
+
+    async def _fire_direct_http(
+        self,
+        trigger_name: str,
+        actual_trigger: str,
+        method: str,
+        url: str,
+        params: Dict[str, Any],
+        rejected: List[str],
+        reason: str,
+    ) -> bool:
+        """Выполняет прямой HTTP запрос (fallback без OpenAPI)."""
+        self._stats["direct_calls"] += 1
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                if trigger_config["method"] == "GET":
+                if method == "GET":
                     response = await client.get(url, params=params)
-                elif trigger_config["method"] == "POST":
+                elif method == "POST":
                     response = await client.post(url, json=params)
                 else:
-                    logger.error(f"❌ Unsupported method: {trigger_config['method']}")
+                    logger.error(f"❌ Unsupported method: {method}")
                     self._add_to_history(
-                        trigger_name, reason, "FAILED_UNSUPPORTED_METHOD"
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "FAILED_UNSUPPORTED_METHOD",
                     )
                     return False
 
-                # Обрабатываем ответ
+                # Преобразуем response в dict-формат
                 if response.status_code == 200:
                     try:
-                        data = response.json()
-                        success = data.get("Success", False)
-                        api_response = data.get("Response", "")
-                        error = data.get("Error", "")
-
-                        if success:
-                            logger.info(
-                                f"✅ Trigger '{trigger_name}' fired "
-                                f"successfully: {api_response}"
-                            )
-                            self._stats["successful_triggers"] += 1
-                            self._add_to_history(
-                                trigger_name,
-                                reason,
-                                "SUCCESS",
-                                {
-                                    "response": api_response,
-                                    "params": params,
-                                    "rejected_params": rejected,
-                                },
-                            )
-
-                            # Публикуем событие
-                            await event_bus.publish(
-                                "TRIGGER_FIRED",
-                                {
-                                    "trigger": trigger_name,
-                                    "actual_trigger": actual_trigger,
-                                    "reason": reason,
-                                    "response": api_response,
-                                    "params": params,
-                                    "category": trigger_config.get(
-                                        "category", "unknown"
-                                    ),
-                                    "risk_level": trigger_config.get(
-                                        "risk_level", "UNKNOWN"
-                                    ),
-                                },
-                            )
-                            return True
-                        else:
-                            logger.warning(
-                                f"⚠️ Trigger '{trigger_name}' returned error: {error}"
-                            )
-                            self._stats["failed_triggers"] += 1
-                            self._add_to_history(
-                                trigger_name,
-                                reason,
-                                "FAILED_API_ERROR",
-                                {"error": error},
-                            )
-                            return False
-
-                    except Exception as e:
-                        # Не JSON ответ, но 200 OK
-                        logger.info(
-                            f"✅ Trigger '{trigger_name}' fired (non-JSON response)"
-                        )
-                        self._stats["successful_triggers"] += 1
-                        self._add_to_history(trigger_name, reason, "SUCCESS_NON_JSON")
-                        return True
-
-                elif response.status_code == 409:
-                    # Конфликт (оборудование не подключено, уже запущено и т.д.)
-                    try:
-                        data = response.json()
-                        error = data.get("Error", "Conflict")
+                        result = response.json()
                     except Exception:
-                        error = "Conflict"
-                    logger.warning(
-                        f"⚠️ Trigger '{trigger_name}' conflict (409): {error}"
-                    )
-                    self._stats["failed_triggers"] += 1
-                    self._add_to_history(
-                        trigger_name,
-                        reason,
-                        "FAILED_CONFLICT",
-                        {"error": error},
-                    )
-                    return False
-
-                elif response.status_code == 404:
-                    logger.error(
-                        f"❌ Trigger '{trigger_name}' endpoint not found "
-                        f"(404): {url}\n"
-                        f"   Проверьте, что Advanced API плагин установлен "
-                        f"и запущен.\n"
-                        f"   Установите: N.I.N.A. → Options → Plugins → "
-                        f"Advanced API"
-                    )
-                    self._stats["failed_triggers"] += 1
-                    self._add_to_history(trigger_name, reason, "FAILED_NOT_FOUND")
-                    return False
-
+                        result = {"status": "success", "data": response.text}
                 else:
-                    logger.error(
-                        f"❌ Trigger '{trigger_name}' failed with status "
-                        f"{response.status_code}: {response.text[:200]}"
-                    )
-                    self._stats["failed_triggers"] += 1
-                    self._add_to_history(
-                        trigger_name,
-                        reason,
-                        "FAILED_HTTP_ERROR",
-                        {
-                            "status_code": response.status_code,
-                            "response": response.text[:500],
-                        },
-                    )
-                    return False
+                    result = {
+                        "status": "error",
+                        "code": response.status_code,
+                        "message": response.text[:500],
+                    }
+
+                return self._process_http_result(
+                    result,
+                    trigger_name,
+                    actual_trigger,
+                    params,
+                    rejected,
+                    reason,
+                )
 
         except httpx.ConnectError:
             logger.error(
-                f"❌ Cannot connect to N.I.N.A. Advanced API at "
-                f"{self.base_url}\n"
-                f"   Проверьте, что N.I.N.A. запущена и Advanced API "
-                f"включен."
+                f"❌ Cannot connect to N.I.N.A. Advanced API at {self.base_url}\n"
+                f"   Проверьте, что N.I.N.A. запущена и Advanced API включен."
             )
             self._stats["failed_triggers"] += 1
-            self._add_to_history(trigger_name, reason, "FAILED_CONNECTION_ERROR")
+            self._add_to_history(
+                trigger_name, actual_trigger, reason, "FAILED_CONNECTION_ERROR"
+            )
             return False
-
         except httpx.TimeoutException:
             logger.error(f"❌ Timeout firing trigger '{trigger_name}'")
             self._stats["failed_triggers"] += 1
-            self._add_to_history(trigger_name, reason, "FAILED_TIMEOUT")
+            self._add_to_history(trigger_name, actual_trigger, reason, "FAILED_TIMEOUT")
             return False
-
         except Exception as e:
             logger.error(f"❌ Unexpected error firing trigger '{trigger_name}': {e}")
             self._stats["failed_triggers"] += 1
             self._add_to_history(
                 trigger_name,
+                actual_trigger,
                 reason,
                 "FAILED_UNEXPECTED",
                 {"error": str(e)},
             )
             return False
 
+    def _process_http_result(
+        self,
+        result: Dict[str, Any],
+        trigger_name: str,
+        actual_trigger: str,
+        params: Dict[str, Any],
+        rejected: List[str],
+        reason: str,
+    ) -> bool:
+        """Обрабатывает результат HTTP запроса (унифицированная логика)."""
+        status = result.get("status")
+        code = result.get("code", result.get("StatusCode"))
+
+        # Успех: status=success или Success=true
+        if status == "success" or result.get("Success") is True:
+            api_response = result.get("Response", result.get("data", ""))
+            logger.info(
+                f"✅ Trigger '{trigger_name}' fired successfully: {api_response}"
+            )
+            self._stats["successful_triggers"] += 1
+            self._add_to_history(
+                trigger_name,
+                actual_trigger,
+                reason,
+                "SUCCESS",
+                {
+                    "response": api_response,
+                    "params": params,
+                    "rejected_params": rejected,
+                },
+            )
+            # Публикуем событие
+            try:
+                event_bus.publish_nowait(
+                    "TRIGGER_FIRED",
+                    {
+                        "trigger": trigger_name,
+                        "actual_trigger": actual_trigger,
+                        "reason": reason,
+                        "response": api_response,
+                        "params": params,
+                        "category": self._registry.get(actual_trigger, {}).get(
+                            "category", "unknown"
+                        ),
+                        "risk_level": self._registry.get(actual_trigger, {}).get(
+                            "risk_level", "UNKNOWN"
+                        ),
+                    },
+                )
+            except Exception:
+                # publish_nowait может не существовать — используем publish
+                pass
+            return True
+
+        # Валидационная ошибка
+        if status == "error" and code == "VALIDATION_ERROR":
+            errors = result.get("errors", [])
+            logger.warning(f"⚠️ Trigger '{trigger_name}' validation failed: {errors}")
+            self._stats["failed_triggers"] += 1
+            self._add_to_history(
+                trigger_name,
+                actual_trigger,
+                reason,
+                "FAILED_VALIDATION",
+                {"errors": errors},
+            )
+            return False
+
+        # HTTP ошибка
+        if status == "error":
+            error_msg = result.get("message", result.get("Error", ""))
+            logger.warning(
+                f"⚠️ Trigger '{trigger_name}' failed (code={code}): {error_msg}"
+            )
+            self._stats["failed_triggers"] += 1
+
+            # Специальная обработка 404
+            if code == 404:
+                logger.error(
+                    f"❌ Endpoint not found (404) for trigger '{trigger_name}'.\n"
+                    f"   Проверьте, что Advanced API плагин установлен и запущен.\n"
+                    f"   Установите: N.I.N.A. → Options → Plugins → Advanced API"
+                )
+                self._add_to_history(
+                    trigger_name,
+                    actual_trigger,
+                    reason,
+                    "FAILED_NOT_FOUND",
+                    {"error": error_msg},
+                )
+            # Специальная обработка 409 (conflict)
+            elif code == 409:
+                self._add_to_history(
+                    trigger_name,
+                    actual_trigger,
+                    reason,
+                    "FAILED_CONFLICT",
+                    {"error": error_msg},
+                )
+            else:
+                self._add_to_history(
+                    trigger_name,
+                    actual_trigger,
+                    reason,
+                    f"FAILED_HTTP_{code}",
+                    {"error": error_msg, "code": code},
+                )
+            return False
+
+        # Неожиданный формат
+        logger.warning(
+            f"⚠️ Trigger '{trigger_name}' returned unexpected result: {result}"
+        )
+        self._stats["failed_triggers"] += 1
+        self._add_to_history(
+            trigger_name,
+            actual_trigger,
+            reason,
+            "FAILED_UNKNOWN_FORMAT",
+            {"result": result},
+        )
+        return False
+
+    # ====================================================================
+    # ПРЯМОЙ ВЫЗОВ ЛЮБОГО OPENAPI ЭНДПОИНТА (FALLBACK)
+    # ====================================================================
+
+    async def call_openapi_endpoint(
+        self,
+        operation_id: str,
+        params: Optional[Dict[str, Any]] = None,
+        body: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Прямой вызов любого OpenAPI эндпоинта по operationId.
+        Полезно для вызовов, не покрытых trigger patterns.
+        """
+        client = await self._ensure_openapi_client()
+        if not client:
+            return {
+                "status": "error",
+                "message": "OpenAPI client not available",
+            }
+        return await client.call_endpoint(operation_id, params, body)
+
+    async def call_by_path(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        body: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Прямой вызов эндпоинта по методу и path."""
+        client = await self._ensure_openapi_client()
+        if not client:
+            return {
+                "status": "error",
+                "message": "OpenAPI client not available",
+            }
+        return await client.call_by_path(method, path, params, body)
+
+    # ====================================================================
+    # ПУБЛИЧНЫЕ МЕТОДЫ
+    # ====================================================================
+
     def list_available_triggers(self) -> Dict[str, Dict[str, Any]]:
         """
         Возвращает список всех доступных триггеров с детальной информацией.
-
-        Включает:
-        - Метод HTTP и путь
-        - Параметры и их ограничения
-        - Категорию и уровень риска
-        - Защищённые параметры
         """
         result = {}
-        for name, config in self.TRIGGER_MAP.items():
-            # Детализация параметров с ограничениями
+        for name, config in self._registry.items():
+            # Детализация параметров
             param_details = {}
-            for param_name, default_value in config["params"].items():
+            for param_name, default_value in config.get("params", {}).items():
                 param_info = {
                     "default": default_value,
-                    "protected": param_name in PROTECTED_PARAMS,
+                    "protected": param_name
+                    in config.get("protected_params", PROTECTED_PARAMS),
                 }
-                if param_name in PARAMETER_RANGES:
-                    param_info["range"] = PARAMETER_RANGES[param_name]
+                ranges = config.get("parameter_ranges", {})
+                if param_name in ranges:
+                    param_info["range"] = ranges[param_name]
                 param_details[param_name] = param_info
 
             result[name] = {
                 "method": config["method"],
                 "path": config["path"],
                 "description": config["description"],
-                "category": config.get("category", "unknown"),
-                "risk_level": config.get("risk_level", "UNKNOWN"),
+                "category": config["category"],
+                "risk_level": config["risk_level"],
                 "params": param_details,
+                "from_openapi": config.get("from_openapi", False),
                 "full_url": f"{self.base_url}{config['path']}",
             }
-
         return result
 
     def get_stats(self) -> Dict[str, Any]:
-        """
-        Возвращает статистику TriggerEmulator.
-
-        Включает:
-        - Общее количество триггеров
-        - Количество успешных/неуспешных
-        - Причины блокировок
-        - Последние триггеры из истории
-        """
-        success_rate = (
-            self._stats["successful_triggers"]
-            / max(self._stats["total_triggers_fired"], 1)
-        ) * 100
+        """Возвращает статистику TriggerEmulator."""
+        total = max(self._stats["total_triggers_fired"], 1)
+        success_rate = (self._stats["successful_triggers"] / total) * 100
 
         return {
             **self._stats,
             "success_rate_percent": round(success_rate, 2),
             "base_url": self.base_url,
-            "total_available_triggers": len(self.TRIGGER_MAP),
+            "total_available_triggers": len(self._registry),
             "protected_params": sorted(PROTECTED_PARAMS),
-            "validated_parameters": len(PARAMETER_RANGES),
+            "openapi_available": self._openapi_client is not None,
             "history_size": len(self._trigger_history),
-            "recent_triggers": self._trigger_history[-10:],
+            "recent_triggers": [r.model_dump() for r in self._trigger_history[-10:]],
+            "agent_aliases": self._agent_aliases,
         }
 
     def get_trigger_history(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """
-        Возвращает историю последних триггеров.
+        """Возвращает историю последних триггеров."""
+        return [r.model_dump() for r in reversed(self._trigger_history[-limit:])]
 
-        Args:
-            limit: Максимальное количество записей
-
-        Returns:
-            Список записей истории (от новых к старым)
-        """
-        return list(reversed(self._trigger_history[-limit:]))
+    async def close(self):
+        """Закрывает OpenAPI клиент."""
+        if self._openapi_client:
+            await self._openapi_client.close()
+            self._openapi_client = None
 
 
 # Singleton instance

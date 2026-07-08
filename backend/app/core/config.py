@@ -3,17 +3,18 @@
 Загружает settings.yaml и переменные окружения.
 Все пути параметризированы — система работает на любом ПК.
 
-ИСПРАВЛЕНО (audit F2, C4, 7.2, 8.1):
-- Добавлены модели для CORS, Authentication, Thresholds, DataSources, Security
-- Добавлена валидация критических путей при старте
-- Магические числа вынесены в ThresholdsConfig
+ИСПРАВЛЕНО (рефакторинг v3):
+- Удалены: HomeAssistantConfig, PluginsStatus, AuthConfig, SecurityConfig
+- Добавлены: OpenAPIConfig, StorageThresholds, MetricsConfig, SimulationConfig, ExecutionConfig
+- Удален model_name из AISettings (deprecated)
+- Упрощен CORSConfig для локального использования
 """
 
 import os
 import yaml
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
 
@@ -21,7 +22,7 @@ logger = logging.getLogger("Config")
 
 
 # ============================================================================
-# БАЗОВЫЕ МОДЕЛИ КОНФИГУРАЦИИ (оригинальные)
+# БАЗОВЫЕ МОДЕЛИ КОНФИГУРАЦИИ
 # ============================================================================
 
 
@@ -73,28 +74,16 @@ class AISettings(BaseModel):
     """Настройки AI (Ollama, RAG)."""
 
     ollama_host: str
-    # [DEPRECATED] Оставлено для обратной совместимости
-    model_name: str = "gemma4:31b-cloud"
-    # Основная модель (облачная) — используется LLM Provider
     primary_model: str = "gemma4:31b-cloud"
-    # Fallback модель (локальная) — используется при недоступности primary
     fallback_model: str = "gemma4:e4b"
     rag_db_path: Path
-
-
-class HomeAssistantConfig(BaseModel):
-    """Интеграция с Home Assistant."""
-
-    enabled: bool = False
-    url: str = "http://localhost:8123"
-    token: str = ""
 
 
 class HALConfig(BaseModel):
     """Hardware Abstraction Layer — финальная валидация команд."""
 
     enabled: bool = True
-    min_altitude_limit: float = 15.0  # Жесткий лимит высоты (градусы)
+    min_altitude_limit: float = 15.0
 
 
 class WatchersConfig(BaseModel):
@@ -107,13 +96,6 @@ class WatchersConfig(BaseModel):
     dynamic_sequencer_path: Optional[str] = None
 
 
-class PluginsStatus(BaseModel):
-    """Статус отсутствующих плагинов (Graceful Degradation)."""
-
-    dither_inject: str = "NOT_INSTALLED"
-    guider_calibration: str = "NOT_INSTALLED"
-
-
 class LoggingConfig(BaseModel):
     """Настройки логирования."""
 
@@ -122,23 +104,22 @@ class LoggingConfig(BaseModel):
 
 
 # ============================================================================
-# НОВЫЕ МОДЕЛИ ДЛЯ БЕЗОПАСНОСТИ (audit F2, C4)
+# УПРОЩЕННЫЕ МОДЕЛИ (локальное использование)
 # ============================================================================
 
 
 class CORSConfig(BaseModel):
     """
     Настройки CORS (Cross-Origin Resource Sharing).
-
-    ИСПРАВЛЕНО (audit F2): allow_origins=["*"] заменён на whitelist.
+    Упрощено для локального использования.
     """
 
     enabled: bool = True
     allowed_origins: List[str] = Field(
         default_factory=lambda: [
-            "http://localhost:3000",  # Vue dev server
-            "http://localhost:5173",  # Vite dev server
-            "http://localhost:8080",  # Alternative frontend
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8080",
             "http://127.0.0.1:3000",
             "http://127.0.0.1:5173",
         ]
@@ -148,78 +129,84 @@ class CORSConfig(BaseModel):
         default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
     )
     allowed_headers: List[str] = Field(
-        default_factory=lambda: [
-            "Authorization",
-            "Content-Type",
-            "X-API-Key",
-            "X-Request-ID",
-        ]
+        default_factory=lambda: ["Content-Type", "X-Request-ID"]
     )
-    max_age: int = 3600  # Preflight cache (seconds)
-
-
-class AuthConfig(BaseModel):
-    """
-    Настройки аутентификации и авторизации.
-
-    ИСПРАВЛЕНО (audit C4): добавлена централизованная конфигурация auth.
-    """
-
-    enabled: bool = True
-    # Время жизни JWT access token (минуты)
-    access_token_expire_minutes: int = 60 * 24
-    # Rate limiting: максимум запросов в минуту с одного IP
-    rate_limit_per_minute: int = 120
-    # Rate limiting: максимум запросов к LLM endpoints в минуту
-    llm_rate_limit_per_minute: int = 20
-    # Rate limiting: максимум запросов к trigger endpoints в минуту
-    trigger_rate_limit_per_minute: int = 30
-    # Публичные paths (не требуют auth)
-    public_paths: List[str] = Field(
-        default_factory=lambda: [
-            "/",
-            "/docs",
-            "/openapi.json",
-            "/redoc",
-            "/health",
-            "/metrics",
-        ]
-    )
-
-
-class SecurityConfig(BaseModel):
-    """
-    Настройки безопасности (маскирование логов, защищённые параметры).
-
-    ИСПРАВЛЕНО (audit 11.1): централизованная конфигурация для маскирования
-    чувствительных данных в логах.
-    """
-
-    # Паттерны имен переменных, значения которых маскируются в логах
-    sensitive_patterns: List[str] = Field(
-        default_factory=lambda: [
-            "token",
-            "password",
-            "passwd",
-            "secret",
-            "api_key",
-            "apikey",
-            "api-key",
-            "private_key",
-            "privatekey",
-            "credentials",
-            "auth",
-            "bearer",
-            "access_key",
-            "accesskey",
-            "secret_key",
-            "secretkey",
-        ]
-    )
+    max_age: int = 3600
 
 
 # ============================================================================
-# НОВЫЕ МОДЕЛИ ДЛЯ ПОРОГОВЫХ ЗНАЧЕНИЙ (audit 7.2)
+# НОВЫЕ МОДЕЛИ (OpenAPI, Storage, Metrics, Simulation, Execution)
+# ============================================================================
+
+
+class OpenAPIConfig(BaseModel):
+    """
+    Настройки OpenAPI спецификации N.I.N.A. Advanced API.
+    Используется для динамической генерации триггеров и валидации.
+    """
+
+    spec_path: str = "config/nina_api_spec.json"
+    auto_load: bool = True
+    cache_enabled: bool = True
+
+
+class StorageThresholds(BaseModel):
+    """Пороговые значения для Disk Monitor."""
+
+    warning_threshold_gb: float = 50.0
+    critical_threshold_gb: float = 20.0
+    retention_keep_last_days: int = 30
+    retention_max_records: int = 100000
+
+
+class MetricsConfig(BaseModel):
+    """Настройки метрик и истории."""
+
+    history_max_points: int = 100
+    ai_action_log_max: int = 1000
+    active_alerts_max: int = 50
+    update_interval: float = 3.0
+
+
+class SimulationConfig(BaseModel):
+    """Настройки режима симуляции (FakeNina, FakePhd2)."""
+
+    flush_every_frames: int = 10
+    flush_every_seconds: float = 30.0
+    frame_delay_seconds: float = 2.0
+
+
+class ExecutionConfig(BaseModel):
+    """
+    Конфигурация Execution Layer.
+    Содержит маппинги для trigger_emulator и agent_aliases.
+    """
+
+    agent_aliases: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "autofocus": "autofocus",
+            "dither": "guider_start",
+            "guider_calibration": "guider_calibrate",
+            "phd2_settle": "guider_start",
+            "emergency_park": "mount_park",
+        }
+    )
+    trigger_patterns: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+class DecisionAuditConfig(BaseModel):
+    """Конфигурация политики хранения решений."""
+
+    keep_last_days: int = 90
+    max_records: int = 100000
+    archive_before_delete: bool = True
+    archive_path: str = "./data/decision_archives"
+    auto_cleanup_enabled: bool = True
+    auto_cleanup_interval_hours: int = 24
+
+
+# ============================================================================
+# МОДЕЛИ ДЛЯ ПОРОГОВЫХ ЗНАЧЕНИЙ
 # ============================================================================
 
 
@@ -227,6 +214,7 @@ class WatcherThresholds(BaseModel):
     """Пороговые значения для Watcher Agent."""
 
     hfr_increase_percent: float = 30.0
+    fwhm_increase_percent: float = 30.0
     rms_ra_critical: float = 2.0
     rms_dec_critical: float = 2.0
     temperature_deviation: float = 2.0
@@ -234,9 +222,6 @@ class WatcherThresholds(BaseModel):
     wind_gust_critical: float = 20.0
     z_score_threshold: float = 3.0
     min_history_points: int = 5
-    # FWHM пороги
-    fwhm_increase_percent: float = 30.0
-    # Алерт cooldown
     anomaly_cooldown_seconds: int = 300
 
 
@@ -247,7 +232,6 @@ class CalibratorThresholds(BaseModel):
     dark_freshness_days: int = 30
     flat_freshness_days: int = 7
     temperature_tolerance: float = 2.0
-    # Cooldown для алертов
     alert_cooldown_seconds: int = 600
 
 
@@ -268,15 +252,11 @@ class StrategistThresholds(BaseModel):
     hfr_target: float = 2.5
     fwhm_target: float = 3.0
     acceptance_rate_target: float = 0.90
-    # Интервалы автофокуса (минуты)
     autofocus_interval_normal: int = 60
     autofocus_interval_frequent: int = 30
     autofocus_interval_emergency: int = 15
-    # Порог деградации HFR (пикселей/кадр)
     hfr_degradation_threshold: float = 0.05
-    # Минимальный интервал между предложениями оптимизаций (сек)
     min_proposal_interval_seconds: int = 600
-    # Ветровая нагрузка
     wind_load_warning: float = 10.0
 
 
@@ -291,32 +271,21 @@ class GuardianThresholds(BaseModel):
 
 
 class ThresholdsConfig(BaseModel):
-    """
-    Конфигурация всех пороговых значений.
-
-    ИСПРАВЛЕНО (audit 7.2): все магические числа вынесены в конфиг.
-    """
+    """Конфигурация всех пороговых значений."""
 
     watcher: WatcherThresholds = Field(default_factory=WatcherThresholds)
     calibrator: CalibratorThresholds = Field(default_factory=CalibratorThresholds)
     preflight: PreflightThresholds = Field(default_factory=PreflightThresholds)
     strategist: StrategistThresholds = Field(default_factory=StrategistThresholds)
     guardian: GuardianThresholds = Field(default_factory=GuardianThresholds)
+    storage: StorageThresholds = Field(default_factory=StorageThresholds)
 
 
 class DataSourcesConfig(BaseModel):
-    """
-    Конфигурация источников данных.
+    """Конфигурация источников данных."""
 
-    ИСПРАВЛЕНО (audit 9.1): централизованный выбор основного источника метрик
-    для предотвращения дублирования InfluxDB/Prometheus.
-    """
-
-    # Основной источник метрик: "influxdb" или "prometheus"
     primary_metrics_source: str = "influxdb"
-    # Включить резервный источник (для отказоустойчивости)
     enable_fallback_source: bool = True
-    # Интервал опроса метрик (секунды)
     metrics_poll_interval: float = 3.0
 
 
@@ -335,18 +304,23 @@ class Settings(BaseSettings):
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     ws_broadcast: WSBroadcastConfig = Field(default_factory=WSBroadcastConfig)
     ai_settings: AISettings
-    home_assistant: HomeAssistantConfig = Field(default_factory=HomeAssistantConfig)
     hal: HALConfig = Field(default_factory=HALConfig)
     watchers: WatchersConfig = Field(default_factory=WatchersConfig)
-    plugins_status: PluginsStatus = Field(default_factory=PluginsStatus)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
-    # Новые секции (audit F2, C4, 7.2, 9.1, 11.1)
+    # Упрощенные секции
     cors: CORSConfig = Field(default_factory=CORSConfig)
-    auth: AuthConfig = Field(default_factory=AuthConfig)
-    security: SecurityConfig = Field(default_factory=SecurityConfig)
+
+    # Пороговые значения и источники
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     data_sources: DataSourcesConfig = Field(default_factory=DataSourcesConfig)
+
+    # Новые секции (рефакторинг v3)
+    openapi: OpenAPIConfig = Field(default_factory=OpenAPIConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    simulation: SimulationConfig = Field(default_factory=SimulationConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    decision_audit: DecisionAuditConfig = Field(default_factory=DecisionAuditConfig)
 
     @field_validator("influxdb", mode="before")
     def resolve_env_vars(cls, value):
@@ -360,20 +334,6 @@ class Settings(BaseSettings):
             ):
                 env_var = token[2:-1]
                 value["token"] = os.getenv(env_var, "default_token")
-        return value
-
-    @field_validator("home_assistant", mode="before")
-    def resolve_ha_token(cls, value):
-        """Заменяет ${HA_TOKEN} на значение из env."""
-        if isinstance(value, dict):
-            token = value.get("token")
-            if (
-                isinstance(token, str)
-                and token.startswith("${")
-                and token.endswith("}")
-            ):
-                env_var = token[2:-1]
-                value["token"] = os.getenv(env_var, "")
         return value
 
     class Config:
@@ -391,14 +351,13 @@ def load_settings() -> Settings:
     """
     Загружает settings.yaml и накладывает переменные окружения.
     Возвращает валидированный Settings объект.
-
-    ИСПРАВЛЕНО (audit 8.1): добавлена валидация критических путей.
     """
     config_path = (
         Path(__file__).resolve().parent.parent.parent.parent
         / "config"
         / "settings.yaml"
     )
+
     if not config_path.exists():
         logger.error(f"❌ Configuration file not found: {config_path}")
         raise FileNotFoundError(f"Configuration file not found at {config_path}")
@@ -406,24 +365,22 @@ def load_settings() -> Settings:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             yaml_data = yaml.safe_load(f)
+
         settings_obj = Settings(**yaml_data)
 
-        # ИСПРАВЛЕНО (audit 8.1): Валидация критических путей
+        # Валидация критических путей
         _validate_critical_paths(settings_obj)
 
         logger.info(f"✅ Configuration loaded from {config_path}")
         return settings_obj
+
     except Exception as e:
         logger.error(f"❌ Failed to load configuration: {e}")
         raise
 
 
 def _validate_critical_paths(settings_obj: Settings) -> None:
-    """
-    Проверяет существование критических путей при старте.
-
-    ИСПРАВЛЕНО (audit 8.1): явная валидация вместо падения в рантайме.
-    """
+    """Проверяет существование критических путей при старте."""
     env = settings_obj.nina_environment
     warnings = []
 
@@ -461,15 +418,11 @@ def _validate_critical_paths(settings_obj: Settings) -> None:
 # SINGLETON
 # ============================================================================
 
-# Глобальный экземпляр настроек (Singleton)
 _settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:
-    """
-    Возвращает глобальный экземпляр Settings.
-    Используется в sequence_parser.py и других модулях.
-    """
+    """Возвращает глобальный экземпляр Settings."""
     global _settings
     if _settings is None:
         _settings = load_settings()
