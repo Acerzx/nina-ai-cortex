@@ -2,11 +2,17 @@
 N.I.N.A. Advanced Sequencer Parser
 Production-ready парсер для анализа секвенсоров N.I.N.A.
 Извлекает ВСЕ параметры из всех объектов без потерь.
+
+ИСПРАВЛЕНО (audit 10.1):
+- Метод parse() теперь асинхронный с использованием aiofiles
+- Не блокирует event loop при чтении больших файлов
+- Добавлен fallback на синхронное чтение для совместимости
 """
 
 import json
 import logging
 import re
+import aiofiles
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from app.core.config import get_settings
@@ -18,6 +24,8 @@ class SequenceParser:
     """
     Production-ready парсер N.I.N.A. Advanced Sequencer.
     Извлекает все параметры без потерь.
+
+    ИСПРАВЛЕНО (audit 10.1): асинхронное чтение файлов.
     """
 
     def __init__(self):
@@ -33,9 +41,12 @@ class SequenceParser:
             "total_annotations": 0,
         }
 
-    def parse(self) -> Dict[str, Any]:
+    async def parse(self) -> Dict[str, Any]:
         """
-        Парсит Sequence.json и возвращает теневой граф.
+        Парсит Sequence.json и возвращает теневой граф (АСИНХРОННО).
+
+        ИСПРАВЛЕНО (audit 10.1): использует aiofiles для неблокирующего чтения.
+
         Returns:
             Dict с полной структурой секвенсора
         """
@@ -44,10 +55,23 @@ class SequenceParser:
             return {}
 
         try:
-            with open(self.sequence_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            # ИСПРАВЛЕНО: асинхронное чтение файла
+            async with aiofiles.open(self.sequence_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                data = json.loads(content)
 
             logger.info(f"📖 Parsing sequence: {self.sequence_path.name}")
+
+            # Сбрасываем статистику
+            self.stats = {
+                "total_containers": 0,
+                "total_instructions": 0,
+                "total_triggers": 0,
+                "total_conditions": 0,
+                "total_message_boxes": 0,
+                "total_annotations": 0,
+            }
+            self.id_map.clear()
 
             # Строим карту ID для разрешения $ref
             self._build_id_map(data)
@@ -72,11 +96,51 @@ class SequenceParser:
                 "global_variables": global_vars,
                 "stats": self.stats,
             }
+
         except Exception as e:
             logger.error(f"❌ Failed to parse sequence: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
+            return {}
+
+    def parse_sync(self) -> Dict[str, Any]:
+        """
+        Синхронная версия parse() для обратной совместимости.
+        Используется в тестах или при вызове из синхронного контекста.
+        """
+        if not self.sequence_path.exists():
+            logger.error(f"❌ Sequence file not found: {self.sequence_path}")
+            return {}
+
+        try:
+            with open(self.sequence_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            logger.info(f"📖 Parsing sequence (sync): {self.sequence_path.name}")
+
+            self.stats = {
+                "total_containers": 0,
+                "total_instructions": 0,
+                "total_triggers": 0,
+                "total_conditions": 0,
+                "total_message_boxes": 0,
+                "total_annotations": 0,
+            }
+            self.id_map.clear()
+
+            self._build_id_map(data)
+            global_vars = self._collect_globals(data)
+            graph = self._parse_node(data)
+
+            return {
+                "graph": graph,
+                "global_variables": global_vars,
+                "stats": self.stats,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to parse sequence (sync): {e}")
             return {}
 
     def _build_id_map(self, node: Any):
@@ -122,7 +186,6 @@ class SequenceParser:
             return None
         expr_node = node.get(key)
         if isinstance(expr_node, dict):
-            # Разрешаем $ref если есть
             if "$ref" in expr_node:
                 expr_node = self._resolve_ref(expr_node)
             if expr_node and "Definition" in expr_node:
@@ -315,6 +378,7 @@ class SequenceParser:
     def _parse_smart_exposure(self, node: Dict[str, Any]) -> Dict[str, Any]:
         """Парсит SmartExposure со всеми параметрами."""
         self.stats["total_instructions"] += 1
+
         result = {
             "id": node.get("$id"),
             "type": "SmartExposure",
@@ -384,6 +448,7 @@ class SequenceParser:
             return None
 
         self.stats["total_instructions"] += 1
+
         result = {
             "id": node.get("$id"),
             "type": clean_type,
@@ -412,7 +477,6 @@ class SequenceParser:
             seconds = node.get("Seconds", 0)
             result["time"] = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             result["offset_minutes"] = node.get("MinutesOffset")
-
             provider_node = node.get("SelectedProvider")
             if provider_node and isinstance(provider_node, dict):
                 if "$ref" in provider_node:
@@ -425,7 +489,6 @@ class SequenceParser:
         if clean_type == "WaitForAltitude":
             result["offset_expr"] = self._get_expr(node, "OffsetExpression")
             result["above_or_below"] = node.get("AboveOrBelow")
-
             data_node = node.get("Data")
             if data_node and isinstance(data_node, dict):
                 if "$ref" in data_node:
@@ -433,7 +496,6 @@ class SequenceParser:
                 if data_node and isinstance(data_node, dict):
                     result["offset"] = data_node.get("Offset")
                     result["comparator"] = data_node.get("Comparator")
-
             coords_node = node.get("Coordinates")
             if coords_node and isinstance(coords_node, dict):
                 if "$ref" in coords_node:
@@ -455,7 +517,6 @@ class SequenceParser:
             result["offset"] = node.get("Offset")
             result["uses_rotation"] = node.get("usesRotation", False)
             result["inherited"] = node.get("Inherited", False)
-
             coords_node = node.get("Coordinates")
             if coords_node and isinstance(coords_node, dict):
                 if "$ref" in coords_node:
@@ -479,7 +540,6 @@ class SequenceParser:
             result["alt"] = node.get("Alt")
             result["az"] = node.get("Az")
             result["tracking"] = node.get("Tracking", True)
-
             coords_node = node.get("Coordinates")
             if coords_node and isinstance(coords_node, dict):
                 if "$ref" in coords_node:
@@ -585,7 +645,6 @@ class SequenceParser:
             result["exposure_time"] = node.get("ExposureTime")
             result["gain"] = node.get("Gain")
             result["offset"] = node.get("Offset")
-
             binning_node = node.get("Binning")
             if binning_node and isinstance(binning_node, dict):
                 if "$ref" in binning_node:
@@ -673,6 +732,7 @@ class SequenceParser:
         clean_type = self._clean_type(node_type)
 
         self.stats["total_triggers"] += 1
+
         result = {
             "id": node.get("$id"),
             "name": clean_type,
@@ -775,6 +835,7 @@ class SequenceParser:
         clean_type = self._clean_type(node_type)
 
         self.stats["total_conditions"] += 1
+
         result = {
             "type": clean_type,
         }
@@ -787,7 +848,6 @@ class SequenceParser:
         # AboveHorizonCondition
         if clean_type == "AboveHorizonCondition":
             result["offset_expr"] = self._get_expr(node, "OffsetExpression")
-
             data_node = node.get("Data")
             if data_node and isinstance(data_node, dict):
                 if "$ref" in data_node:
@@ -803,7 +863,6 @@ class SequenceParser:
             seconds = node.get("Seconds", 0)
             result["time"] = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             result["offset_minutes"] = node.get("MinutesOffset")
-
             provider_node = node.get("SelectedProvider")
             if provider_node and isinstance(provider_node, dict):
                 if "$ref" in provider_node:

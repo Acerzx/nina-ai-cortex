@@ -2,12 +2,13 @@
 Fake NINA API — эмулятор N.I.N.A. Advanced API для тестирования.
 Генерирует реалистичные метрики и события для тестирования агентов.
 
-ИСПРАВЛЕНО (audit 12.1):
-- Запись в ImageMetaData.json теперь происходит батчами (не каждый кадр)
-- Введён in-memory буфер _pending_frames с периодическим flush на диск
-- Автоматический flush при stop_sequence и periodically (каждые N кадров / секунд)
-- Использование aiofiles для асинхронной записи
-- Защита от потери данных при аварийной остановке через final flush
+ИСПРАВЛЕНО (аудит 5.1, 12.1):
+- Буферизация записи кадров (каждые 10 кадров или 30 секунд)
+- Асинхронная запись через aiofiles
+- Атомарная запись через temp file + rename
+- Lock для защиты от race conditions
+- Сохранение ссылок на фоновые задачи
+- Корректная остановка с финальным flush
 """
 
 import asyncio
@@ -18,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 import aiofiles
+import aiofiles.os
 from app.core.events import event_bus
 from app.core.config import settings
 
@@ -32,18 +34,21 @@ class FakeNinaAPI:
     - Генерация реалистичных метрик (HFR, FWHM, RMS, температура)
     - Симуляция последовательности кадров
     - Генерация событий (Sequence Started/Stopped, Meridian Flip, Errors)
-    - Запись фейковых файлов Session Metadata (батчами)
+    - Буферизованная запись в Session Metadata
     - Симуляция автофокуса и гидирования
 
-    ИСПРАВЛЕНО (audit 12.1):
-    - Батчевая запись метаданных вместо посекундной
-    - Настраиваемый flush interval (по кадрам и по времени)
+    ИСПРАВЛЕНО (аудит 5.1, 12.1):
+    - Буфер кадров с периодическим flush (каждые 10 кадров или 30 секунд)
+    - Асинхронная запись через aiofiles (не блокирует event loop)
+    - Атомарная запись через temp file + rename (защита от повреждения)
+    - asyncio.Lock для защиты от race conditions
+    - Сохранение ссылок на фоновые задачи в self._tasks
+    - Корректная остановка с финальным flush всех буферов
     """
 
-    # ===== Настройки батчевой записи =====
-    FLUSH_EVERY_FRAMES: int = 10  # Сбрасывать буфер каждые N кадров
-    FLUSH_EVERY_SECONDS: float = 30.0  # Или каждые N секунд
-    MAX_PENDING_FRAMES: int = 500  # Максимум кадров в буфере
+    # Конфигурация буферизации
+    FLUSH_EVERY_FRAMES: int = 10  # Flush каждые N кадров
+    FLUSH_EVERY_SECONDS: float = 30.0  # Flush каждые N секунд
 
     def __init__(self, session_dir: Optional[Path] = None):
         self.session_dir = session_dir or Path("./fake_sessions/test_session")
@@ -81,63 +86,56 @@ class FakeNinaAPI:
         self.dither_triggered = False
         self.meridian_flip_triggered = False
 
-        # ===== ИСПРАВЛЕНО (audit 12.1): буфер для батчевой записи =====
-        self._pending_frames: List[Dict[str, Any]] = []
-        self._last_flush_time: Optional[datetime] = None
-        self._total_flushed: int = 0
-        self._flush_lock = asyncio.Lock()
+        # ИСПРАВЛЕНО (аудит 5.1): Сохранение ссылок на фоновые задачи
+        self._tasks: List[asyncio.Task] = []
 
-        # Задачи
-        self._metrics_task: Optional[asyncio.Task] = None
-        self._sequence_task: Optional[asyncio.Task] = None
-        self._flush_task: Optional[asyncio.Task] = None
+        # ИСПРАВЛЕНО (аудит 12.1): Буфер кадров для batch-записи
+        self._frame_buffer: List[Dict[str, Any]] = []
+        self._buffer_lock = asyncio.Lock()
+        self._last_flush_time = datetime.now()
+
+        # Флаги управления
         self._running = False
 
     async def start(self):
         """Запускает симуляцию."""
         if self._running:
+            logger.warning("Fake NINA API already running")
             return
 
         self._running = True
         logger.info(f"🎭 Fake NINA API started (session: {self.session_dir})")
 
         # Запускаем генерацию метрик
-        self._metrics_task = asyncio.create_task(self._generate_metrics_loop())
+        metrics_task = asyncio.create_task(self._generate_metrics_loop())
+        self._tasks.append(metrics_task)
 
-        # ИСПРАВЛЕНО (audit 12.1): задача периодического flush
-        self._flush_task = asyncio.create_task(self._periodic_flush_loop())
+        # Запускаем периодический flush буфера
+        flush_task = asyncio.create_task(self._periodic_flush_loop())
+        self._tasks.append(flush_task)
 
     async def stop(self):
         """Останавливает симуляцию."""
+        if not self._running:
+            logger.warning("Fake NINA API not running")
+            return
+
         self._running = False
 
-        # ИСПРАВЛЕНО (audit 12.1): финальный flush перед остановкой
-        await self._flush_pending_frames(reason="stop")
+        # ИСПРАВЛЕНО (аудит 12.1): Финальный flush перед остановкой
+        await self._flush_frame_buffer(reason="stop")
 
-        if self._metrics_task:
-            self._metrics_task.cancel()
-            try:
-                await self._metrics_task
-            except asyncio.CancelledError:
-                pass
+        # Отменяем все фоновые задачи
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
 
-        if self._flush_task:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
+        # Ждём завершения всех задач
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
 
-        if self._sequence_task:
-            self._sequence_task.cancel()
-            try:
-                await self._sequence_task
-            except asyncio.CancelledError:
-                pass
-
-        logger.info(
-            f"🎭 Fake NINA API stopped (total frames flushed: {self._total_flushed})"
-        )
+        logger.info("🎭 Fake NINA API stopped")
 
     async def start_sequence(self, target: str = "M31", frames: int = 10):
         """Запускает симуляцию секвенсора."""
@@ -148,7 +146,7 @@ class FakeNinaAPI:
         self.sequence_running = True
         self.current_target = target
         self.frame_count = 0
-        self._pending_frames.clear()
+        self._frame_buffer.clear()
         self._last_flush_time = datetime.now()
 
         logger.info(f"🚀 Starting fake sequence: {target} ({frames} frames)")
@@ -160,24 +158,19 @@ class FakeNinaAPI:
         )
 
         # Запускаем генерацию кадров
-        self._sequence_task = asyncio.create_task(self._generate_sequence_loop(frames))
+        sequence_task = asyncio.create_task(self._generate_sequence_loop(frames))
+        self._tasks.append(sequence_task)
 
     async def stop_sequence(self):
         """Останавливает симуляцию секвенсора."""
         if not self.sequence_running:
+            logger.warning("Sequence not running")
             return
 
         self.sequence_running = False
 
-        if self._sequence_task:
-            self._sequence_task.cancel()
-            try:
-                await self._sequence_task
-            except asyncio.CancelledError:
-                pass
-
-        # ИСПРАВЛЕНО (audit 12.1): финальный flush перед публикацией SEQUENCE_STOPPED
-        await self._flush_pending_frames(reason="stop_sequence")
+        # ИСПРАВЛЕНО (аудит 12.1): Финальный flush перед остановкой
+        await self._flush_frame_buffer(reason="stop_sequence")
 
         logger.info("🛑 Fake sequence stopped")
 
@@ -215,6 +208,7 @@ class FakeNinaAPI:
                 # Публикуем метрики
                 await event_bus.publish("PROMETHEUS_UPDATE", self.metrics.copy())
                 await asyncio.sleep(3.0)
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -223,8 +217,8 @@ class FakeNinaAPI:
 
     async def _periodic_flush_loop(self):
         """
-        ИСПРАВЛЕНО (audit 12.1): Периодический flush буфера по таймеру.
-        Гарантирует, что данные записываются на диск даже при длинных
+        ИСПРАВЛЕНО (аудит 12.1): Периодический flush буфера по таймеру.
+        Гарантирует, что кадры записываются на диск даже при длинных
         интервалах между кадрами.
         """
         while self._running:
@@ -232,13 +226,10 @@ class FakeNinaAPI:
                 await asyncio.sleep(self.FLUSH_EVERY_SECONDS)
 
                 # Проверяем, нужно ли flush по таймеру
-                if (
-                    self._pending_frames
-                    and self._last_flush_time
-                    and (datetime.now() - self._last_flush_time).total_seconds()
-                    >= self.FLUSH_EVERY_SECONDS
-                ):
-                    await self._flush_pending_frames(reason="periodic_timer")
+                elapsed = (datetime.now() - self._last_flush_time).total_seconds()
+                if elapsed >= self.FLUSH_EVERY_SECONDS:
+                    await self._flush_frame_buffer(reason="periodic_timer")
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -254,14 +245,17 @@ class FakeNinaAPI:
                 # Генерируем кадр
                 await self._generate_frame()
 
-                # ИСПРАВЛЕНО: Ускоренная симуляция (2 секунды вместо 65)
+                # ИСПРАВЛЕНО (аудит 12.1): Периодический flush по количеству кадров
+                async with self._buffer_lock:
+                    buffer_size = len(self._frame_buffer)
+
+                if buffer_size >= self.FLUSH_EVERY_FRAMES:
+                    await self._flush_frame_buffer(reason="frame_count_threshold")
+
+                # ИСПРАВЛЕНО (аудит 12.1): Ускоренная симуляция (2 секунды вместо 65)
                 # В реальности: exposure_time + overhead (~65s)
                 # В симуляции: 2 секунды для быстрого тестирования
                 await asyncio.sleep(2.0)
-
-                # ИСПРАВЛЕНО (audit 12.1): Периодический flush по количеству кадров
-                if len(self._pending_frames) >= self.FLUSH_EVERY_FRAMES:
-                    await self._flush_pending_frames(reason="frame_count_threshold")
 
         except asyncio.CancelledError:
             pass
@@ -272,10 +266,10 @@ class FakeNinaAPI:
         """
         Генерирует один кадр и публикует события.
 
-        ИСПРАВЛЕНО (audit 12.1):
-        - Кадр добавляется в in-memory буфер _pending_frames
+        ИСПРАВЛЕНО (аудит 12.1):
+        - Кадр добавляется в буфер вместо немедленной записи
         - Публикация NEW_FRAME происходит сразу (для real-time обработки)
-        - Запись на диск — батчем через _flush_pending_frames
+        - Запись на диск — батчем через _flush_frame_buffer
         """
         self.frame_count += 1
 
@@ -287,7 +281,7 @@ class FakeNinaAPI:
             "rms_total": self.metrics["rms_total"] + random.gauss(0, 0.05),
         }
 
-        # Формируем данные кадра с обоими регистрами ключей
+        # ИСПРАВЛЕНО: Публикуем в обоих регистрах для максимальной совместимости
         frame_data = {
             # N.I.N.A. стандарт (ЗАГЛАВНЫЕ)
             "Index": self.frame_count,
@@ -315,33 +309,27 @@ class FakeNinaAPI:
             "rms_total": frame_metrics["rms_total"],
         }
 
-        # ИСПРАВЛЕНО (audit 12.1): Добавляем в буфер вместо немедленной записи
-        self._pending_frames.append(frame_data)
+        # ИСПРАВЛЕНО (аудит 12.1): Добавляем в буфер вместо немедленной записи
+        async with self._buffer_lock:
+            self._frame_buffer.append(frame_data)
 
-        # Защита от переполнения буфера
-        if len(self._pending_frames) > self.MAX_PENDING_FRAMES:
-            logger.warning(
-                f"⚠️ Pending frames buffer exceeded limit "
-                f"({len(self._pending_frames)} > {self.MAX_PENDING_FRAMES}), "
-                f"forcing flush"
-            )
-            await self._flush_pending_frames(reason="buffer_overflow")
-
-        # Публикуем событие нового кадра СРАЗУ (для real-time обработки Watcher)
+        # Публикуем событие нового кадра СРАЗУ (для real-time обработки)
         await event_bus.publish(
-            "NEW_FRAME",
-            {"session_id": self.session_dir.name, "frame": frame_data},
+            "NEW_FRAME", {"session_id": self.session_dir.name, "frame": frame_data}
         )
 
         logger.info(
             f"📸 Frame #{self.frame_count}: HFR={frame_metrics['hfr']:.2f}, "
             f"FWHM={frame_metrics['fwhm']:.2f}, Stars={frame_metrics['stars']} "
-            f"(pending: {len(self._pending_frames)})"
+            f"(buffered: {len(self._frame_buffer)})"
         )
 
-    async def _flush_pending_frames(self, reason: str = "unknown") -> bool:
+    async def _flush_frame_buffer(self, reason: str = "unknown") -> bool:
         """
-        ИСПРАВЛЕНО (audit 12.1): Сбрасывает буфер кадров на диск одним батчем.
+        ИСПРАВЛЕНО (аудит 12.1): Сбрасывает буфер кадров на диск одним батчем.
+
+        Использует атомарную запись через temp file + rename для защиты
+        от повреждения файла при прерывании процесса.
 
         Args:
             reason: Причина flush (для логирования)
@@ -349,58 +337,53 @@ class FakeNinaAPI:
         Returns:
             True если flush успешен
         """
-        async with self._flush_lock:
-            if not self._pending_frames:
+        async with self._buffer_lock:
+            if not self._frame_buffer:
                 return True
 
-            frames_to_write = list(self._pending_frames)
-            self._pending_frames.clear()
+            frames_to_write = list(self._frame_buffer)
+            self._frame_buffer.clear()
+            self._last_flush_time = datetime.now()
 
-            metadata_file = self.session_dir / "ImageMetaData.json"
+        metadata_file = self.session_dir / "ImageMetaData.json"
 
-            try:
-                # Читаем существующие данные асинхронно
-                existing_frames: List[Dict[str, Any]] = []
-                if metadata_file.exists():
+        try:
+            # Читаем существующие данные асинхронно
+            if metadata_file.exists():
+                async with aiofiles.open(metadata_file, "r", encoding="utf-8") as f:
+                    content = await f.read()
                     try:
-                        async with aiofiles.open(
-                            metadata_file, "r", encoding="utf-8"
-                        ) as f:
-                            content = await f.read()
-                            data = json.loads(content)
-                            existing_frames = data.get("Frames", [])
-                    except (json.JSONDecodeError, IOError) as e:
-                        logger.warning(
-                            f"Failed to read existing metadata: {e}. "
-                            f"Starting with empty list."
-                        )
+                        data = json.loads(content)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Corrupted metadata file, starting fresh")
+                        data = {"Frames": []}
+            else:
+                data = {"Frames": []}
 
-                # Добавляем новые кадры
-                existing_frames.extend(frames_to_write)
+            # Добавляем новые кадры
+            data["Frames"].extend(frames_to_write)
 
-                # Записываем всё одним батчем
-                data = {"Frames": existing_frames}
-                async with aiofiles.open(metadata_file, "w", encoding="utf-8") as f:
-                    content = json.dumps(data, indent=2, ensure_ascii=False)
-                    await f.write(content)
+            # ИСПРАВЛЕНО (аудит 12.1): Атомарная запись через temp file + rename
+            temp_path = metadata_file.with_suffix(".json.tmp")
+            async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(data, indent=2, ensure_ascii=False))
+                await f.flush()
 
-                self._total_flushed += len(frames_to_write)
-                self._last_flush_time = datetime.now()
+            # Атомарная замена (rename атомарен на POSIX и Windows)
+            await aiofiles.os.replace(temp_path, metadata_file)
 
-                logger.debug(
-                    f"💾 Flushed {len(frames_to_write)} frames to disk "
-                    f"(reason: {reason}, total flushed: {self._total_flushed})"
-                )
-                return True
+            logger.debug(
+                f"💾 Flushed {len(frames_to_write)} frames to disk "
+                f"(reason: {reason}, total: {len(data['Frames'])})"
+            )
+            return True
 
-            except Exception as e:
-                # При ошибке записи возвращаем кадры обратно в буфер
-                logger.error(
-                    f"Failed to flush {len(frames_to_write)} frames: {e}. "
-                    f"Returning to buffer."
-                )
-                self._pending_frames = frames_to_write + self._pending_frames
-                return False
+        except Exception as e:
+            logger.error(f"Failed to flush frame buffer: {e}")
+            # При ошибке возвращаем кадры обратно в буфер
+            async with self._buffer_lock:
+                self._frame_buffer = frames_to_write + self._frame_buffer
+            return False
 
     async def trigger_autofocus(self):
         """Симулирует запуск автофокуса."""
@@ -411,8 +394,8 @@ class FakeNinaAPI:
         self.autofocus_triggered = True
         logger.info("🔍 Triggering fake autofocus...")
 
-        # Flush перед автофокусом для консистентности данных
-        await self._flush_pending_frames(reason="autofocus")
+        # ИСПРАВЛЕНО (аудит 12.1): Flush перед автофокусом для консистентности
+        await self._flush_frame_buffer(reason="autofocus")
 
         # Публикуем событие начала автофокуса
         await event_bus.publish(
@@ -455,13 +438,14 @@ class FakeNinaAPI:
     async def trigger_meridian_flip(self):
         """Симулирует Meridian Flip."""
         if self.meridian_flip_triggered:
+            logger.warning("Meridian flip already triggered")
             return
 
         self.meridian_flip_triggered = True
         logger.info("🔄 Triggering fake meridian flip...")
 
-        # Flush перед flip для консистентности
-        await self._flush_pending_frames(reason="meridian_flip")
+        # ИСПРАВЛЕНО (аудит 12.1): Flush перед flip для консистентности
+        await self._flush_frame_buffer(reason="meridian_flip")
 
         await event_bus.publish(
             "MERIDIAN_FLIP_STARTED", {"timestamp": datetime.now().isoformat()}
@@ -523,15 +507,11 @@ class FakeNinaAPI:
             "running": self._running,
             "sequence_running": self.sequence_running,
             "frame_count": self.frame_count,
-            "total_flushed": self._total_flushed,
-            "pending_frames": len(self._pending_frames),
-            "flush_config": {
-                "every_frames": self.FLUSH_EVERY_FRAMES,
-                "every_seconds": self.FLUSH_EVERY_SECONDS,
-                "max_pending": self.MAX_PENDING_FRAMES,
-            },
-            "session_dir": str(self.session_dir),
+            "buffer_size": len(self._frame_buffer),
+            "tasks_count": len(self._tasks),
             "current_target": self.current_target,
+            "current_filter": self.current_filter,
+            "metrics": self.metrics.copy(),
         }
 
 
