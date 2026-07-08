@@ -4,7 +4,7 @@ ObservatoryState — единое состояние обсерватории.
 и предоставляет API для Multi-Agent Swarm (LangGraph).
 
 Архитектура источников метрик:
-- InfluxDB (основной): через INFLUXDB_UPDATE от InfluxDBMetricsProvider
+- InfluxDB (основной по умолчанию): через INFLUXDB_UPDATE от InfluxDBMetricsProvider
 - Prometheus (резервный): через PROMETHEUS_UPDATE от PrometheusScraper
 - Session Metadata: через NEW_FRAME от SessionWatcher
 - Weather: через WEATHER_UPDATE от WeatherData watcher
@@ -14,7 +14,8 @@ ObservatoryState — единое состояние обсерватории.
 ИСПРАВЛЕНО (audit 9.1):
 - Выбор основного источника через settings.data_sources.primary_metrics_source
 - Резервный источник используется только при недоступности основного
-- Устранено дублирование событий
+- Таймаут 30 секунд для определения недоступности источника
+- Устранено дублирование метрик
 """
 
 import logging
@@ -40,7 +41,6 @@ class MetricsHistory(BaseModel):
     temperature: List[float] = Field(default_factory=list)
     wind_speed: List[float] = Field(default_factory=list)
     humidity: List[float] = Field(default_factory=list)
-    rms_total: List[float] = Field(default_factory=list)
 
     # ClassVar указывает Pydantic, что это константа класса
     MAX_POINTS: ClassVar[int] = 100
@@ -64,11 +64,11 @@ class ObservatoryState:
     ИСПРАВЛЕНО (audit 9.1):
     - Выбор основного источника через settings.data_sources
     - Резервный источник используется только при недоступности основного
-    - Таймаут для определения недоступности источника (30 секунд)
+    - Таймаут для определения недоступности источника
     """
 
     def __init__(self):
-        # === Текущие метрики ===
+        # === Текущие метрики (обновляются из Prometheus/Session Metadata/InfluxDB) ===
         self.current_metrics: Dict[str, Any] = {
             "hfr": None,
             "fwhm": None,
@@ -119,18 +119,18 @@ class ObservatoryState:
         # === История действий AI (для объяснимости) ===
         self.ai_action_log: deque = deque(maxlen=1000)
 
-        # === Список целей ===
+        # === Список целей (из Dynamic Sequencer / Target Scheduler) ===
         self.active_targets: List[Dict[str, Any]] = []
 
         # === Статус безопасности ===
-        self.safety_status: str = "UNKNOWN"
+        self.safety_status: str = "UNKNOWN"  # SAFE, UNSAFE, UNKNOWN
 
         # === Флаги режимов ===
         self.is_flat_mode: bool = False
         self.is_guiding_active: bool = False
         self.is_autofocus_running: bool = False
 
-        # ИСПРАВЛЕНО (audit 9.1): Источники данных с конфигом
+        # === ИСПРАВЛЕНО (audit 9.1): Источники данных с конфигом ===
         ds_cfg = settings.data_sources
         self._primary_source: str = ds_cfg.primary_metrics_source
         self._fallback_enabled: bool = ds_cfg.enable_fallback_source
@@ -152,18 +152,31 @@ class ObservatoryState:
         if self._subscribed:
             return
 
-        # ИСПРАВЛЕНО (audit 9.1): Подписываемся на оба источника,
-        # но используем только активный
+        # === ИСПРАВЛЕНО (audit 9.1): Подписываемся на оба источника,
+        # но используем только активный ===
         event_bus.subscribe("INFLUXDB_UPDATE", self._on_influxdb_update)
         event_bus.subscribe("PROMETHEUS_UPDATE", self._on_prometheus_update)
 
+        # Session Metadata (новые кадры)
         event_bus.subscribe("NEW_FRAME", self._on_new_frame)
+
+        # Погода
         event_bus.subscribe("WEATHER_UPDATE", self._on_weather_update)
+
+        # FITS Headers (астрономия)
         event_bus.subscribe("FITS_HEADER_PARSED", self._on_fits_parsed)
+
+        # Алерты от Watcher агента
         event_bus.subscribe("ALERT", self._on_alert)
+
+        # Режимы
         event_bus.subscribe("FLAT_MODE_CONFIRMED", self._on_flat_mode_start)
         event_bus.subscribe("FLAT_MODE_ENDED", self._on_flat_mode_end)
+
+        # События гида и безопасности из логов
         event_bus.subscribe("LOG_EVENT", self._on_log_event)
+
+        # LiveStack статус
         event_bus.subscribe("LIVESTACK_STATUS", self._on_livestack_status)
 
         self._subscribed = True
@@ -240,7 +253,11 @@ class ObservatoryState:
     async def _on_influxdb_update(self, data: Dict[str, Any]):
         """
         Обновление метрик из InfluxDB (ОСНОВНОЙ ИСТОЧНИК).
-        Данные приходят от InfluxDBMetricsProvider.
+        Данные приходят от InfluxDBMetricsProvider, который выполняет
+        Flux queries к InfluxDB Exporter (daleghent plugin).
+
+        ИСПРАВЛЕНО (audit 9.1): Проверяет, должен ли этот источник приниматься
+        на основе настроек primary/fallback.
         """
         # Обновляем timestamp
         self._influxdb_last_update = datetime.now()
@@ -339,6 +356,9 @@ class ObservatoryState:
         """
         Обновление метрик из Prometheus (РЕЗЕРВНЫЙ ИСТОЧНИК).
         Используется только если InfluxDB недоступен.
+
+        ИСПРАВЛЕНО (audit 9.1): Проверяет, должен ли этот источник приниматься
+        на основе настроек primary/fallback.
         """
         # Обновляем timestamp
         self._prometheus_last_update = datetime.now()
@@ -396,25 +416,28 @@ class ObservatoryState:
             self.weather["cloud_cover"] = data["wx_cloud_cover"]
 
     # ========================================================================
-    # Обработчики остальных событий
+    # Обработчики остальных событий (без изменений)
     # ========================================================================
 
     async def _on_new_frame(self, data: Dict[str, Any]):
         """
         Обработка нового кадра из Session Metadata или FakeNina.
-        Поддержка обоих регистров ключей (HFR/hfr, FWHM/fwhm, etc.)
+        ИСПРАВЛЕНО: Поддержка обоих регистров ключей (HFR/hfr, FWHM/fwhm, etc.)
+        N.I.N.A. использует ЗАГЛАВНЫЕ ключи (HFR, FWHM),
+        а внутренние структуры - строчные (hfr, fwhm).
         """
         frame = data.get("frame", {})
         if not frame:
             return
 
+        # Универсальный геттер с поддержкой обоих регистров
         def get_value(*keys, default=None):
             for key in keys:
                 if key in frame and frame[key] is not None:
                     return frame[key]
             return default
 
-        # === HFR ===
+        # === HFR (оба варианта: HFR и hfr) ===
         hfr = get_value("HFR", "hfr")
         if hfr is not None:
             self._append_history("hfr", hfr)
@@ -423,18 +446,18 @@ class ObservatoryState:
                 f"📈 HFR updated: {hfr:.2f} (history length: {len(self.history.hfr)})"
             )
 
-        # === FWHM ===
+        # === FWHM (оба варианта: FWHM и fwhm) ===
         fwhm = get_value("FWHM", "fwhm")
         if fwhm is not None:
             self._append_history("fwhm", fwhm)
             self.current_metrics["fwhm"] = fwhm
 
-        # === Stars ===
+        # === Stars (оба варианта: Stars и stars) ===
         stars = get_value("Stars", "stars", "star_count")
         if stars is not None:
             self.current_metrics["star_count"] = stars
 
-        # === RMS ===
+        # === RMS (оба варианта: RmsTotal и rms_total) ===
         rms = get_value("RmsTotal", "rms_total", "RMS")
         if rms is not None:
             self.current_metrics["rms_total"] = rms
@@ -492,6 +515,7 @@ class ObservatoryState:
         }
         self.active_alerts.append(alert)
 
+        # Ограничиваем количество активных алертов
         if len(self.active_alerts) > 50:
             self.active_alerts = self.active_alerts[-50:]
 
@@ -525,7 +549,7 @@ class ObservatoryState:
             self.current_metrics["snr"] = data["snr"]
 
     # ========================================================================
-    # Вспомогательные методы
+    # Вспомогательные методы (без изменений)
     # ========================================================================
 
     def _append_history(self, metric: str, value: Optional[float]):
@@ -537,6 +561,7 @@ class ObservatoryState:
         if history_list is not None and isinstance(history_list, list):
             try:
                 history_list.append(float(value))
+                # Обрезаем историю до MAX_POINTS
                 if len(history_list) > self.history.MAX_POINTS:
                     history_list.pop(0)
             except (ValueError, TypeError):
@@ -626,12 +651,17 @@ class ObservatoryState:
 
     def clear_resolved_alerts(self):
         """Очищает алерты, которые были решены."""
+        # Оставляем только CRITICAL для аудита
         self.active_alerts = [
             a for a in self.active_alerts if a.get("level") == "CRITICAL"
         ]
 
     def get_session_summary(self) -> Dict[str, Any]:
-        """Возвращает краткую сводку текущей сессии для LLM."""
+        """
+        Возвращает краткую сводку текущей сессии для LLM.
+
+        ИСПРАВЛЕНО (audit 9.1): Добавлена информация об активном источнике метрик.
+        """
         # Определяем активный источник данных
         active_source = "none"
         if self._influxdb_active and self._should_accept_influxdb():
@@ -656,7 +686,11 @@ class ObservatoryState:
         }
 
     def get_full_state(self) -> Dict[str, Any]:
-        """Возвращает полное состояние для AI-агентов и Frontend."""
+        """
+        Возвращает полное состояние для AI-агентов и Frontend.
+
+        ИСПРАВЛЕНО (audit 9.1): Добавлена информация об активных источниках.
+        """
         # Определяем активные источники
         influxdb_active = self._influxdb_active and self._should_accept_influxdb()
         prometheus_active = self._prometheus_active and self._should_accept_prometheus()
