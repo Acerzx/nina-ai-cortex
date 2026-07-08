@@ -1,342 +1,187 @@
-# 📝 Создание README.md для N.I.N.A. AI Cortex
+# 🌌 N.I.N.A. AI Cortex 🧠
 
-На основе анализа предоставленного кода и структуры проекта, я подготовил полноценную документацию по ключевым характеристикам системы.
+**N.I.N.A. AI Cortex** — это интеллектуальная когнитивная надстройка и многоагентная система (Multi-Agent Swarm) для автономного управления, мониторинга и оптимизации астрономической обсерватории под управлением программного комплекса **N.I.N.A.** (Nighttime Imaging 'N' Astronomy).
 
-```markdown
-# 🌌 N.I.N.A. AI Cortex
-
-**Когнитивная надстройка для автономного управления астрофотографической обсерваторией**
-
-N.I.N.A. AI Cortex — это Multi-Agent AI система, работающая поверх [N.I.N.A.](https://nighttime-imaging.eu/) (Nighttime Imaging 'N' Astronomy). Система обеспечивает полностью автономный мониторинг, диагностику и оптимизацию астрономических сессий в реальном времени.
+Система в реальном времени анализирует телеметрию, логи, метрики качества (HFR, FWHM, RMS) и погодные условия, принимая автономные решения для максимизации результата съемки и обеспечения абсолютной безопасности оборудования.
 
 ---
 
-## 🎯 Ключевые возможности
+## 🚀 Ключевые возможности
 
-### 🤖 Multi-Agent Swarm (10 AI-агентов)
-
-Архитектура **Orchestrator-Worker Pattern** с координацией через LangGraph:
-
-| Агент             | Роль                                                            | Приоритет |
-| ----------------- | --------------------------------------------------------------- | --------- |
-| **Watcher**       | Мониторинг метрик и детекция аномалий (HFR, FWHM, RMS)          | HIGH      |
-| **Guardian**      | Безопасность оборудования (аварийная парковка, контроль погоды) | CRITICAL  |
-| **Diagnostician** | Root cause analysis через корреляции и RAG-историю              | HIGH      |
-| **Strategist**    | Оптимизация параметров (экспозиция, SNR, автофокус)             | MEDIUM    |
-| **Scheduler**     | Планирование сессий на основе видимости и погоды                | MEDIUM    |
-| **Auditor**       | Post-mortem анализ и генерация Session Digest                   | LOW       |
-| **Calibrator**    | Управление библиотекой мастер-кадров (Bias/Dark/Flat)           | LOW       |
-| **Copilot**       | Интерактивная помощь (MessageBox, 2PA, OAG Focus)               | INFO      |
-| **MemoryManager** | Управление контекстом (short/medium/long-term)                  | -         |
-| **Orchestrator**  | Координация workflow и маршрутизация решений                    | -         |
-
-**Принцип приоритетов**: `Safety > Quality > Optimization`
-
-### 📊 Ingestion Layer (Мониторинг данных)
-
-Многоуровневая система сбора данных из различных источников:
-
-- **11 File Watchers**: SessionWatcher, HocusFocusWatcher, FITSScanner, MastersAuditor, LiveStackWatcher и др.
-- **Prometheus Scraper**: Парсинг метрик оборудования (jewzaam plugin)
-- **InfluxDB Provider**: Основной источник time-series данных через Flux queries
-- **WebSocket Client**: Real-time события от N.I.N.A. API
-- **Log Tailer**: Анализ логов N.I.N.A. с паттерн-матчингом
-
-### 🧠 Shadow Engine
-
-**Теневой граф секвенсора** — полная реконструкция N.I.N.A. Sequence.json:
-
-- Парсинг всех контейнеров, инструкций, триггеров и условий
-- Отслеживание `container_path` для определения текущей фазы
-- Раннее обнаружение FLAT_MODE и приближения к Shutdown
-- Блокировка небезопасных действий в критических фазах
-
-### ⚡ Execution Layer
-
-Система выполнения команд через N.I.N.A. Advanced API:
-
-- **Trigger Emulator v2**: Эмуляция триггеров через реальные эндпоинты API
-- **HAL (Hardware Abstraction Layer)**: Финальная валидация команд (лимиты высоты, safety status)
-- **Safety Interceptor**: Перехват Shutdown инструкций в финальной стадии
-- **Device Commander**: Прямые ASCOM команды оборудованию
-- **Dynamic Editor**: Безопасное редактирование JSON-проектов секвенсора
-- **Global Var Injector**: Изменение переменных Sequencer+
-- **Home Assistant Bridge**: Интеграция с умным домом обсерватории
-
-### 🔍 RAG Engine (Retrieval-Augmented Generation)
-
-Система предоставления контекста AI-агентам:
-
-- **Qdrant**: Векторная база данных для семантического поиска
-- **Гибридные Embeddings**: sentence-transformers (primary) → Ollama nomic-embed-text (fallback)
-- **Автоматическое пополнение**: Индексация Session Digest после каждой сессии
-- **Контекст для LLM**: Исторические кейсы, документация, решения проблем
-
-### 🛡️ Safety & Security
-
-- **Pre-flight Checklist**: 8 gates перед стартом сессии (Weather, Hardware, Calibration, DiskSpace, API, Safety, Sequence, Mode)
-- **Credential Vault**: Безопасное хранение секретов (Argon2id + AES-256-GCM)
-- **Mode Manager**: Graceful degradation при потере LLM (FULL_AI → SAFE_AUTONOMOUS → MANUAL)
-- **Decision Audit Trail**: Полное логирование всех AI-решений с hindsight verdict
-
-### 💾 Storage & Monitoring
-
-- **Decision Audit Trail**: SQLite база всех решений агентов
-- **Disk Monitor**: Автоматическое управление дисковым пространством с политиками retention
-- **WebSocket Broadcasting**: Real-time push событий на Frontend (каналы: sequence, metrics, alerts, weather)
-
-### 🎭 Simulation Mode
-
-Полная эмуляция для тестирования без реального оборудования:
-
-- **Fake NINA API**: Генерация реалистичных метрик и событий
-- **Fake PHD2**: Симуляция гидирования
-- **Инжект аномалий**: hfr_spike, rms_spike, temp_drift, guiding_lost, safety_unsafe
+- **🤖 Multi-Agent Swarm (10 AI-агентов)**: Специализированные агенты для мониторинга, диагностики, оптимизации и обеспечения безопасности, координируемые через LangGraph.
+- **👁️ Shadow Engine**: Неинвазивный парсинг `Sequence.json` N.I.N.A. для построения теневого графа (DAG) и предсказания действий секвенсора без вмешательства в его работу.
+- **🛡️ Hardware Abstraction Layer (HAL)**: Финальный барьер безопасности, блокирующий опасные команды (slew, triggers) во время критических фаз (Meridian Flip, Park, Shutdown) или при `UNSAFE` статусе.
+- **📚 RAG-система (Retrieval-Augmented Generation)**: Векторная база знаний (Qdrant) для обучения на истории прошлых сессий, документаций и генерации Post-Mortem отчетов.
+- **🔌 Deep N.I.N.A. Integration**: Двусторонняя связь через Advanced API (HTTP) и WebSocket. Поддержка триггеров, инъекции глобальных переменных и управления Dynamic Sequencer.
+- **📊 Dual Telemetry Ingestion**: Агрегация метрик из InfluxDB 2.x (основной источник) и Prometheus (резервный), парсинг FITS-заголовков, CSV-отчетов (Hocus Focus) и логов.
+- **🏠 Smart Observatory (Home Assistant)**: Мост для управления умным домом обсерватории (Flat Panel, Dew Heater, питание).
+- **🎭 Simulation Mode**: Встроенные эмуляторы `FakeNina` и `FakePhd2` для безопасного тестирования агентов и инжекта аномалий без реального оборудования.
+- **📜 Decision Audit Trail**: Полная объяснимость ИИ (Explainable AI) с сохранением всех решений в SQLite, оценкой постфактум (Hindsight Verdict) и политиками ретеншена.
 
 ---
 
 ## 🏗️ Архитектура системы
-```
 
-┌─────────────────────────────────────────────────────────────────┐
-│ N.I.N.A. AI Cortex │
-├─────────────────────────────────────────────────────────────────┤
-│ ┌─────────────┐ ┌──────────────┐ ┌───────────────────────┐ │
-│ │ FastAPI │ │ WebSocket │ │ LangGraph │ │
-│ │ REST API │ │ Broadcast │ │ Orchestrator │ │
-│ └──────┬──────┘ └──────┬───────┘ └───────────┬───────────┘ │
-│ │ │ │ │
-│ ┌──────▼────────────────▼──────────────────────▼───────────┐ │
-│ │ AI Agents (10) │ │
-│ │ Watcher │ Guardian │ Diagnostician │ Strategist │ ... │ │
-│ └──────────────────────────┬───────────────────────────────┘ │
-│ │ │
-│ ┌──────────────────────────▼───────────────────────────────┐ │
-│ │ ObservatoryState (Единое состояние) │ │
-│ └──────────────────────────┬───────────────────────────────┘ │
-│ │ │
-│ ┌──────────┐ ┌───────────┴────┐ ┌─────────────────────┐ │
-│ │ Shadow │ │ Execution │ │ RAG Engine │ │
-│ │ Engine │ │ Layer │ │ (Qdrant + Ollama) │ │
-│ └──────────┘ └───────────┬────┘ └─────────────────────┘ │
-│ │ │
-│ ┌─────────────────────────▼────────────────────────────────┐ │
-│ │ Ingestion Layer │ │
-│ │ File Watchers │ Prometheus │ InfluxDB │ WS Client │ Logs│ │
-│ └─────────────────────────┬────────────────────────────────┘ │
-└────────────────────────────┼────────────────────────────────────┘
-│
-┌────────▼────────┐
-│ N.I.N.A. │
-│ Advanced API │
-│ (ASCOM) │
-└────────┬────────┘
-│
-┌────────▼────────┐
-│ Оборудование │
-│ (Mount, Camera, │
-│ Guider, etc.) │
-└─────────────────┘
+Система построена на паттерне **Orchestrator-Worker** с асинхронным EventBus ядром.
 
-````
+### 1. Ingestion Layer (Сбор данных)
+
+- **Watchers**: Мониторинг файловых систем (Session Metadata, Masters Library, Hocus Focus, LiveStack, AI Weather).
+- **Pollers**: Опрос InfluxDB (Flux queries) и Prometheus Exporter.
+- **Log Tailer**: Стриминг и классификация логов N.I.N.A. в реальном времени (Regex-паттерн матчинг).
+- **WebSocket Client**: Подписка на нативные события N.I.N.A. (`SequenceItemStarted`, `MeridianFlip`, и т.д.).
+
+### 2. Core (Ядро)
+
+- **EventBus**: Асинхронная шина событий с метриками и дедупликацией.
+- **ObservatoryState**: Единый in-memory стейт обсерватории (агрегатор всех источников).
+- **Mode Manager**: Управление режимами (`FULL_AI`, `SAFE_AUTONOMOUS`, `MANUAL`, `SIMULATION`) с автоматическим fallback при потере LLM.
+- **RAG Engine**: Гибридные эмбеддинги (Ollama `nomic-embed-text` + LRU-кэш) и векторный поиск.
+
+### 3. Execution Layer (Исполнение)
+
+- **Trigger Emulator**: Безопасный вызов триггеров N.I.N.A. API с валидацией параметров и защитой от перезаписи.
+- **Global Var Injector**: Изменение переменных Sequencer+ с маскированием чувствительных данных в логах.
+- **Python Bridge**: Whitelist-выполнение IronPython/C# скриптов внутри N.I.N.A. (защита от произвольного кода).
+- **Safety Interceptor**: Перехват инструкций `ShutdownPc` для предотвращения внезапного отключения ПК.
 
 ---
 
-## 🚀 Быстрый старт
+## 🤖 Директория AI-Агентов
 
-### Требования
+| Агент             | Роль                        | Описание                                                                                        |
+| :---------------- | :-------------------------- | :---------------------------------------------------------------------------------------------- |
+| **Watcher**       | Monitor & Anomaly Detection | Непрерывный анализ трендов (Z-Score, HFR, RMS, ветер). Генерация алертов.                       |
+| **Guardian**      | Safety & Security           | Высший приоритет. Аварийная парковка (`EMERGENCY_PARK`) при порывах ветра или `UNSAFE`.         |
+| **Diagnostician** | Root Cause Analysis         | Поиск корреляций (например, HFR vs Температура) и анализ похожих кейсов через RAG/LLM.          |
+| **Strategist**    | Parameter Optimization      | Расчет оптимальной экспозиции (SNR), адаптация интервалов автофокуса, выбор подветренных целей. |
+| **Auditor**       | Post-Mortem Analysis        | Генерация `Session Digest`, индексация в RAG, расчет Quality Score.                             |
+| **Calibrator**    | Calibration Management      | Контроль свежести мастеров (Bias/Dark/Flat) и температурного допуска.                           |
+| **Scheduler**     | Session Planning            | Динамическое приоритизация целей в Dynamic Sequencer на основе видимости и погоды.              |
+| **Copilot**       | Interactive Assistant       | Генерация пошаговых UI-гайдов для ручных шагов (2PA, OAG Focus, MessageBox).                    |
+| **MemoryManager** | Context Management          | Управление краткосрочной и долгосрочной памятью (TTL, очистка).                                 |
+| **Orchestrator**  | Coordinator                 | Маршрутизация задач, управление очередями, приоритетами и Decision Audit.                       |
 
-- **Python**: 3.11+ (совместимо с 3.14)
-- **Docker Desktop**: Для Qdrant и InfluxDB
-- **N.I.N.A.**: С установленным Advanced API плагином
-- **Ollama**: Локальный LLM сервер (опционально)
+---
 
-### Установка
+## 🛠️ Технологический стек
+
+- **Backend**: Python 3.11+, FastAPI, Uvicorn, Pydantic V2, Asyncio.
+- **AI / Orchestration**: LangGraph, LangChain, Ollama (`gemma4:31b-cloud` + `gemma4:e4b` fallback).
+- **Vector DB**: Qdrant (Хранение эмбеддингов сессий и документации).
+- **Time-Series DB**: InfluxDB 2.x (Основной источник телеметрии).
+- **Metrics**: Prometheus (Экспорт метрик самого Cortex + резервный источник N.I.N.A.).
+- **Storage**: SQLite (Decision Audit Trail), Argon2id + AES-256-GCM (Credential Vault).
+- **Infrastructure**: Docker Compose, WebSockets, HTTPX.
+
+---
+
+## ⚙️ Установка и настройка
+
+### 1. Предварительные требования
+
+- **N.I.N.A.** с установленными плагинами: `Advanced API`, `Prometheus Exporter` (jewzaam), `InfluxDB Exporter` (daleghent).
+- **Python 3.11+**
+- **Docker Desktop** (для Qdrant и InfluxDB)
+- **Ollama** (локальный LLM сервер)
+
+### 2. Инфраструктура (Docker)
+
+Запустите базы данных:
 
 ```bash
-# 1. Установка зависимостей
-install_deps.bat
-
-# 2. Настройка конфигурации
-# Отредактируйте config/settings.yaml с путями к N.I.N.A.
-
-# 3. Установка LLM модели (опционально)
-ollama pull qwen2.5:14b
-
-# 4. Запуск инфраструктуры
 docker-compose up -d
-
-# 5. Запуск Cortex
-start_cortex.bat
-````
-
-### API Endpoints
-
-| Эндпоинт                         | Описание                           |
-| -------------------------------- | ---------------------------------- |
-| `GET /health`                    | Health check всех компонентов      |
-| `GET /api/v1/observatory/state`  | Полное состояние обсерватории      |
-| `GET /api/v1/agents/status`      | Статус всех AI-агентов             |
-| `GET /api/v1/metrics`            | Текущие метрики                    |
-| `POST /api/v1/rag/search`        | Семантический поиск по базе знаний |
-| `POST /api/v1/execution/trigger` | Ручной вызов триггера              |
-| `WS /ws`                         | WebSocket для real-time событий    |
-| `GET /docs`                      | Swagger UI документация            |
-
----
-
-## 📁 Структура проекта
-
-```
-├── backend/app/
-│   ├── agents/           # 10 AI-агентов + LangGraph
-│   ├── core/             # EventBus, Config, RAG, ModeManager
-│   ├── execution/        # Trigger Emulator, HAL, Safety
-│   ├── ingestion/        # Watchers, Parsers, Providers
-│   ├── safety/           # Pre-flight Checklist
-│   ├── security/         # Credential Vault
-│   ├── shadow_engine/    # Sequence Parser, State Tracker
-│   ├── simulation/       # Fake NINA, Fake PHD2
-│   └── storage/          # Decision Audit, Disk Monitor
-├── config/               # settings.yaml, OpenAPI spec
-├── tests/                # Unit, Integration, E2E тесты
-└── docker-compose.yml    # Qdrant + InfluxDB
 ```
 
----
-
-## 🔧 Конфигурация
-
-### Основные настройки (config/settings.yaml)
-
-```yaml
-nina_environment:
-  appdata_root: "C:\\Users\\...\\AppData\\Local\\NINA"
-  sessions_root: "C:\\...\\Sessions"
-  masters_root: "C:\\...\\Masters"
-
-network:
-  nina_api_host: "http://localhost:1888"
-  prometheus_url: "http://localhost:9876"
-
-influxdb:
-  url: "http://localhost:8086"
-  token: "${INFLUXDB_TOKEN}"
-
-ai_settings:
-  ollama_host: "http://localhost:11434"
-  model_name: "qwen2.5:14b"
-```
-
-### Режимы работы
-
-| Режим             | Описание                                   |
-| ----------------- | ------------------------------------------ |
-| `FULL_AI`         | Все агенты активны, LLM работает           |
-| `SAFE_AUTONOMOUS` | Только Watcher + Guardian (при потере LLM) |
-| `MANUAL`          | Только мониторинг, без автодействий        |
-| `SIMULATION`      | Тестирование с Fake NINA/PHD2              |
-
----
-
-## 🧪 Тестирование
+### 3. Загрузка LLM моделей (Ollama)
 
 ```bash
-# Запуск всех тестов
+ollama pull nomic-embed-text      # Для RAG (Embeddings)
+ollama pull gemma4:e4b            # Fallback модель (Быстрая, локальная)
+# Опционально: ollama pull gemma4:31b-cloud (Облачная/Мощная)
+```
+
+### 4. Установка зависимостей Python
+
+Запустите скрипт автоматической установки (Windows):
+
+```cmd
+install_deps.bat
+```
+
+_Или вручную:_
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r backend/requirements.txt
+```
+
+### 5. Конфигурация
+
+1. Скопируйте `backend/.env.example` в `backend/.env` и укажите токены (InfluxDB, Home Assistant, JWT Secret).
+2. Отредактируйте `config/settings.yaml`:
+   - Укажите актуальные пути к папкам N.I.N.A. (`appdata_root`, `sessions_root`, `masters_root`).
+   - Настройте пороги срабатывания агентов (`thresholds`).
+   - Укажите сетевые адреса API.
+
+---
+
+## 🏃 Запуск системы
+
+```cmd
+start_cortex.bat
+```
+
+Сервер запустится на `http://localhost:8000`.
+
+- **Swagger UI (API Docs)**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Prometheus Metrics**: [http://localhost:8000/metrics](http://localhost:8000/metrics)
+- **WebSocket Endpoint**: `ws://localhost:8000/ws`
+
+---
+
+## 🔐 Безопасность и Аутентификация
+
+- **JWT & API Keys**: Все критические endpoints (Execution, Vault, Simulation) защищены JWT Bearer токенами или API-ключами (RBAC: Admin, Operator, Readonly).
+- **Rate Limiting**: Защита от перегрузки LLM и оборудования через `slowapi`.
+- **Credential Vault**: Безопасное хранение секретов (токенов, паролей) с использованием Argon2id и AES-256-GCM.
+- **CORS**: Строгий whitelist доменов фронтенда.
+- **Маскирование**: Чувствительные данные (токены, пароли) автоматически маскируются в логах (`***`).
+
+---
+
+## 🧪 Тестирование и Симуляция
+
+Проект покрыт Unit, Integration и E2E тестами. Встроенный **Simulation Mode** позволяет тестировать реакции агентов на аномалии без реального телескопа.
+
+Запуск тестов:
+
+```cmd
 run_tests.bat
-
-# Unit тесты
-pytest tests/unit -v
-
-# Integration тесты
-pytest tests/integration -v
-
-# E2E тесты (симуляция)
-pytest tests/e2e -v
 ```
+
+**Пример инжекта аномалии через API (в режиме симуляции):**
+
+```http
+POST /api/v1/simulation/inject-anomaly?anomaly_type=hfr_spike
+```
+
+_Ожидаемое поведение: Watcher детектирует аномалию -> Diagnostician находит причину -> Guardian/Strategist инициирует Autofocus через Trigger Emulator._
 
 ---
 
-## 📊 Примеры сценариев
+## 📂 Структура проекта (Кратко)
 
-### Сценарий 1: Детекция аномалии HFR
-
-```
-1. Watcher замечает рост HFR на 35% за 5 кадров
-2. Diagnostician анализирует корреляции → "Температурный дрейф фокуса"
-3. Guardian запускает автофокус через Trigger Emulator
-4. HFR возвращается к норме → решение помечено как CORRECT
-```
-
-### Сценарий 2: Критические погодные условия
-
-```
-1. Watcher детектирует ветер > 20 м/с
-2. Guardian выполняет EMERGENCY_PARK монтировки
-3. Публикуется CRITICAL ALERT на Frontend
-4. Mode Manager переводит систему в SAFE_AUTONOMOUS
-```
-
-### Сценарий 3: Post-mortem анализ
-
-```
-1. Auditor генерирует Session Digest после завершения сессии
-2. Digest индексируется в RAG для будущего обучения
-3. LLM создаёт расширенный отчёт с рекомендациями
-4. Copilot показывает рекомендации пользователю
-```
-
----
-
-## 🔗 Интеграции
-
-- **N.I.N.A. Advanced API**: Полное управление через REST/WebSocket
-- **Prometheus Exporter** (jewzaam): Метрики оборудования
-- **InfluxDB**: Time-series хранение метрик
-- **Qdrant**: Векторная база для RAG
-- **Ollama**: Локальные LLM модели
-- **Home Assistant**: Управление умным домом
-- **PHD2**: Гидирование через интеграцию
-
----
-
-## 📚 Документация
-
-- [N.I.N.A. API Reference](docs/nina_api_reference.md)
-- [OpenAPI Specification](config/nina_api_spec.yaml)
-- [Trigger Mapping](config/nina_trigger_mapping.json)
-
----
-
-## 🤝 Лицензия
-
-Проект разрабатывается для персонального использования в астрофотографии.
-
----
-
-## ⭐ Ключевые метрики проекта
-
-| Показатель               | Значение |
-| ------------------------ | -------- |
-| AI-агентов               | 10       |
-| File Watchers            | 11+      |
-| API Endpoints            | 50+      |
-| Поддерживаемых триггеров | 20+      |
-| Pre-flight gates         | 8        |
-| Тестовое покрытие        | >80%     |
-
----
-
-**N.I.N.A. AI Cortex** — _Ваш автономный помощник для идеальных астрофотографических сессий_ 🌠
-
-```
-
----
-
-Документация охватывает все ключевые аспекты проекта:
-- Архитектуру Multi-Agent Swarm
-- Ingestion/Execution слои
-- Систему безопасности и graceful degradation
-- Инструкции по установке и запуску
-- Примеры сценариев использования
+```text
+backend/app/
+├── agents/          # 10 AI-агентов, Orchestrator, LLM Client
+├── core/            # EventBus, Config, RAG, Metrics, ModeManager
+├── execution/       # HAL, Trigger Emulator, N.I.N.A. API Client
+├── ingestion/       # Watchers, Parsers (FITS, CSV), InfluxDB/Prometheus
+├── safety/          # Pre-flight gates
+├── security/        # Auth (JWT), Vault
+├── shadow_engine/   # Sequence Parser, State Tracker
+├── simulation/      # Fake N.I.N.A., Fake PHD2
+└── storage/         # Decision Audit (SQLite), Disk Monitor
 ```
