@@ -1,6 +1,13 @@
 """
 Auditor Agent — анализирует завершенные сессии, генерирует Session Digest, пополняет RAG.
 Отвечает за обучение системы на истории.
+
+ИСПРАВЛЕНО (audit P3 - устранение хардкода):
+- Все пороги quality score читаются из settings.auditor.quality_score
+- Все пороги рекомендаций читаются из settings.auditor.recommendations
+- Значения по умолчанию (gain, temperature, exposure) из settings.observatory_state
+- LLM параметры (max_tokens, temperature) из settings.auditor
+- Acceptance rate estimate из settings.auditor
 """
 
 import logging
@@ -13,6 +20,7 @@ from app.agents.base_agent import BaseAgent, AgentDecision, AgentContext
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
+from app.core.config import settings
 
 logger = logging.getLogger("AuditorAgent")
 
@@ -52,6 +60,10 @@ class AuditorAgent(BaseAgent):
     - Генерация рекомендаций для будущих сессий
     - Использование LLM для создания расширенных отчетов
 
+    ИСПРАВЛЕНО (audit P3):
+    - Все пороги и значения по умолчанию из конфигурации
+    - НОЛЬ захардкоженных магических чисел
+
     Trigger:
     - Событие SEQUENCE_STOPPED
     """
@@ -59,22 +71,60 @@ class AuditorAgent(BaseAgent):
     def __init__(self):
         super().__init__(name="Auditor", role="Post-Mortem Analysis")
 
+        # === ИСПРАВЛЕНО (P3): Все параметры из конфигурации ===
+        auditor_cfg = settings.auditor
+        obs_cfg = settings.observatory_state
+
+        # Quality Score пороги
+        self._qs = auditor_cfg.quality_score
+        self._base_score = self._qs.base_score
+
+        # Recommendations пороги
+        self._rec = auditor_cfg.recommendations
+
+        # LLM параметры
+        self._llm_max_tokens: int = auditor_cfg.llm_max_tokens
+        self._llm_temperature: float = auditor_cfg.llm_temperature
+
+        # Acceptance rate estimate (когда точные данные недоступны)
+        self._default_acceptance_rate: float = (
+            auditor_cfg.default_acceptance_rate_estimate
+        )
+
+        # Значения по умолчанию для метрик
+        self._default_gain: int = int(obs_cfg.default_gain)
+        self._default_temperature: float = obs_cfg.default_camera_temp
+        self._default_exposure: float = obs_cfg.default_exposure_time
+
         # История всех сессий (для выявления паттернов)
         self._session_history: List[SessionDigest] = []
+
+        logger.info("🔧 AuditorAgent initialized with config:")
+        logger.info(
+            f"   Quality score: base={self._base_score}, "
+            f"HFR high={self._qs.hfr_threshold_high}, "
+            f"HFR med={self._qs.hfr_threshold_medium}"
+        )
+        logger.info(
+            f"   Recommendations: HFR>{self._rec.hfr_warning_threshold}, "
+            f"RMS>{self._rec.rms_warning_threshold}, "
+            f"Wind>{self._rec.wind_warning_threshold}"
+        )
+        logger.info(
+            f"   LLM: max_tokens={self._llm_max_tokens}, "
+            f"temperature={self._llm_temperature}"
+        )
 
     async def initialize(self):
         """Инициализация агента аудита."""
         await super().initialize()
-
         # Подписываемся на событие завершения сессии
         event_bus.subscribe("SEQUENCE_STOPPED", self._on_sequence_stopped)
-
         logger.info("✅ Auditor Agent initialized")
 
     async def shutdown(self):
         """Корректное завершение работы агента."""
         event_bus.unsubscribe("SEQUENCE_STOPPED", self._on_sequence_stopped)
-
         await super().shutdown()
 
     async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
@@ -84,7 +134,6 @@ class AuditorAgent(BaseAgent):
         """
         # Генерируем Session Digest
         digest = await self._generate_session_digest()
-
         if digest:
             decision = AgentDecision(
                 agent=self.name,
@@ -96,18 +145,15 @@ class AuditorAgent(BaseAgent):
             )
             self.log_decision(decision)
             return decision
-
         return None
 
     async def execute(self, decision: AgentDecision) -> bool:
         """Выполняет индексацию Session Digest в RAG."""
         if decision.decision_type == "SESSION_DIGEST_GENERATED":
             digest_data = decision.outputs.get("digest", {})
-
             try:
                 # Индексируем в RAG
                 chunks_added = await rag_engine.add_session_digest(digest_data)
-
                 logger.info(f"✅ Session Digest indexed in RAG: {chunks_added} chunks")
 
                 # Сохраняем в историю
@@ -123,19 +169,15 @@ class AuditorAgent(BaseAgent):
                         "recommendations": digest.recommendations,
                     },
                 )
-
                 return True
-
             except Exception as e:
                 logger.error(f"Failed to index Session Digest: {e}")
                 return False
-
         return False
 
     async def _on_sequence_stopped(self, data: Dict[str, Any]) -> None:
         """Обработка события завершения сессии."""
         logger.info("📊 Sequence stopped, generating Session Digest...")
-
         # Запускаем генерацию Session Digest
         await self.analyze(
             AgentContext(
@@ -164,13 +206,16 @@ class AuditorAgent(BaseAgent):
             else "Unknown"
         )
         filter_name = metrics.get("filter", "Unknown")
-        exposure_time = metrics.get("exposure_time", 60.0)
-        gain = metrics.get("gain", 85)
-        temperature = metrics.get("camera_temp", -15.0)
+
+        # ИСПРАВЛЕНО (P3): Значения по умолчанию из конфигурации
+        exposure_time = metrics.get("exposure_time", self._default_exposure)
+        gain = metrics.get("gain", self._default_gain)
+        temperature = metrics.get("camera_temp", self._default_temperature)
 
         # Подсчитываем кадры
         frames_total = len(history.hfr)  # Примерная оценка
-        frames_accepted = int(frames_total * 0.9)  # Примерная оценка (90% acceptance)
+        # ИСПРАВЛЕНО (P3): acceptance rate из конфигурации
+        frames_accepted = int(frames_total * self._default_acceptance_rate)
 
         # Средние метрики
         avg_hfr = sum(history.hfr) / len(history.hfr) if history.hfr else None
@@ -194,12 +239,12 @@ class AuditorAgent(BaseAgent):
                     }
                 )
 
-        # Генерируем рекомендации
+        # Генерируем рекомендации (с порогами из конфигурации)
         recommendations = await self._generate_recommendations(
             avg_hfr, avg_fwhm, avg_rms_ra, avg_rms_dec, weather
         )
 
-        # Рассчитываем quality score
+        # Рассчитываем quality score (с порогами из конфигурации)
         quality_score = self._calculate_quality_score(
             avg_hfr,
             avg_fwhm,
@@ -225,13 +270,16 @@ class AuditorAgent(BaseAgent):
                 "avg_rms_dec": avg_rms_dec,
                 "problems": problems,
             }
-
             context = await self.get_rag_context(f"Сессия {target} {filter_name}")
 
+            # ИСПРАВЛЕНО (P3): LLM параметры из конфигурации
             detailed_report = await llm_client.generate_session_digest(
-                session_data=session_data, problems=problems, context=context
+                session_data=session_data,
+                problems=problems,
+                context=context,
+                max_tokens=self._llm_max_tokens,
+                temperature=self._llm_temperature,
             )
-
             if detailed_report:
                 logger.info("✨ Session Digest enhanced with LLM analysis")
 
@@ -264,34 +312,41 @@ class AuditorAgent(BaseAgent):
         avg_rms_dec: Optional[float],
         weather: Dict[str, Any],
     ) -> List[str]:
-        """Генерирует рекомендации для будущих сессий."""
+        """
+        Генерирует рекомендации для будущих сессий.
+
+        ИСПРАВЛЕНО (P3): Все пороги из settings.auditor.recommendations.
+        """
         recommendations = []
 
         # Рекомендации по HFR
-        if avg_hfr and avg_hfr > 2.5:
+        if avg_hfr and avg_hfr > self._rec.hfr_warning_threshold:
             recommendations.append(
-                f"Средний HFR {avg_hfr:.2f}px выше оптимального. "
+                f"Средний HFR {avg_hfr:.2f}px выше оптимального "
+                f"(порог: {self._rec.hfr_warning_threshold}px). "
                 "Рассмотрите более частые автофокусы."
             )
 
         # Рекомендации по RMS
-        if avg_rms_ra and avg_rms_ra > 1.5:
+        if avg_rms_ra and avg_rms_ra > self._rec.rms_warning_threshold:
             recommendations.append(
-                f'RMS по RA {avg_rms_ra:.2f}" высокий. '
+                f'RMS по RA {avg_rms_ra:.2f}" высокий '
+                f'(порог: {self._rec.rms_warning_threshold}"). '
                 "Проверьте балансировку монтировки и настройки гидирования."
             )
-
-        if avg_rms_dec and avg_rms_dec > 1.5:
+        if avg_rms_dec and avg_rms_dec > self._rec.rms_warning_threshold:
             recommendations.append(
-                f'RMS по Dec {avg_rms_dec:.2f}" высокий. '
+                f'RMS по Dec {avg_rms_dec:.2f}" высокий '
+                f'(порог: {self._rec.rms_warning_threshold}"). '
                 "Возможно требуется полярное выравнивание."
             )
 
         # Рекомендации по погоде
         wind_speed = weather.get("wind_speed")
-        if wind_speed and wind_speed > 10.0:
+        if wind_speed and wind_speed > self._rec.wind_warning_threshold:
             recommendations.append(
-                f"Средняя скорость ветра {wind_speed:.1f} м/с. "
+                f"Средняя скорость ветра {wind_speed:.1f} м/с "
+                f"(порог: {self._rec.wind_warning_threshold} м/с). "
                 "Избегайте съемки при сильном ветре или выбирайте подветренные цели."
             )
 
@@ -311,34 +366,48 @@ class AuditorAgent(BaseAgent):
         avg_rms_dec: Optional[float],
         acceptance_rate: float,
     ) -> float:
-        """Рассчитывает overall quality score (0-10)."""
-        score = 10.0
+        """
+        Рассчитывает overall quality score (0-10).
+
+        ИСПРАВЛЕНО (P3): Все пороги и штрафы из settings.auditor.quality_score.
+        - base_score: базовый балл (по умолчанию 10.0)
+        - hfr_threshold_high/medium: пороги для штрафов по HFR
+        - hfr_penalty_high/medium: размер штрафов
+        - fwhm_threshold_high/medium: пороги для штрафов по FWHM
+        - fwhm_penalty_high/medium: размер штрафов
+        - rms_threshold: порог для штрафов по RMS
+        - rms_penalty: размер штрафа
+        - acceptance_bonus/penalty_threshold: пороги бонусов/штрафов
+        - acceptance_bonus/penalty: размер бонусов/штрафов
+        """
+        qs = self._qs
+        score = self._base_score
 
         # Штраф за высокий HFR
         if avg_hfr:
-            if avg_hfr > 3.0:
-                score -= 2.0
-            elif avg_hfr > 2.5:
-                score -= 1.0
+            if avg_hfr > qs.hfr_threshold_high:
+                score -= qs.hfr_penalty_high
+            elif avg_hfr > qs.hfr_threshold_medium:
+                score -= qs.hfr_penalty_medium
 
         # Штраф за высокий FWHM
         if avg_fwhm:
-            if avg_fwhm > 4.0:
-                score -= 2.0
-            elif avg_fwhm > 3.0:
-                score -= 1.0
+            if avg_fwhm > qs.fwhm_threshold_high:
+                score -= qs.fwhm_penalty_high
+            elif avg_fwhm > qs.fwhm_threshold_medium:
+                score -= qs.fwhm_penalty_medium
 
         # Штраф за высокий RMS
-        if avg_rms_ra and avg_rms_ra > 1.5:
-            score -= 1.0
-        if avg_rms_dec and avg_rms_dec > 1.5:
-            score -= 1.0
+        if avg_rms_ra and avg_rms_ra > qs.rms_threshold:
+            score -= qs.rms_penalty
+        if avg_rms_dec and avg_rms_dec > qs.rms_threshold:
+            score -= qs.rms_penalty
 
-        # Бонус за высокий acceptance rate
-        if acceptance_rate > 0.95:
-            score += 1.0
-        elif acceptance_rate < 0.80:
-            score -= 1.0
+        # Бонус/штраф за acceptance rate
+        if acceptance_rate > qs.acceptance_bonus_threshold:
+            score += qs.acceptance_bonus
+        elif acceptance_rate < qs.acceptance_penalty_threshold:
+            score -= qs.acceptance_penalty
 
         return max(0.0, min(10.0, score))
 

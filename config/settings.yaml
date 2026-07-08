@@ -1,5 +1,5 @@
 # ============================================================================
-# N.I.N.A. AI Cortex — Конфигурация (ПОЛНАЯ ВЕРСИЯ)
+# N.I.N.A. AI Cortex — Конфигурация (ПОЛНАЯ ВЕРСИЯ v3.0)
 # ============================================================================
 # Все пути параметризированы. Система работает на любом ПК.
 # Переменные окружения подставляются через ${VAR_NAME}
@@ -14,42 +14,42 @@
 #   7.  home_assistant       — интеграция с умным домом
 #   8.  hal                  — Hardware Abstraction Layer
 #   9.  watchers             — настройки файловых вотчеров
-#   10. plugins_status       — статус плагинов N.I.N.A.
-#   11. logging              — настройки логирования
-#   12. cors                 — Cross-Origin Resource Sharing
-#   13. auth                 — аутентификация и авторизация
-#   14. security             — маскирование чувствительных данных
-#   15. thresholds           — пороговые значения для агентов
-#   16. data_sources         — выбор источников метрик
-#   17. decision_audit       — политика хранения решений
-#   18. nina_api_client      — HTTP-клиент для N.I.N.A. API
-#   19. execution            — Trigger Emulator параметры
-#   20. storage_disk_monitor — Disk Monitor параметры
-#   21. simulation           — Fake N.I.N.A. параметры
-#   22. simulation_phd2      — Fake PHD2 параметры
-#   23. auditor              — Auditor Agent параметры
-#   24. diagnostician        — Diagnostician Agent параметры
-#   25. copilot              — Copilot Agent параметры
-#   26. scheduler            — Scheduler Agent параметры
-#   27. strategist_extra     — Strategist Agent доп. параметры
-#   28. watcher_extra        — Watcher Agent доп. параметры
-#   29. embeddings           — Embeddings параметры
-#   30. mode_manager         — Mode Manager параметры
-#   31. rag_extra            — RAG Engine доп. параметры
-#   32. ws_broadcast_extra   — WS Broadcast доп. параметры
-#   33. observatory_state    — Observatory State параметры
-#   34. base_agent           — Base Agent параметры
-#   35. orchestrator_extra   — Orchestrator доп. параметры
-#   36. hal_extra            — HAL доп. параметры
-#   37. hocus_focus_parser   — Hocus Focus Parser параметры
-#   38. python_bridge_extra  — Python Bridge доп. параметры
-#   39. safety_interceptor_extra — Safety Interceptor доп. параметры
-#   40. preflight_extra      — Preflight доп. параметры
-#   41. websocket_client     — WebSocket Client параметры
-#   42. log_tailer           — Log Tailer параметры
-#   43. prometheus_extra     — Prometheus Scraper доп. параметры
-#   44. influxdb_extra       — InfluxDB Provider доп. параметры
-#   45. masters_auditor      — Masters Auditor параметры
+#  10.  plugins_status       — статус плагинов N.I.N.A.
+#  11.  logging              — настройки логирования
+#  12.  cors                 — Cross-Origin Resource Sharing
+#  13.  auth                 — аутентификация и авторизация
+#  14.  security             — маскирование чувствительных данных
+#  15.  thresholds           — пороговые значения для агентов
+#  16.  data_sources         — выбор источников метрик
+#  17.  decision_audit       — политика хранения решений
+#  18.  nina_api_client      — HTTP-клиент для N.I.N.A. API (Circuit Breaker, Retry)
+#  19.  execution            — Trigger Emulator (защищённые параметры, диапазоны)
+#  20.  storage_disk_monitor — Disk Monitor (пороги предупреждения)
+#  21.  simulation           — Fake N.I.N.A. (метрики, шум, аномалии)
+#  22.  simulation_phd2      — Fake PHD2 (метрики гидирования)
+#  23.  auditor              — Auditor Agent (quality scoring)
+#  24.  diagnostician        — Diagnostician Agent (корреляции)
+#  25.  copilot              — Copilot Agent (таймауты инструкций)
+#  26.  scheduler            — Scheduler Agent (scoring целей)
+#  27.  strategist_extra     — Strategist Agent (оптимизация)
+#  28.  watcher_extra        — Watcher Agent (детекция аномалий)
+#  29.  embeddings           — Embeddings (размерность, кэш)
+#  30.  mode_manager         — Mode Manager (health check)
+#  31.  rag_extra            — RAG Engine (чанки, поиск)
+#  32.  ws_broadcast_extra   — WS Broadcast (heartbeat)
+#  33.  observatory_state    — Observatory State (история, тренды)
+#  34.  base_agent           — Base Agent (логирование решений)
+#  35.  orchestrator_extra   — Orchestrator (очередь, память)
+#  36.  hal_extra            — HAL (default altitude)
+#  37.  hocus_focus_parser   — Hocus Focus (Z-Score, эксцентриситет)
+#  38.  python_bridge_extra  — Python Bridge (лимиты сообщений)
+#  39.  safety_interceptor_extra — Safety Interceptor (задержка shutdown)
+#  40.  preflight_extra      — Preflight (свежесть мастеров)
+#  41.  websocket_client     — WebSocket Client (reconnect, ping)
+#  42.  log_tailer           — Log Tailer (poll intervals)
+#  43.  prometheus_extra     — Prometheus Scraper (интервал, timeout)
+#  44.  influxdb_extra       — InfluxDB Provider (интервал, история)
+#  45.  masters_auditor      — Masters Auditor (прогресс-отчёты)
 # ============================================================================
 
 # ============================================================================
@@ -101,9 +101,9 @@ ws_broadcast:
 # ============================================================================
 ai_settings:
   ollama_host: "http://localhost:11434"
+  model_name: "gemma4:31b-cloud" # [DEPRECATED]
   primary_model: "gemma4:31b-cloud"
   fallback_model: "gemma4:e4b"
-  model_name: "gemma4:31b-cloud"  # [DEPRECATED]
   rag_db_path: "./data/vector_db"
   primary_timeout: 30.0
   fallback_timeout: 15.0
@@ -198,6 +198,10 @@ auth:
   rate_limit_per_minute: 120
   llm_rate_limit_per_minute: 20
   trigger_rate_limit_per_minute: 30
+  algorithm: "HS256"
+  jwt_token_length: 48
+  api_key_length: 32
+  min_secret_length: 32
   public_paths:
     - "/"
     - "/docs"
@@ -227,6 +231,7 @@ security:
     - "accesskey"
     - "secret_key"
     - "secretkey"
+  mask_value: "***"
 
 # ============================================================================
 # 15. ПОРОГОВЫЕ ЗНАЧЕНИЯ (thresholds)
@@ -272,6 +277,7 @@ thresholds:
     humidity_warning: 90.0
     rms_recalibration: 3.0
     temperature_alarm: 5.0
+    cloud_cover_critical: 95.0
 
 # ============================================================================
 # 16. ИСТОЧНИКИ ДАННЫХ (data_sources)
@@ -282,7 +288,7 @@ data_sources:
   metrics_poll_interval: 3.0
 
 # ============================================================================
-# 17. DECISION AUDIT (decision_audit)
+# 17. DECISION AUDIT TRAIL (decision_audit)
 # ============================================================================
 decision_audit:
   keep_last_days: 90
@@ -477,6 +483,7 @@ simulation_phd2:
 auditor:
   default_acceptance_rate_estimate: 0.90
   quality_score:
+    base_score: 10.0
     hfr_penalty_high: 2.0
     hfr_penalty_medium: 1.0
     hfr_threshold_high: 3.0
@@ -495,6 +502,8 @@ auditor:
     hfr_warning_threshold: 2.5
     rms_warning_threshold: 1.5
     wind_warning_threshold: 10.0
+  llm_max_tokens: 800
+  llm_temperature: 0.3
 
 # ============================================================================
 # 24. DIAGNOSTICIAN AGENT (diagnostician)
@@ -513,6 +522,12 @@ diagnostician:
     heuristic_wind_load: 0.75
     llm_boost: 0.15
     llm_max: 0.95
+    default_confidence: 0.5
+    unknown_root_cause: "Неизвестная причина"
+  llm_max_tokens: 400
+  llm_temperature: 0.2
+  similar_cases_top_k: 5
+  max_recommendations: 5
 
 # ============================================================================
 # 25. COPILOT AGENT (copilot)
@@ -523,6 +538,7 @@ copilot:
     two_point_alignment: 600
     oag_focus: 900
     filter_selector: 120
+  rag_max_tokens: 1000
 
 # ============================================================================
 # 26. SCHEDULER AGENT (scheduler)
@@ -532,13 +548,18 @@ scheduler:
   moon_avoidance_angle: 30.0
   scoring:
     priority_max_score: 40.0
+    priority_multiplier: 4.0
     altitude_max_score: 30.0
+    altitude_normalizer: 2.0
     moon_distance_max_score: 20.0
+    moon_distance_normalizer: 1.0
     progress_max_score: 10.0
     below_horizon_penalty: 50.0
     near_moon_penalty: 10.0
-    altitude_normalizer: 2.0
-    moon_distance_normalizer: 1.0
+    narrowband_moon_safe_filters:
+      - "Ha"
+      - "OIII"
+      - "SII"
   defaults:
     altitude: 45.0
     moon_distance: 90.0
@@ -556,6 +577,7 @@ strategist_extra:
     angle_threshold: 180
     windward_threshold: 90
     angle_complement: 360
+  trend_window: 10
 
 # ============================================================================
 # 28. WATCHER AGENT EXTRA (watcher_extra)
@@ -576,6 +598,7 @@ embeddings:
   cache_file: "./data/embeddings_cache.pkl"
   timeout: 30.0
   cache_save_interval: 100
+  model_name: "nomic-embed-text"
 
 # ============================================================================
 # 30. MODE MANAGER (mode_manager)
@@ -599,6 +622,7 @@ rag_extra:
     default_top_k: 10
     max_context_multiplier: 4
   embedding_cache_max_size: 10000
+  http_timeout: 30.0
 
 # ============================================================================
 # 32. WS BROADCAST EXTRA (ws_broadcast_extra)
@@ -614,6 +638,9 @@ observatory_state:
   source_timeout: 30.0
   max_active_alerts: 50
   ai_action_log_size: 1000
+  default_camera_temp: -15.0
+  default_exposure_time: 60.0
+  default_gain: 85
   trend_analysis:
     default_window: 10
     average_window: 20
@@ -708,257 +735,6 @@ influxdb_extra:
 
 # ============================================================================
 # 45. MASTERS AUDITOR (masters_auditor)
-# ============================================================================
-masters_auditor:
-  progress_report_interval: 50
-
-  # ============================================================================
-# 18. AUDITOR AGENT (auditor)
-# ============================================================================
-auditor:
-  quality_score:
-    base_score: 10.0
-    hfr_penalty_high: 2.0
-    hfr_penalty_medium: 1.0
-    hfr_threshold_high: 3.0
-    hfr_threshold_medium: 2.5
-    fwhm_penalty_high: 2.0
-    fwhm_penalty_medium: 1.0
-    fwhm_threshold_high: 4.0
-    fwhm_threshold_medium: 3.0
-    rms_penalty: 1.0
-    rms_threshold: 1.5
-    acceptance_bonus_threshold: 0.95
-    acceptance_penalty_threshold: 0.80
-    acceptance_bonus: 1.0
-    acceptance_penalty: 1.0
-    default_acceptance_rate_estimate: 0.90
-  recommendations:
-    hfr_warning_threshold: 2.5
-    rms_warning_threshold: 1.5
-    wind_warning_threshold: 10.0
-  llm_max_tokens: 800
-  llm_temperature: 0.3
-
-# ============================================================================
-# 19. DIAGNOSTICIAN AGENT (diagnostician)
-# ============================================================================
-diagnostician:
-  correlation_thresholds:
-    strong: 0.7
-    moderate: 0.5
-    weak: 0.3
-  min_sample_size: 10
-  confidence:
-    temperature_correlation: 0.85
-    wind_correlation: 0.80
-    rms_correlation: 0.75
-    heuristic_hfr_drift: 0.6
-    heuristic_wind_load: 0.75
-    llm_boost: 0.15
-    llm_max: 0.95
-    default_confidence: 0.5
-    unknown_root_cause: "Неизвестная причина"
-  llm_max_tokens: 400
-  llm_temperature: 0.2
-  similar_cases_top_k: 5
-  max_recommendations: 5
-
-# ============================================================================
-# 20. COPILOT AGENT (copilot)
-# ============================================================================
-copilot:
-  timeouts:
-    messagebox: 300
-    two_point_alignment: 600
-    oag_focus: 900
-    filter_selector: 120
-  rag_max_tokens: 1000
-
-# ============================================================================
-# 21. SCHEDULER AGENT (scheduler)
-# ============================================================================
-scheduler:
-  min_altitude: 30.0
-  moon_avoidance_angle: 30.0
-  scoring:
-    priority_max_score: 40.0
-    priority_multiplier: 4.0
-    altitude_max_score: 30.0
-    altitude_normalizer: 2.0
-    moon_distance_max_score: 20.0
-    moon_distance_normalizer: 1.0
-    progress_max_score: 10.0
-    below_horizon_penalty: 50.0
-    near_moon_penalty: 10.0
-    narrowband_moon_safe_filters:
-      - "Ha"
-      - "OIII"
-      - "SII"
-  defaults:
-    altitude: 45.0
-    moon_distance: 90.0
-
-# ============================================================================
-# 22. STRATEGIST AGENT EXTRA (strategist_extra)
-# ============================================================================
-strategist_extra:
-  exposure_limits:
-    min: 30.0
-    max: 300.0
-  exposure_change_threshold: 0.1
-  snr_low_threshold_ratio: 0.8
-  wind_analysis:
-    angle_threshold: 180
-    windward_threshold: 90
-    angle_complement: 360
-  trend_window: 10
-
-# ============================================================================
-# 23. EMBEDDINGS (embeddings)
-# ============================================================================
-embeddings:
-  dimension: 768
-  cache_file: "./data/embeddings_cache.pkl"
-  timeout: 30.0
-  cache_save_interval: 100
-  model_name: "nomic-embed-text"
-
-# ============================================================================
-# 24. MODE MANAGER (mode_manager)
-# ============================================================================
-mode_manager:
-  health_check_interval: 30
-  error_retry_delay: 10
-  health_check_timeout: 5.0
-  status_log_interval: 300
-
-# ============================================================================
-# 25. RAG ENGINE EXTRA (rag_extra)
-# ============================================================================
-rag_extra:
-  chunk_sizes:
-    documentation: 1000
-    session: 500
-    error_log: 300
-  chunk_overlap_ratio: 0.25
-  search:
-    default_top_k: 10
-    max_context_multiplier: 4
-  embedding_cache_max_size: 10000
-  http_timeout: 30.0
-
-# ============================================================================
-# 26. WS BROADCAST EXTRA (ws_broadcast_extra)
-# ============================================================================
-ws_broadcast_extra:
-  heartbeat_interval: 30
-
-# ============================================================================
-# 27. OBSERVATORY STATE (observatory_state)
-# ============================================================================
-observatory_state:
-  max_history_points: 100
-  source_timeout: 30.0
-  max_active_alerts: 50
-  ai_action_log_size: 1000
-  default_camera_temp: -15.0
-  default_exposure_time: 60.0
-  default_gain: 85
-  trend_analysis:
-    default_window: 10
-    average_window: 20
-    std_window: 20
-    min_points_for_std: 3
-    degradation_threshold_percent: 20.0
-    baseline_slice_start: -20
-    baseline_slice_end: -10
-    recent_slice: -10
-
-# ============================================================================
-# 28. BASE AGENT (base_agent)
-# ============================================================================
-base_agent:
-  decision_log_max_size: 1000
-  recent_decisions_default: 10
-
-# ============================================================================
-# 29. ORCHESTRATOR EXTRA (orchestrator_extra)
-# ============================================================================
-orchestrator_extra:
-  decision_queue_timeout: 1.0
-  error_retry_delay: 1.0
-  decisions_memory_limit: 1000
-
-# ============================================================================
-# 30. HAL EXTRA (hal_extra)
-# ============================================================================
-hal_extra:
-  default_altitude: 90.0
-
-# ============================================================================
-# 31. HOCUS FOCUS PARSER (hocus_focus_parser)
-# ============================================================================
-hocus_focus_parser:
-  z_threshold: 3.0
-  eccentricity_threshold: 0.85
-
-# ============================================================================
-# 32. PYTHON BRIDGE EXTRA (python_bridge_extra)
-# ============================================================================
-python_bridge_extra:
-  max_message_length: 500
-  max_log_length: 1000
-
-# ============================================================================
-# 33. SAFETY INTERCEPTOR EXTRA (safety_interceptor_extra)
-# ============================================================================
-safety_interceptor_extra:
-  shutdown_delay_minutes: 10
-
-# ============================================================================
-# 34. PREFLIGHT EXTRA (preflight_extra)
-# ============================================================================
-preflight_extra:
-  freshness_days:
-    BIAS: 90
-    DARK: 30
-    FLAT: 7
-
-# ============================================================================
-# 35. WEBSOCKET CLIENT (websocket_client)
-# ============================================================================
-websocket_client:
-  reconnect_delay: 5.0
-  ping_interval: 20
-  ping_timeout: 10
-
-# ============================================================================
-# 36. LOG TAILER (log_tailer)
-# ============================================================================
-log_tailer:
-  poll_interval: 0.5
-  rotation_check_interval: 2.0
-
-# ============================================================================
-# 37. PROMETHEUS EXTRA (prometheus_extra)
-# ============================================================================
-prometheus_extra:
-  interval_seconds: 3.0
-  timeout: 5.0
-  error_log_interval_minutes: 1
-
-# ============================================================================
-# 38. INFLUXDB EXTRA (influxdb_extra)
-# ============================================================================
-influxdb_extra:
-  query_interval: 3.0
-  error_log_interval_minutes: 1
-  history_max_points: 100
-  progress_report_interval: 20
-
-# ============================================================================
-# 39. MASTERS AUDITOR (masters_auditor)
 # ============================================================================
 masters_auditor:
   progress_report_interval: 50
