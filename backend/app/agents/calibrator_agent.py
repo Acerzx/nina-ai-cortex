@@ -318,3 +318,66 @@ class CalibratorAgent(BaseAgent):
                     recommendation="Мастер найден (дата не указана)",
                 )
         return None
+
+    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
+        """Проверяет калибровки для текущих параметров съемки."""
+        # Делегируем в _make_decision через Template Method
+        return await self._make_decision(context)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        checks = await self._check_all_calibrations()
+        stale_calibrations = [c for c in checks if not c.is_fresh]
+
+        if stale_calibrations:
+            return AgentDecision(
+                agent=self.name,
+                decision_type="CALIBRATION_STALE",
+                inputs={"stale_count": len(stale_calibrations)},
+                outputs={"checks": [c.model_dump() for c in checks]},
+                rationale=(
+                    f"Обнаружено {len(stale_calibrations)} устаревших калибровок"
+                ),
+                confidence=1.0,
+            )
+        return None
+
+    async def execute(self, decision: AgentDecision) -> bool:
+        """Выполняет действия по обновлению калибровок."""
+        # Делегируем в _perform_action через Template Method
+        return await self._perform_action(decision)
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        if decision.decision_type == "CALIBRATION_STALE":
+            checks = decision.outputs.get("checks", [])
+
+            for check_data in checks:
+                check = CalibrationCheck(**check_data)
+                if not check.is_fresh:
+                    # Проверяем throttling перед публикацией
+                    alert_key = f"{check.master_type}_{check.recommendation}"
+                    if not self._is_alert_in_cooldown(alert_key):
+                        await event_bus.publish(
+                            "ALERT",
+                            {
+                                "level": "WARNING",
+                                "message": (
+                                    f"Калибровка {check.master_type} "
+                                    f"устарела: {check.recommendation}"
+                                ),
+                                "agent": self.name,
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        )
+                        self._recent_alerts[alert_key] = datetime.now()
+
+            return True
+
+        return False

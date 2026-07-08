@@ -313,3 +313,39 @@ class GuardianAgent(BaseAgent):
     async def handle_critical_alert(self, data: Dict[str, Any]) -> None:
         """Обработка критического алерта (вызывается Orchestrator'ом)."""
         await self._handle_critical_alert(data)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста безопасности.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        # Проверяем критические условия
+        if await self._check_critical_conditions():
+            return AgentDecision(
+                agent=self.name,
+                decision_type="EMERGENCY_PARK",
+                inputs={"reason": "Critical safety conditions detected"},
+                outputs={"action": "park_mount"},
+                rationale="Критические условия безопасности - необходима немедленная парковка",
+                confidence=1.0,
+            )
+
+        return None
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения безопасности.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        if decision.decision_type == "EMERGENCY_PARK":
+            return await self._emergency_park()
+        elif decision.decision_type == "TRIGGER_AUTOFOCUS":
+            return await self._trigger_autofocus(
+                decision.inputs.get("reason", "AI decision")
+            )
+        elif decision.decision_type == "TRIGGER_DITHER":
+            return await self._trigger_dither(
+                decision.inputs.get("reason", "AI decision")
+            )
+
+        return False

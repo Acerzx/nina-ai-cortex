@@ -96,7 +96,7 @@ class WatcherManager:
         # 4. Shadow Engine (парсинг Sequence.json)
         logger.info("📖 Parsing Sequence.json for Shadow Engine...")
         parser = SequenceParser()
-        graph = parser.parse()
+        graph = await parser.parse()
         state_tracker.set_shadow_graph(graph)
 
         # 5. File Watchers (Передаем registry через DI)

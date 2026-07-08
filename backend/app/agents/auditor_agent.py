@@ -345,3 +345,70 @@ class AuditorAgent(BaseAgent):
     async def generate_session_digest(self, data: Dict[str, Any]) -> None:
         """Генерирует Session Digest (вызывается Orchestrator'ом)."""
         await self._on_sequence_stopped(data)
+
+    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        Анализирует завершенную сессию.
+        Вызывается Orchestrator'ом при завершении сессии.
+        """
+        # Делегируем в _make_decision через Template Method
+        return await self._make_decision(context)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        # Генерируем Session Digest
+        digest = await self._generate_session_digest()
+
+        if digest:
+            return AgentDecision(
+                agent=self.name,
+                decision_type="SESSION_DIGEST_GENERATED",
+                inputs={"session_id": digest.session_id},
+                outputs={"digest": digest.model_dump()},
+                rationale=f"Session Digest generated for {digest.target}",
+                confidence=1.0,
+            )
+        return None
+
+    async def execute(self, decision: AgentDecision) -> bool:
+        """Выполняет индексацию Session Digest в RAG."""
+        # Делегируем в _perform_action через Template Method
+        return await self._perform_action(decision)
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        if decision.decision_type == "SESSION_DIGEST_GENERATED":
+            digest_data = decision.outputs.get("digest", {})
+
+            try:
+                # Индексируем в RAG
+                chunks_added = await rag_engine.add_session_digest(digest_data)
+                logger.info(f"✅ Session Digest indexed in RAG: {chunks_added} chunks")
+
+                # Сохраняем в историю
+                digest = SessionDigest(**digest_data)
+                self._session_history.append(digest)
+
+                # Публикуем событие для UI
+                await event_bus.publish(
+                    "SESSION_DIGEST_READY",
+                    {
+                        "session_id": digest.session_id,
+                        "quality_score": digest.quality_score,
+                        "recommendations": digest.recommendations,
+                    },
+                )
+
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to index Session Digest: {e}")
+                return False
+
+        return False

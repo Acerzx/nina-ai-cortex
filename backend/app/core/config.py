@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
 
 logger = logging.getLogger("Config")
 
@@ -351,6 +352,9 @@ def load_settings() -> Settings:
     """
     Загружает settings.yaml и накладывает переменные окружения.
     Возвращает валидированный Settings объект.
+    ИСПРАВЛЕНО (audit 8.1): добавлена валидация критических путей.
+    ИСПРАВЛЕНО: явная загрузка .env через python-dotenv ДО создания Settings,
+    чтобы os.getenv() работал в field_validator.
     """
     config_path = (
         Path(__file__).resolve().parent.parent.parent.parent
@@ -362,13 +366,35 @@ def load_settings() -> Settings:
         logger.error(f"❌ Configuration file not found: {config_path}")
         raise FileNotFoundError(f"Configuration file not found at {config_path}")
 
+    # ИСПРАВЛЕНО: Загружаем .env в os.environ ДО создания Settings.
+    # pydantic-settings читает .env только для полей модели,
+    # но field_validator использует os.getenv(), который не знает о .env.
+    # Ищем .env в backend/ директории
+    backend_dir = Path(__file__).resolve().parent.parent.parent
+    env_path = backend_dir / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+        logger.info(f"✅ Loaded environment from {env_path}")
+    else:
+        # Пробуем корень проекта
+        root_env = backend_dir.parent / ".env"
+        if root_env.exists():
+            load_dotenv(root_env, override=False)
+            logger.info(f"✅ Loaded environment from {root_env}")
+        else:
+            logger.warning(
+                "⚠️ .env file not found. "
+                f"Searched: {env_path}, {root_env}. "
+                "Using OS environment variables only."
+            )
+
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             yaml_data = yaml.safe_load(f)
 
         settings_obj = Settings(**yaml_data)
 
-        # Валидация критических путей
+        # ИСПРАВЛЕНО (audit 8.1): Валидация критических путей
         _validate_critical_paths(settings_obj)
 
         logger.info(f"✅ Configuration loaded from {config_path}")

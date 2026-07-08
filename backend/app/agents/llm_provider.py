@@ -22,6 +22,9 @@ from datetime import datetime
 import httpx
 from pydantic import BaseModel, Field
 
+# ← ДОБАВЬТЕ ЭТУ СТРОКУ:
+from app.core.config import settings
+
 logger = logging.getLogger("LLMProvider")
 
 
@@ -94,12 +97,12 @@ class LLMProvider:
     def _load_config(self) -> LLMConfig:
         """Загружает конфигурацию из переменных окружения."""
         return LLMConfig(
-            ollama_host=os.getenv("OLLAMA_HOST", app_settings.ai_settings.ollama_host),
+            ollama_host=os.getenv("OLLAMA_HOST", settings.ai_settings.ollama_host),
             primary_model=os.getenv(
-                "LLM_PRIMARY_MODEL", app_settings.ai_settings.primary_model
+                "LLM_PRIMARY_MODEL", settings.ai_settings.primary_model
             ),
             fallback_model=os.getenv(
-                "LLM_FALLBACK_MODEL", app_settings.ai_settings.fallback_model
+                "LLM_FALLBACK_MODEL", settings.ai_settings.fallback_model
             ),
             primary_timeout=float(os.getenv("LLM_PRIMARY_TIMEOUT", "30.0")),
             fallback_timeout=float(os.getenv("LLM_FALLBACK_TIMEOUT", "15.0")),

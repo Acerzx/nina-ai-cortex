@@ -495,3 +495,58 @@ class DiagnosticianAgent(BaseAgent):
     async def analyze_warning(self, data: Dict[str, Any]) -> None:
         """Анализирует предупреждение (вызывается Orchestrator'ом)."""
         await self._on_alert(data)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста.
+        Делегирует существующему analyze() логике.
+        """
+        active_alerts = observatory_state.active_alerts
+        if not active_alerts:
+            return None
+
+        latest_alert = active_alerts[-1]
+        alert_context = latest_alert.get("context", {})
+
+        analysis = await self._perform_root_cause_analysis(
+            problem=latest_alert.get("message", "Unknown problem"),
+            context=alert_context,
+        )
+
+        if analysis:
+            return AgentDecision(
+                agent=self.name,
+                decision_type="ROOT_CAUSE_IDENTIFIED",
+                inputs={"problem": analysis.problem, "context": alert_context},
+                outputs={
+                    "root_cause": analysis.root_cause,
+                    "confidence": analysis.confidence,
+                    "recommended_actions": analysis.recommended_actions,
+                },
+                rationale=f"Root cause identified: {analysis.root_cause}",
+                confidence=analysis.confidence,
+            )
+        return None
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения.
+        Делегирует существующему execute() логике.
+        """
+        if decision.decision_type == "ROOT_CAUSE_IDENTIFIED":
+            root_cause = decision.outputs.get("root_cause", "")
+            recommended_actions = decision.outputs.get("recommended_actions", [])
+
+            await event_bus.publish(
+                "DIAGNOSTIC_RECOMMENDATION",
+                {
+                    "root_cause": root_cause,
+                    "confidence": decision.confidence,
+                    "recommended_actions": recommended_actions,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            logger.info(f"🔍 Diagnostic recommendation: {root_cause}")
+            logger.info(f"   Recommended actions: {recommended_actions}")
+            return True
+        return False

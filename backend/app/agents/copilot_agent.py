@@ -292,3 +292,56 @@ class CopilotAgent(BaseAgent):
             return await self._generate_filter_selector_guide()
 
         return None
+
+    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        Анализирует текущий шаг и генерирует инструкцию.
+        """
+        # Делегируем в _make_decision через Template Method
+        return await self._make_decision(context)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        sequence_state = observatory_state.current_metrics.get("sequence", {})
+
+        # Проверяем, есть ли активный MessageBox
+        if observatory_state.current_metrics.get("is_message_box_active"):
+            guide = await self._generate_messagebox_guide()
+
+            if guide:
+                return AgentDecision(
+                    agent=self.name,
+                    decision_type="INTERACTIVE_GUIDE_GENERATED",
+                    inputs={"step": "MessageBox"},
+                    outputs={"guide": guide.model_dump()},
+                    rationale="Сгенерирована инструкция для MessageBox",
+                    confidence=0.95,
+                )
+
+        return None
+
+    async def execute(self, decision: AgentDecision) -> bool:
+        """Выполняет принятое решение (публикует инструкцию для UI)."""
+        # Делегируем в _perform_action через Template Method
+        return await self._perform_action(decision)
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        if decision.decision_type == "INTERACTIVE_GUIDE_GENERATED":
+            guide_data = decision.outputs.get("guide", {})
+
+            # Публикуем инструкцию для Frontend
+            await event_bus.publish(
+                "COPILOT_GUIDE_READY",
+                {"guide": guide_data, "timestamp": datetime.now().isoformat()},
+            )
+
+            return True
+
+        return False

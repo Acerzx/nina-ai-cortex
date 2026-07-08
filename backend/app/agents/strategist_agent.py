@@ -494,3 +494,67 @@ class StrategistAgent(BaseAgent):
         last_time = datetime.fromisoformat(last_change["timestamp"])
         elapsed = (datetime.now() - last_time).total_seconds()
         return elapsed < self._min_interval_between_changes
+
+    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        Анализирует контекст и предлагает оптимизации.
+        Вызывается Orchestrator'ом при необходимости.
+        """
+        # Делегируем в _make_decision через Template Method
+        return await self._make_decision(context)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        proposals = []
+
+        # 1. Анализ SNR и расчет оптимальной экспозиции
+        snr_proposal = await self._analyze_snr_and_exposure()
+        if snr_proposal:
+            proposals.append(snr_proposal)
+
+        # 2. Анализ текущих целей и погодных условий
+        target_proposal = await self._analyze_target_suitability()
+        if target_proposal:
+            proposals.append(target_proposal)
+
+        # 3. Анализ интервала автофокуса
+        autofocus_proposal = await self._analyze_autofocus_interval()
+        if autofocus_proposal:
+            proposals.append(autofocus_proposal)
+
+        if proposals:
+            return AgentDecision(
+                agent=self.name,
+                decision_type="OPTIMIZATION_PROPOSED",
+                inputs={"proposals_count": len(proposals)},
+                outputs={"proposals": [p.model_dump() for p in proposals]},
+                rationale=f"Предложено {len(proposals)} оптимизаций",
+                confidence=max(p.confidence for p in proposals),
+            )
+        return None
+
+    async def execute(self, decision: AgentDecision) -> bool:
+        """Выполняет принятые оптимизации."""
+        # Делегируем в _perform_action через Template Method
+        return await self._perform_action(decision)
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        if decision.decision_type == "OPTIMIZATION_PROPOSED":
+            proposals = decision.outputs.get("proposals", [])
+            success_count = 0
+
+            for proposal_data in proposals:
+                proposal = OptimizationProposal(**proposal_data)
+                success = await self._apply_optimization(proposal)
+                if success:
+                    success_count += 1
+
+            return success_count > 0
+        return False

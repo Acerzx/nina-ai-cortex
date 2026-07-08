@@ -365,3 +365,62 @@ class SchedulerAgent(BaseAgent):
     async def on_sequence_started(self, data: Dict[str, Any]) -> None:
         """Обработка начала секвенсора (вызывается Orchestrator'ом)."""
         await self._on_sequence_started(data)
+
+    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        Строит или обновляет план на ночь.
+        """
+        # Делегируем в _make_decision через Template Method
+        return await self._make_decision(context)
+
+    async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
+        """
+        HOOK: Принимает решение на основе контекста.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        # Получаем доступные цели
+        available_targets = await self._get_available_targets()
+
+        if not available_targets:
+            logger.warning("No targets available for planning")
+            return None
+
+        # Строим план
+        plan = await self._build_night_plan(available_targets)
+
+        if plan:
+            self._current_plan = plan
+
+            return AgentDecision(
+                agent=self.name,
+                decision_type="NIGHT_PLAN_CREATED",
+                inputs={"targets_count": len(available_targets)},
+                outputs={"plan": plan.model_dump()},
+                rationale=f"План на ночь создан: {len(plan.targets)} целей",
+                confidence=0.95,
+            )
+
+        return None
+
+    async def execute(self, decision: AgentDecision) -> bool:
+        """Выполняет план (обновляет Dynamic Sequencer)."""
+        # Делегируем в _perform_action через Template Method
+        return await self._perform_action(decision)
+
+    async def _perform_action(self, decision: AgentDecision) -> bool:
+        """
+        HOOK: Выполняет действие решения.
+        Реализация абстрактного метода из BaseAgent.
+        """
+        if decision.decision_type == "NIGHT_PLAN_CREATED":
+            plan_data = decision.outputs.get("plan", {})
+
+            # Обновляем Dynamic Sequencer с планом
+            success = await self._apply_plan_to_dynamic_sequencer(plan_data)
+
+            if success:
+                logger.info("✅ Night plan applied to Dynamic Sequencer")
+
+            return success
+
+        return False

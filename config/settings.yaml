@@ -26,6 +26,7 @@ network:
 # 3. INFLUXDB
 influxdb:
   url: "http://localhost:8086"
+  # ИСПРАВЛЕНО: используем переменную окружения вместо захардкоженного токена
   token: "${INFLUXDB_TOKEN}"
   org: "observatory"
   bucket: "nina_telemetry"

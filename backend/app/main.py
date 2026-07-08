@@ -92,8 +92,11 @@ copilot_agent = CopilotAgent()
 # EVENT BUS METRICS SUBSCRIBERS
 # ============================================================================
 async def _on_event_bus_event(event_type: str, data: Dict[str, Any]):
-    """Автоматический сбор метрик из EventBus."""
-    cortex_metrics.events_total.labels(event_type=event_type).inc()
+    """
+    Автоматический сбор метрик из EventBus.
+    ИСПРАВЛЕНО: метрики вызываются через inc(**labels), а не .labels().inc()
+    """
+    await cortex_metrics.events_total.inc(event_type=event_type)
 
 
 async def _on_decision_made(data: Dict[str, Any]):
@@ -101,10 +104,10 @@ async def _on_decision_made(data: Dict[str, Any]):
     agent = data.get("agent", "unknown")
     decision_type = data.get("decision_type", "unknown")
     confidence = data.get("confidence", 0.5)
-    cortex_metrics.decisions_total.labels(
+    await cortex_metrics.decisions_total.inc(
         agent=agent, decision_type=decision_type, outcome="pending"
-    ).inc()
-    cortex_metrics.decision_confidence.labels(agent=agent).observe(confidence)
+    )
+    await cortex_metrics.decision_confidence.observe(confidence, agent=agent)
 
 
 async def _on_trigger_fired(data: Dict[str, Any]):
@@ -112,10 +115,10 @@ async def _on_trigger_fired(data: Dict[str, Any]):
     trigger_name = data.get("trigger", "unknown")
     status = data.get("status", "unknown")
     duration = data.get("duration_seconds", 0.0)
-    cortex_metrics.triggers_fired.labels(trigger_name=trigger_name, status=status).inc()
+    await cortex_metrics.triggers_fired.inc(trigger_name=trigger_name, status=status)
     if duration > 0:
-        cortex_metrics.trigger_duration.labels(trigger_name=trigger_name).observe(
-            duration
+        await cortex_metrics.trigger_duration.observe(
+            duration, trigger_name=trigger_name
         )
 
 
@@ -126,12 +129,12 @@ async def _on_llm_response(data: Dict[str, Any]):
     fallback = "true" if data.get("from_fallback", False) else "false"
     duration = data.get("duration_seconds", 0.0)
     tokens = data.get("tokens_used", 0)
-    cortex_metrics.llm_requests_total.labels(
+    await cortex_metrics.llm_requests_total.inc(
         model=model, status=status, fallback=fallback
-    ).inc()
-    cortex_metrics.llm_request_duration.labels(model=model).observe(duration)
+    )
+    await cortex_metrics.llm_request_duration.observe(duration, model=model)
     if tokens > 0:
-        cortex_metrics.llm_tokens_used.labels(model=model).inc(tokens)
+        await cortex_metrics.llm_tokens_used.inc(tokens, model=model)
 
 
 # ============================================================================
@@ -441,33 +444,36 @@ async def api_root():
 # PROMETHEUS /metrics ENDPOINT
 # ============================================================================
 @app.get("/metrics", tags=["Observability"], include_in_schema=False)
-async def prometheus_metrics():
+async def prometheus_metrics(request: Request):
     """Prometheus exposition format endpoint."""
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
 
-    cortex_metrics.active_ws_connections.set(ws_stats.get("total_connections", 0))
-    cortex_metrics.sequence_running.set(1 if state_tracker.state.is_running else 0)
-    cortex_metrics.flat_mode_active.set(1 if state_tracker.state.is_flat_mode else 0)
-    cortex_metrics.llm_available.labels(model="primary").set(
-        1 if llm_client.is_available() else 0
+    # ИСПРАВЛЕНО: set_sync() вместо set() для синхронного контекста
+    cortex_metrics.active_ws_connections.set_sync(ws_stats.get("total_connections", 0))
+    cortex_metrics.sequence_running.set_sync(1 if state_tracker.state.is_running else 0)
+    cortex_metrics.flat_mode_active.set_sync(
+        1 if state_tracker.state.is_flat_mode else 0
+    )
+    cortex_metrics.llm_available.set_sync(
+        1 if llm_client.is_available() else 0, model="primary"
     )
 
     if "points_count" in rag_stats:
-        cortex_metrics.rag_documents_total.set(rag_stats["points_count"])
+        cortex_metrics.rag_documents_total.set_sync(rag_stats["points_count"])
 
     mode_value = {"manual": 0, "safe": 1, "full_ai": 2, "simulation": 3}.get(
         mode_manager.current_mode.value, -1
     )
-    cortex_metrics.operation_mode.set(mode_value)
+    cortex_metrics.operation_mode.set_sync(mode_value)
 
     safety_value = {"SAFE": 0, "UNSAFE": 1, "UNKNOWN": -1}.get(
         observatory_state.safety_status, -1
     )
-    cortex_metrics.safety_status.set(safety_value)
+    cortex_metrics.safety_status.set_sync(safety_value)
 
-    cortex_metrics.watchers_active.set(len(watcher_manager.watchers))
-    cortex_metrics.agents_active.set(len(orchestrator.agents))
+    cortex_metrics.watchers_active.set_sync(len(watcher_manager.watchers))
+    cortex_metrics.agents_active.set_sync(len(orchestrator.agents))
 
     output = cortex_metrics.expose()
     return Response(content=output, media_type="text/plain; version=0.0.4")

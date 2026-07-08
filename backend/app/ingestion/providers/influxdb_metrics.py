@@ -162,9 +162,8 @@ class InfluxDBMetricsProvider:
         )
 
     async def stop(self):
-        """Останавливает provider."""
+        """Останавливает provider и корректно закрывает клиент."""
         self._running = False
-
         if self._task:
             self._task.cancel()
             try:
@@ -173,7 +172,7 @@ class InfluxDBMetricsProvider:
                 pass
 
         # ИСПРАВЛЕНО: Гарантированное закрытие клиента
-        if self._client:
+        if self._client is not None:
             try:
                 await self._client.close()
                 logger.info("✅ InfluxDB client closed")
@@ -196,7 +195,6 @@ class InfluxDBMetricsProvider:
 
                 # 1. Запрос текущих метрик
                 metrics = await self._fetch_current_metrics()
-
                 if metrics:
                     # Сбрасываем счетчик ошибок при успехе
                     if self._consecutive_errors > 0:
@@ -206,8 +204,7 @@ class InfluxDBMetricsProvider:
                         )
                         self._consecutive_errors = 0
                         self._last_error_time = None
-
-                    self._successful_queries += 1
+                        self._successful_queries += 1
 
                     # Публикуем метрики в EventBus
                     await event_bus.publish("INFLUXDB_UPDATE", metrics)
@@ -231,16 +228,38 @@ class InfluxDBMetricsProvider:
             await asyncio.sleep(self.query_interval)
 
     async def _try_reconnect(self):
-        """Пытается переподключиться к InfluxDB."""
+        """
+        Пытается переподключиться к InfluxDB.
+        ИСПРАВЛЕНО: Корректно закрывает старый клиент перед созданием нового,
+        предотвращая утечку aiohttp соединений.
+        """
+        # === Шаг 1: Закрываем старый клиент, если он существует ===
+        if self._client is not None:
+            try:
+                await self._client.close()
+                logger.debug("Old InfluxDB client closed before reconnect")
+            except Exception as e:
+                logger.debug(f"Error closing old InfluxDB client: {e}")
+            finally:
+                self._client = None
+
+        # === Шаг 2: Создаём новый клиент и проверяем подключение ===
         try:
             logger.info("🔄 Attempting to reconnect to InfluxDB...")
-            self._client = InfluxDBClientAsync(
+            new_client = InfluxDBClientAsync(
                 url=self.url, token=self.token, org=self.org
             )
-            ready = await self._client.ping()
+            ready = await new_client.ping()
             if ready:
+                self._client = new_client
                 logger.info("✅ Reconnected to InfluxDB successfully")
             else:
+                # Ping не прошёл — закрываем только что созданный клиент
+                try:
+                    await new_client.close()
+                except Exception:
+                    pass
+                logger.warning("⚠️ InfluxDB ping returned False after reconnect")
                 self._client = None
         except Exception as e:
             logger.debug(f"Reconnect failed: {e}")
