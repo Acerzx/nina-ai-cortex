@@ -1,192 +1,151 @@
 # ============================================================================
-# N.I.N.A. AI Cortex — Конфигурация
+# N.I.N.A. AI Cortex — Конфигурация (ПОЛНАЯ ВЕРСИЯ)
 # ============================================================================
 # Все пути параметризированы. Система работает на любом ПК.
 # Переменные окружения подставляются через ${VAR_NAME}
 #
 # Файл разделён на секции:
-#   1. nina_environment — пути к файлам N.I.N.A.
-#   2. network          — сетевые подключения
-#   3. influxdb         — time-series БД для метрик
-#   4. qdrant           — векторная БД для RAG
-#   5. ws_broadcast     — WebSocket для Frontend
-#   6. ai_settings      — LLM и embeddings
-#   7. home_assistant   — интеграция с умным домом
-#   8. hal              — Hardware Abstraction Layer
-#   9. watchers         — настройки файловых вотчеров
-#  10. plugins_status   — статус плагинов N.I.N.A.
-#  11. logging          — настройки логирования
-#  12. cors             — Cross-Origin Resource Sharing
-#  13. auth             — аутентификация и авторизация
-#  14. security         — маскирование чувствительных данных
-#  15. thresholds       — пороговые значения для агентов
-#  16. data_sources     — выбор источников метрик
-#  17. decision_audit   — политика хранения решений
+#   1.  nina_environment     — пути к файлам N.I.N.A.
+#   2.  network              — сетевые подключения
+#   3.  influxdb             — time-series БД для метрик
+#   4.  qdrant               — векторная БД для RAG
+#   5.  ws_broadcast         — WebSocket для Frontend
+#   6.  ai_settings          — LLM и embeddings
+#   7.  home_assistant       — интеграция с умным домом
+#   8.  hal                  — Hardware Abstraction Layer
+#   9.  watchers             — настройки файловых вотчеров
+#   10. plugins_status       — статус плагинов N.I.N.A.
+#   11. logging              — настройки логирования
+#   12. cors                 — Cross-Origin Resource Sharing
+#   13. auth                 — аутентификация и авторизация
+#   14. security             — маскирование чувствительных данных
+#   15. thresholds           — пороговые значения для агентов
+#   16. data_sources         — выбор источников метрик
+#   17. decision_audit       — политика хранения решений
+#   18. nina_api_client      — HTTP-клиент для N.I.N.A. API
+#   19. execution            — Trigger Emulator параметры
+#   20. storage_disk_monitor — Disk Monitor параметры
+#   21. simulation           — Fake N.I.N.A. параметры
+#   22. simulation_phd2      — Fake PHD2 параметры
+#   23. auditor              — Auditor Agent параметры
+#   24. diagnostician        — Diagnostician Agent параметры
+#   25. copilot              — Copilot Agent параметры
+#   26. scheduler            — Scheduler Agent параметры
+#   27. strategist_extra     — Strategist Agent доп. параметры
+#   28. watcher_extra        — Watcher Agent доп. параметры
+#   29. embeddings           — Embeddings параметры
+#   30. mode_manager         — Mode Manager параметры
+#   31. rag_extra            — RAG Engine доп. параметры
+#   32. ws_broadcast_extra   — WS Broadcast доп. параметры
+#   33. observatory_state    — Observatory State параметры
+#   34. base_agent           — Base Agent параметры
+#   35. orchestrator_extra   — Orchestrator доп. параметры
+#   36. hal_extra            — HAL доп. параметры
+#   37. hocus_focus_parser   — Hocus Focus Parser параметры
+#   38. python_bridge_extra  — Python Bridge доп. параметры
+#   39. safety_interceptor_extra — Safety Interceptor доп. параметры
+#   40. preflight_extra      — Preflight доп. параметры
+#   41. websocket_client     — WebSocket Client параметры
+#   42. log_tailer           — Log Tailer параметры
+#   43. prometheus_extra     — Prometheus Scraper доп. параметры
+#   44. influxdb_extra       — InfluxDB Provider доп. параметры
+#   45. masters_auditor      — Masters Auditor параметры
 # ============================================================================
 
 # ============================================================================
 # 1. ПУТИ N.I.N.A. (nina_environment)
 # ============================================================================
-# Все пути к файлам и папкам N.I.N.A. на данном ПК.
-# Измените под свою систему!
 nina_environment:
-  # Корневая папка AppData N.I.N.A. (профили, логи, плагины)
   appdata_root: "C:\\Users\\istep\\AppData\\Local\\NINA"
-
-  # Папка с сессиями съёмки (ImageMetaData.json, FITS-файлы)
   sessions_root: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\Фото\\Сессии"
-
-  # Папка с мастер-кадрами калибровки (Bias, Dark, Flat)
   masters_root: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\Фото\\Данные\\MASTER FILE\\Masters"
-
-  # Папка с профилями N.I.N.A. (.profile файлы)
-  profiles_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Profiles"
-
-  # Шаблон секвенсора (Sequence.json для Shadow Engine)
+  profiles_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Профили"
   sequence_template: "C:\\Users\\istep\\YandexDisk\\Хобби\\Астрономия\\ПО\\N.I.N.A\\Set templates\\Sequence.json"
-
-  # Папка с логами N.I.N.A.
   logs_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Logs"
-
-  # Папка с плагинами N.I.N.A.
   plugins_dir: "C:\\Users\\istep\\AppData\\Local\\NINA\\Plugins\\3.0.0"
 
 # ============================================================================
 # 2. СЕТЕВЫЕ ПОДКЛЮЧЕНИЯ (network)
 # ============================================================================
-# Адреса API-серверов, к которым подключается Cortex.
 network:
-  # N.I.N.A. Advanced API (плагин ninaAPI)
-  # Базовый URL, к которому добавляется /v2/api
   nina_api_host: "http://localhost:1888"
-
-  # N.I.N.A. WebSocket (real-time события: SequenceItemStarted, etc.)
   nina_ws_url: "ws://localhost:1888/v2/socket"
-
-  # Prometheus Exporter N.I.N.A. (плагин jewzaam)
-  # Используется как резервный источник метрик
   prometheus_url: "http://localhost:9876"
 
 # ============================================================================
 # 3. INFLUXDB (influxdb)
 # ============================================================================
-# Time-series база данных для хранения метрик оборудования.
-# Основной источник метрик для ObservatoryState.
 influxdb:
-  # URL InfluxDB сервера
   url: "http://localhost:8086"
-
-  # Токен аутентификации.
-  # Рекомендуется использовать переменную окружения: ${INFLUXDB_TOKEN}
-  token: "UVvJCtl-ihRqop4tsoXMlUcCcPAKnIHfoGzQRcuAp2LXhD_cTJMLN0Iy2l3_4aReWB_kdFEKezLhkv5ioQFu-A=="
-
-  # Организация InfluxDB
+  token: "${INFLUXDB_TOKEN}"
   org: "observatory"
-
-  # Бакет для хранения метрик
   bucket: "nina_telemetry"
 
 # ============================================================================
 # 4. QDRANT (qdrant)
 # ============================================================================
-# Векторная база данных для RAG-системы (Retrieval-Augmented Generation).
-# Хранит эмбеддинги документации и истории сессий.
 qdrant:
-  # URL Qdrant сервера
   url: "http://localhost:6333"
-
-  # Имя коллекции для хранения векторов
   collection_name: "nina_sessions"
-
-  # Модель для генерации эмбеддингов (должна быть загружена в Ollama)
-  # Загрузка: ollama pull nomic-embed-text
   embedding_model: "nomic-embed-text"
 
 # ============================================================================
 # 5. WEBSOCKET BROADCAST (ws_broadcast)
 # ============================================================================
-# WebSocket-сервер для real-time отправки событий на Frontend.
 ws_broadcast:
-  # Включить WebSocket broadcasting
   enabled: true
-
-  # Путь WebSocket endpoint
   path: "/ws"
 
 # ============================================================================
 # 6. AI НАСТРОЙКИ (ai_settings)
 # ============================================================================
-# Настройки LLM (Large Language Model) и RAG-системы.
-#
-# Архитектура LLM:
-#   - Primary модель (gemma4:31b-cloud) — облачная, мощная, для сложного анализа
-#   - Fallback модель (gemma4:e4b) — локальная, быстрая, при недоступности primary
-#   Обе модели вызываются через Ollama API.
 ai_settings:
-  # URL Ollama сервера
   ollama_host: "http://localhost:11434"
-
-  # Основная LLM модель (облачная через Ollama cloud routing)
-  # Используется для: Diagnostician, Strategist, Auditor, Copilot
-  # Загрузка: ollama pull gemma4:31b-cloud
   primary_model: "gemma4:31b-cloud"
-
-  # Fallback LLM модель (локальная, быстрая)
-  # Используется при недоступности primary или для простых запросов
-  # Загрузка: ollama pull gemma4:e4b
   fallback_model: "gemma4:e4b"
-
-  # [DEPRECATED] Оставлено для обратной совместимости.
-  # Используйте primary_model и fallback_model вместо этого.
-  model_name: "gemma4:31b-cloud"
-
-  # Путь к локальной векторной БД (альтернатива Qdrant)
+  model_name: "gemma4:31b-cloud"  # [DEPRECATED]
   rag_db_path: "./data/vector_db"
+  primary_timeout: 30.0
+  fallback_timeout: 15.0
+  max_tokens: 1500
+  temperature: 0.3
+  fallback_enabled: true
+  connection:
+    max_connections: 10
+    max_keepalive_connections: 5
+    keepalive_expiry: 30
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_seconds: 60.0
+    half_open_max_calls: 1
+    enabled: true
+  retry:
+    max_retries: 3
+    base_delay_seconds: 1.0
+    max_delay_seconds: 10.0
+    enabled: true
 
 # ============================================================================
 # 7. HOME ASSISTANT (home_assistant)
 # ============================================================================
-# Интеграция с Home Assistant для управления умным домом обсерватории.
-# Позволяет управлять: Flat Panel, Dew Heater, питанием обсерватории.
 home_assistant:
-  # Включить интеграцию с Home Assistant
   enabled: false
-
-  # URL Home Assistant сервера
   url: "http://homeassistant.local:8123"
-
-  # Long-Lived Access Token из Home Assistant.
-  # Получить: Profile → Security → Long-Lived Access Tokens → Create Token
-  # Рекомендуется использовать переменную окружения: ${HA_TOKEN}
   token: "${HA_TOKEN}"
 
 # ============================================================================
 # 8. HARDWARE ABSTRACTION LAYER (hal)
 # ============================================================================
-# Финальная валидация всех команд перед отправкой в N.I.N.A.
-# Предотвращает опасные операции (slew ниже горизонта, команды при UNSAFE).
 hal:
-  # Включить HAL валидацию
   enabled: true
-
-  # Минимальная высота (градусы) для команд slew.
-  # Команды slew ниже этого лимита блокируются.
   min_altitude_limit: 15.0
 
 # ============================================================================
 # 9. НАСТРОЙКИ ВОТЧЕРОВ (watchers)
 # ============================================================================
-# Конфигурация файловых вотчеров и pollers.
 watchers:
-  # Задержка debouncing (секунды).
-  # Предотвращает множественные срабатывания при быстром изменении файла.
   debounce_seconds: 1.5
-
-  # Путь к статусному файлу AI Weather плагина.
-  # Если null, используется appdata_root/AIWeather/status.json
   ai_weather_status_file: "C:\\Users\\istep\\AppData\\Local\\NINA\\AIWeather\\status.json"
-
-  # Опциональные пути к экспортам плагинов (null = автоопределение)
   dither_statistics_path: null
   guiding_analyzer_path: null
   dynamic_sequencer_path: null
@@ -194,90 +153,51 @@ watchers:
 # ============================================================================
 # 10. СТАТУС ПЛАГИНОВ (plugins_status)
 # ============================================================================
-# Статус отсутствующих или неактивных плагинов N.I.N.A.
-# Используется для Graceful Degradation — система продолжает работать
-# даже если некоторые плагины не установлены.
 plugins_status:
-  # Плагин инъекции дизеринга
   dither_inject: "NOT_INSTALLED"
-
-  # Плагин калибровки гидирования
   guider_calibration: "NOT_INSTALLED"
 
 # ============================================================================
 # 11. ЛОГИРОВАНИЕ (logging)
 # ============================================================================
 logging:
-  # Уровень логирования: DEBUG, INFO, WARNING, ERROR, CRITICAL
   level: "INFO"
-
-  # Формат логов: "json" (для production/ELK) или "text" (для dev)
   format: "json"
 
 # ============================================================================
-# 12. CORS — Cross-Origin Resource Sharing (cors)
+# 12. CORS (cors)
 # ============================================================================
-# Настройки CORS для доступа Frontend к API.
-# В production ОБЯЗАТЕЛЬНО ограничьте allow_origins доменом фронтенда!
 cors:
-  # Включить CORS middleware
   enabled: true
-
-  # Разрешённые домены (origins) фронтенда.
-  # Для production замените на реальные домены!
   allowed_origins:
-    - "http://localhost:3000" # Vue dev server
-    - "http://localhost:5173" # Vite dev server
-    - "http://localhost:8080" # Alternative frontend
+    - "http://localhost:3000"
+    - "http://localhost:5173"
+    - "http://localhost:8080"
     - "http://127.0.0.1:3000"
     - "http://127.0.0.1:5173"
-    # Production domains (раскомментируйте и замените):
-    # - "https://cortex.your-domain.com"
-    # - "https://observatory.local"
-
-  # Разрешить отправку credentials (cookies, auth headers)
   allow_credentials: true
-
-  # Разрешённые HTTP методы
   allowed_methods:
     - "GET"
     - "POST"
     - "PUT"
     - "DELETE"
     - "OPTIONS"
-
-  # Разрешённые HTTP заголовки
   allowed_headers:
     - "Authorization"
     - "Content-Type"
     - "X-API-Key"
     - "X-Request-ID"
-
-  # Время кэширования preflight-запросов (секунды)
   max_age: 3600
 
 # ============================================================================
 # 13. АУТЕНТИФИКАЦИЯ (auth)
 # ============================================================================
-# JWT-аутентификация и rate limiting для API.
 auth:
-  # Включить аутентификацию.
-  # В production ОБЯЗАТЕЛЬНО true!
   enabled: true
-
-  # Время жизни JWT access token (минуты). 1440 = 24 часа.
   access_token_expire_minutes: 1440
-
-  # Rate limiting: максимум запросов в минуту с одного IP
   rate_limit_per_minute: 120
-
-  # Rate limiting для LLM endpoints (защита от перегрузки Ollama)
   llm_rate_limit_per_minute: 20
-
-  # Rate limiting для trigger endpoints (защита оборудования)
   trigger_rate_limit_per_minute: 30
-
-  # Публичные paths (не требуют аутентификации)
   public_paths:
     - "/"
     - "/docs"
@@ -289,11 +209,7 @@ auth:
 # ============================================================================
 # 14. БЕЗОПАСНОСТЬ (security)
 # ============================================================================
-# Маскирование чувствительных данных в логах.
 security:
-  # Паттерны имен переменных, значения которых маскируются в логах.
-  # Если имя переменной содержит любую из этих подстрок (case-insensitive),
-  # её значение в логах отображается как "***".
   sensitive_patterns:
     - "token"
     - "password"
@@ -315,165 +231,734 @@ security:
 # ============================================================================
 # 15. ПОРОГОВЫЕ ЗНАЧЕНИЯ (thresholds)
 # ============================================================================
-# Все магические числа вынесены сюда для удобной настройки.
-# Измените пороги под своё оборудование и условия съёмки.
 thresholds:
-  # --- Watcher Agent ---
-  # Детекция аномалий в метриках качества
   watcher:
-    # Рост HFR на этот процент считается аномалией (%)
     hfr_increase_percent: 30.0
-
-    # Рост FWHM на этот процент считается аномалией (%)
     fwhm_increase_percent: 30.0
-
-    # RMS RA выше этого значения — критическая аномалия (arcsec)
     rms_ra_critical: 2.0
-
-    # RMS Dec выше этого значения — критическая аномалия (arcsec)
     rms_dec_critical: 2.0
-
-    # Отклонение температуры камеры от setpoint (°C)
     temperature_deviation: 2.0
-
-    # Скорость ветра для предупреждения (м/с)
     wind_speed_warning: 15.0
-
-    # Порывы ветра выше этого значения — критическая аномалия (м/с)
     wind_gust_critical: 20.0
-
-    # Z-Score для статистической детекции аномалий
     z_score_threshold: 3.0
-
-    # Минимальное количество точек истории для анализа тренда
     min_history_points: 5
-
-    # Cooldown между повторными алертами одного типа (секунды)
     anomaly_cooldown_seconds: 300
-
-  # --- Calibrator Agent ---
-  # Контроль свежести мастер-кадров калибровки
   calibrator:
-    # Bias мастера считаются свежими N дней
     bias_freshness_days: 90
-
-    # Dark мастера считаются свежими N дней
     dark_freshness_days: 30
-
-    # Flat мастера считаются свежими N дней
     flat_freshness_days: 7
-
-    # Допуск по температуре при подборе мастера (°C)
     temperature_tolerance: 2.0
-
-    # Cooldown между повторными алертами (секунды)
     alert_cooldown_seconds: 600
-
-  # --- Preflight Gates ---
-  # Пороговые значения для pre-flight проверки перед стартом сессии
   preflight:
-    # Максимальная облачность для GO (%)
     cloud_cover_max: 80.0
-
-    # Максимальная скорость ветра для GO (м/с)
     wind_speed_max: 20.0
-
-    # Максимальная влажность для GO (%)
     humidity_max: 90.0
-
-    # Минимальное свободное место на диске (GB)
     min_free_disk_space_gb: 50.0
-
-    # Температура камеры считается "охлаждённой" ниже этого значения (°C)
     camera_cooled_threshold: -10.0
-
-  # --- Strategist Agent ---
-  # Целевые метрики качества и параметры оптимизации
   strategist:
-    # Целевой SNR (Signal-to-Noise Ratio)
     snr_target: 20.0
-
-    # Целевой HFR (Half Flux Radius, пиксели)
     hfr_target: 2.5
-
-    # Целевой FWHM (Full Width Half Maximum, пиксели)
     fwhm_target: 3.0
-
-    # Целевой acceptance rate (доля принятых кадров, 0-1)
     acceptance_rate_target: 0.90
-
-    # Нормальный интервал автофокуса (минуты)
     autofocus_interval_normal: 60
-
-    # Частый интервал автофокуса при дрейфе (минуты)
     autofocus_interval_frequent: 30
-
-    # Экстренный интервал автофокуса (минуты)
     autofocus_interval_emergency: 15
-
-    # Порог деградации HFR (пикселей/кадр)
     hfr_degradation_threshold: 0.05
-
-    # Минимальный интервал между предложениями оптимизаций (секунды)
     min_proposal_interval_seconds: 600
-
-    # Предупреждение о ветровой нагрузке (м/с)
     wind_load_warning: 10.0
-
-  # --- Guardian Agent ---
-  # Пороговые значения безопасности оборудования
   guardian:
-    # Скорость ветра для аварийной парковки (м/с)
     wind_speed_park: 20.0
-
-    # Облачность для паузы съёмки (%)
     cloud_cover_pause: 80.0
-
-    # Влажность для предупреждения (%)
     humidity_warning: 90.0
-
-    # RMS для рекалибровки гидирования (arcsec)
     rms_recalibration: 3.0
-
-    # Отклонение температуры для аларма (°C)
     temperature_alarm: 5.0
 
 # ============================================================================
 # 16. ИСТОЧНИКИ ДАННЫХ (data_sources)
 # ============================================================================
-# Выбор основного и резервного источников метрик.
-# Предотвращает дублирование событий от InfluxDB и Prometheus.
 data_sources:
-  # Основной источник метрик: "influxdb" или "prometheus"
-  # InfluxDB рекомендуется как основной (более полная история)
   primary_metrics_source: "influxdb"
-
-  # Включить резервный источник (для отказоустойчивости).
-  # Если основной недоступен, автоматически используется резервный.
   enable_fallback_source: true
-
-  # Интервал опроса метрик (секунды)
   metrics_poll_interval: 3.0
 
 # ============================================================================
-# 17. DECISION AUDIT TRAIL (decision_audit)
+# 17. DECISION AUDIT (decision_audit)
 # ============================================================================
-# Политика хранения и очистки истории решений AI-агентов.
 decision_audit:
-  # Хранить решения за последние N дней
   keep_last_days: 90
-
-  # Максимальное количество записей в SQLite БД
   max_records: 100000
-
-  # Экспортировать удаляемые записи в JSON-архив перед удалением
   archive_before_delete: true
-
-  # Путь для хранения JSON-архивов
   archive_path: "./data/decision_archives"
-
-  # Автоматическая очистка (запускать периодически)
   auto_cleanup_enabled: true
-
-  # Интервал автоматической очистки (часы)
   auto_cleanup_interval_hours: 24
+
+# ============================================================================
+# 18. N.I.N.A. API CLIENT (nina_api_client)
+# ============================================================================
+nina_api_client:
+  request_timeout: 10.0
+  max_connections: 20
+  max_keepalive_connections: 10
+  keepalive_expiry: 30
+  retry:
+    max_retries: 3
+    base_delay_seconds: 1.0
+    max_delay_seconds: 10.0
+    enabled: true
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_seconds: 60.0
+    half_open_max_calls: 1
+    enabled: true
+
+# ============================================================================
+# 19. EXECUTION — TRIGGER EMULATOR (execution)
+# ============================================================================
+execution:
+  protected_params:
+    - "cancel"
+    - "skipValidation"
+  parameter_ranges:
+    temperature:
+      min: -40.0
+      max: 30.0
+      description: "Температура камеры (°C)"
+    minutes:
+      min: 0
+      max: 120
+      description: "Время охлаждения/нагрева (мин)"
+    brightness:
+      min: 0
+      max: 100
+      description: "Яркость плоской панели"
+    count:
+      min: 1
+      max: 100
+      description: "Количество кадров"
+    exposureTime:
+      min: 0.001
+      max: 3600.0
+      description: "Экспозиция (сек)"
+    minExposure:
+      min: 0.0
+      max: 300.0
+      description: "Мин. экспозиция (сек)"
+    maxExposure:
+      min: 0.0
+      max: 600.0
+      description: "Макс. экспозиция (сек)"
+    azimuth:
+      min: 0.0
+      max: 360.0
+      description: "Азимут купола (°)"
+    ra:
+      min: 0.0
+      max: 360.0
+      description: "RA координата (°)"
+    dec:
+      min: -90.0
+      max: 90.0
+      description: "Dec координата (°)"
+    position:
+      min: 0.0
+      max: 360.0
+      description: "Позиция ротатора (°)"
+    rotationAngle:
+      min: -360.0
+      max: 360.0
+      description: "Угол поворота (°)"
+    histogramMean:
+      min: 0.0
+      max: 1.0
+      description: "Среднее гистограммы"
+    meanTolerance:
+      min: 0.0
+      max: 1.0
+      description: "Допуск среднего"
+    gain:
+      min: 0
+      max: 10000
+      description: "Gain камеры"
+    offset:
+      min: -1000
+      max: 10000
+      description: "Offset камеры"
+    filterId:
+      min: 0
+      max: 20
+      description: "ID фильтра"
+  history_max_size: 100
+  request_timeout: 30.0
+
+# ============================================================================
+# 20. STORAGE — DISK MONITOR (storage_disk_monitor)
+# ============================================================================
+storage_disk_monitor:
+  warning_threshold_gb: 50.0
+  critical_threshold_gb: 20.0
+
+# ============================================================================
+# 21. SIMULATION — FAKE N.I.N.A. (simulation)
+# ============================================================================
+simulation:
+  flush_every_frames: 10
+  flush_every_seconds: 30.0
+  frame_interval_seconds: 2.0
+  autofocus_duration_seconds: 10.0
+  meridian_flip_duration_seconds: 30.0
+  metrics_interval_seconds: 3.0
+  default_metrics:
+    hfr: 2.5
+    fwhm: 3.0
+    eccentricity: 0.35
+    star_count: 150
+    median_adu: 15000
+    rms_ra: 0.8
+    rms_dec: 0.9
+    rms_total: 1.2
+    camera_temp: -14.8
+    focuser_position: 6931
+    rotator_angle: 180.0
+    mount_altitude: 45.0
+    mount_azimuth: 90.0
+  default_params:
+    target: "M31"
+    filter: "Ha"
+    exposure_time: 60.0
+    gain: 85
+    temperature_setpoint: -15.0
+  noise:
+    hfr_std: 0.05
+    fwhm_std: 0.05
+    rms_ra_std: 0.02
+    rms_dec_std: 0.02
+    frame_hfr_std: 0.1
+    frame_fwhm_std: 0.1
+    frame_stars_std: 10.0
+    frame_rms_std: 0.05
+    temperature_drift_factor: 0.1
+    temperature_noise_std: 0.02
+  limits:
+    hfr_min: 1.5
+    hfr_max: 5.0
+    fwhm_min: 2.0
+    fwhm_max: 6.0
+    rms_ra_min: 0.3
+    rms_ra_max: 3.0
+    rms_dec_min: 0.3
+    rms_dec_max: 3.0
+  anomalies:
+    hfr_spike: 2.0
+    rms_spike: 1.5
+    temp_drift: 3.0
+  autofocus_improvement:
+    hfr_reduction: 0.5
+    fwhm_reduction: 0.5
+    hfr_floor: 1.8
+    fwhm_floor: 2.2
+
+# ============================================================================
+# 22. SIMULATION — FAKE PHD2 (simulation_phd2)
+# ============================================================================
+simulation_phd2:
+  initial_rms_ra: 0.8
+  initial_rms_dec: 0.9
+  initial_rms_total: 1.2
+  noise_rms_ra_std: 0.02
+  noise_rms_dec_std: 0.02
+  rms_min: 0.3
+  rms_max: 3.0
+  metrics_interval_seconds: 2.0
+  guiding_error_spike: 2.0
+
+# ============================================================================
+# 23. AUDITOR AGENT (auditor)
+# ============================================================================
+auditor:
+  default_acceptance_rate_estimate: 0.90
+  quality_score:
+    hfr_penalty_high: 2.0
+    hfr_penalty_medium: 1.0
+    hfr_threshold_high: 3.0
+    hfr_threshold_medium: 2.5
+    fwhm_penalty_high: 2.0
+    fwhm_penalty_medium: 1.0
+    fwhm_threshold_high: 4.0
+    fwhm_threshold_medium: 3.0
+    rms_penalty: 1.0
+    rms_threshold: 1.5
+    acceptance_bonus_threshold: 0.95
+    acceptance_penalty_threshold: 0.80
+    acceptance_bonus: 1.0
+    acceptance_penalty: 1.0
+  recommendations:
+    hfr_warning_threshold: 2.5
+    rms_warning_threshold: 1.5
+    wind_warning_threshold: 10.0
+
+# ============================================================================
+# 24. DIAGNOSTICIAN AGENT (diagnostician)
+# ============================================================================
+diagnostician:
+  correlation_thresholds:
+    strong: 0.7
+    moderate: 0.5
+    weak: 0.3
+  min_sample_size: 10
+  confidence:
+    temperature_correlation: 0.85
+    wind_correlation: 0.80
+    rms_correlation: 0.75
+    heuristic_hfr_drift: 0.6
+    heuristic_wind_load: 0.75
+    llm_boost: 0.15
+    llm_max: 0.95
+
+# ============================================================================
+# 25. COPILOT AGENT (copilot)
+# ============================================================================
+copilot:
+  timeouts:
+    messagebox: 300
+    two_point_alignment: 600
+    oag_focus: 900
+    filter_selector: 120
+
+# ============================================================================
+# 26. SCHEDULER AGENT (scheduler)
+# ============================================================================
+scheduler:
+  min_altitude: 30.0
+  moon_avoidance_angle: 30.0
+  scoring:
+    priority_max_score: 40.0
+    altitude_max_score: 30.0
+    moon_distance_max_score: 20.0
+    progress_max_score: 10.0
+    below_horizon_penalty: 50.0
+    near_moon_penalty: 10.0
+    altitude_normalizer: 2.0
+    moon_distance_normalizer: 1.0
+  defaults:
+    altitude: 45.0
+    moon_distance: 90.0
+
+# ============================================================================
+# 27. STRATEGIST AGENT EXTRA (strategist_extra)
+# ============================================================================
+strategist_extra:
+  exposure_limits:
+    min: 30.0
+    max: 300.0
+  exposure_change_threshold: 0.1
+  snr_low_threshold_ratio: 0.8
+  wind_analysis:
+    angle_threshold: 180
+    windward_threshold: 90
+    angle_complement: 360
+
+# ============================================================================
+# 28. WATCHER AGENT EXTRA (watcher_extra)
+# ============================================================================
+watcher_extra:
+  small_sample_threshold_percent: 50.0
+  large_sample_no_zscore_threshold_percent: 60.0
+  trend_window_sizes:
+    small: 5
+    baseline: 10
+  min_history_for_full_detection: 5
+
+# ============================================================================
+# 29. EMBEDDINGS (embeddings)
+# ============================================================================
+embeddings:
+  dimension: 768
+  cache_file: "./data/embeddings_cache.pkl"
+  timeout: 30.0
+  cache_save_interval: 100
+
+# ============================================================================
+# 30. MODE MANAGER (mode_manager)
+# ============================================================================
+mode_manager:
+  health_check_interval: 30
+  error_retry_delay: 10
+  health_check_timeout: 5.0
+  status_log_interval: 300
+
+# ============================================================================
+# 31. RAG ENGINE EXTRA (rag_extra)
+# ============================================================================
+rag_extra:
+  chunk_sizes:
+    documentation: 1000
+    session: 500
+    error_log: 300
+  chunk_overlap_ratio: 0.25
+  search:
+    default_top_k: 10
+    max_context_multiplier: 4
+  embedding_cache_max_size: 10000
+
+# ============================================================================
+# 32. WS BROADCAST EXTRA (ws_broadcast_extra)
+# ============================================================================
+ws_broadcast_extra:
+  heartbeat_interval: 30
+
+# ============================================================================
+# 33. OBSERVATORY STATE (observatory_state)
+# ============================================================================
+observatory_state:
+  max_history_points: 100
+  source_timeout: 30.0
+  max_active_alerts: 50
+  ai_action_log_size: 1000
+  trend_analysis:
+    default_window: 10
+    average_window: 20
+    std_window: 20
+    min_points_for_std: 3
+    degradation_threshold_percent: 20.0
+    baseline_slice_start: -20
+    baseline_slice_end: -10
+    recent_slice: -10
+
+# ============================================================================
+# 34. BASE AGENT (base_agent)
+# ============================================================================
+base_agent:
+  decision_log_max_size: 1000
+  recent_decisions_default: 10
+
+# ============================================================================
+# 35. ORCHESTRATOR EXTRA (orchestrator_extra)
+# ============================================================================
+orchestrator_extra:
+  decision_queue_timeout: 1.0
+  error_retry_delay: 1.0
+  decisions_memory_limit: 1000
+
+# ============================================================================
+# 36. HAL EXTRA (hal_extra)
+# ============================================================================
+hal_extra:
+  default_altitude: 90.0
+
+# ============================================================================
+# 37. HOCUS FOCUS PARSER (hocus_focus_parser)
+# ============================================================================
+hocus_focus_parser:
+  z_threshold: 3.0
+  eccentricity_threshold: 0.85
+
+# ============================================================================
+# 38. PYTHON BRIDGE EXTRA (python_bridge_extra)
+# ============================================================================
+python_bridge_extra:
+  max_message_length: 500
+  max_log_length: 1000
+
+# ============================================================================
+# 39. SAFETY INTERCEPTOR EXTRA (safety_interceptor_extra)
+# ============================================================================
+safety_interceptor_extra:
+  shutdown_delay_minutes: 10
+
+# ============================================================================
+# 40. PREFLIGHT EXTRA (preflight_extra)
+# ============================================================================
+preflight_extra:
+  freshness_days:
+    BIAS: 90
+    DARK: 30
+    FLAT: 7
+
+# ============================================================================
+# 41. WEBSOCKET CLIENT (websocket_client)
+# ============================================================================
+websocket_client:
+  reconnect_delay: 5.0
+  ping_interval: 20
+  ping_timeout: 10
+
+# ============================================================================
+# 42. LOG TAILER (log_tailer)
+# ============================================================================
+log_tailer:
+  poll_interval: 0.5
+  rotation_check_interval: 2.0
+
+# ============================================================================
+# 43. PROMETHEUS EXTRA (prometheus_extra)
+# ============================================================================
+prometheus_extra:
+  interval_seconds: 3.0
+  timeout: 5.0
+  error_log_interval_minutes: 1
+
+# ============================================================================
+# 44. INFLUXDB EXTRA (influxdb_extra)
+# ============================================================================
+influxdb_extra:
+  query_interval: 3.0
+  error_log_interval_minutes: 1
+  history_max_points: 100
+  progress_report_interval: 20
+
+# ============================================================================
+# 45. MASTERS AUDITOR (masters_auditor)
+# ============================================================================
+masters_auditor:
+  progress_report_interval: 50
+
+  # ============================================================================
+# 18. AUDITOR AGENT (auditor)
+# ============================================================================
+auditor:
+  quality_score:
+    base_score: 10.0
+    hfr_penalty_high: 2.0
+    hfr_penalty_medium: 1.0
+    hfr_threshold_high: 3.0
+    hfr_threshold_medium: 2.5
+    fwhm_penalty_high: 2.0
+    fwhm_penalty_medium: 1.0
+    fwhm_threshold_high: 4.0
+    fwhm_threshold_medium: 3.0
+    rms_penalty: 1.0
+    rms_threshold: 1.5
+    acceptance_bonus_threshold: 0.95
+    acceptance_penalty_threshold: 0.80
+    acceptance_bonus: 1.0
+    acceptance_penalty: 1.0
+    default_acceptance_rate_estimate: 0.90
+  recommendations:
+    hfr_warning_threshold: 2.5
+    rms_warning_threshold: 1.5
+    wind_warning_threshold: 10.0
+  llm_max_tokens: 800
+  llm_temperature: 0.3
+
+# ============================================================================
+# 19. DIAGNOSTICIAN AGENT (diagnostician)
+# ============================================================================
+diagnostician:
+  correlation_thresholds:
+    strong: 0.7
+    moderate: 0.5
+    weak: 0.3
+  min_sample_size: 10
+  confidence:
+    temperature_correlation: 0.85
+    wind_correlation: 0.80
+    rms_correlation: 0.75
+    heuristic_hfr_drift: 0.6
+    heuristic_wind_load: 0.75
+    llm_boost: 0.15
+    llm_max: 0.95
+    default_confidence: 0.5
+    unknown_root_cause: "Неизвестная причина"
+  llm_max_tokens: 400
+  llm_temperature: 0.2
+  similar_cases_top_k: 5
+  max_recommendations: 5
+
+# ============================================================================
+# 20. COPILOT AGENT (copilot)
+# ============================================================================
+copilot:
+  timeouts:
+    messagebox: 300
+    two_point_alignment: 600
+    oag_focus: 900
+    filter_selector: 120
+  rag_max_tokens: 1000
+
+# ============================================================================
+# 21. SCHEDULER AGENT (scheduler)
+# ============================================================================
+scheduler:
+  min_altitude: 30.0
+  moon_avoidance_angle: 30.0
+  scoring:
+    priority_max_score: 40.0
+    priority_multiplier: 4.0
+    altitude_max_score: 30.0
+    altitude_normalizer: 2.0
+    moon_distance_max_score: 20.0
+    moon_distance_normalizer: 1.0
+    progress_max_score: 10.0
+    below_horizon_penalty: 50.0
+    near_moon_penalty: 10.0
+    narrowband_moon_safe_filters:
+      - "Ha"
+      - "OIII"
+      - "SII"
+  defaults:
+    altitude: 45.0
+    moon_distance: 90.0
+
+# ============================================================================
+# 22. STRATEGIST AGENT EXTRA (strategist_extra)
+# ============================================================================
+strategist_extra:
+  exposure_limits:
+    min: 30.0
+    max: 300.0
+  exposure_change_threshold: 0.1
+  snr_low_threshold_ratio: 0.8
+  wind_analysis:
+    angle_threshold: 180
+    windward_threshold: 90
+    angle_complement: 360
+  trend_window: 10
+
+# ============================================================================
+# 23. EMBEDDINGS (embeddings)
+# ============================================================================
+embeddings:
+  dimension: 768
+  cache_file: "./data/embeddings_cache.pkl"
+  timeout: 30.0
+  cache_save_interval: 100
+  model_name: "nomic-embed-text"
+
+# ============================================================================
+# 24. MODE MANAGER (mode_manager)
+# ============================================================================
+mode_manager:
+  health_check_interval: 30
+  error_retry_delay: 10
+  health_check_timeout: 5.0
+  status_log_interval: 300
+
+# ============================================================================
+# 25. RAG ENGINE EXTRA (rag_extra)
+# ============================================================================
+rag_extra:
+  chunk_sizes:
+    documentation: 1000
+    session: 500
+    error_log: 300
+  chunk_overlap_ratio: 0.25
+  search:
+    default_top_k: 10
+    max_context_multiplier: 4
+  embedding_cache_max_size: 10000
+  http_timeout: 30.0
+
+# ============================================================================
+# 26. WS BROADCAST EXTRA (ws_broadcast_extra)
+# ============================================================================
+ws_broadcast_extra:
+  heartbeat_interval: 30
+
+# ============================================================================
+# 27. OBSERVATORY STATE (observatory_state)
+# ============================================================================
+observatory_state:
+  max_history_points: 100
+  source_timeout: 30.0
+  max_active_alerts: 50
+  ai_action_log_size: 1000
+  default_camera_temp: -15.0
+  default_exposure_time: 60.0
+  default_gain: 85
+  trend_analysis:
+    default_window: 10
+    average_window: 20
+    std_window: 20
+    min_points_for_std: 3
+    degradation_threshold_percent: 20.0
+    baseline_slice_start: -20
+    baseline_slice_end: -10
+    recent_slice: -10
+
+# ============================================================================
+# 28. BASE AGENT (base_agent)
+# ============================================================================
+base_agent:
+  decision_log_max_size: 1000
+  recent_decisions_default: 10
+
+# ============================================================================
+# 29. ORCHESTRATOR EXTRA (orchestrator_extra)
+# ============================================================================
+orchestrator_extra:
+  decision_queue_timeout: 1.0
+  error_retry_delay: 1.0
+  decisions_memory_limit: 1000
+
+# ============================================================================
+# 30. HAL EXTRA (hal_extra)
+# ============================================================================
+hal_extra:
+  default_altitude: 90.0
+
+# ============================================================================
+# 31. HOCUS FOCUS PARSER (hocus_focus_parser)
+# ============================================================================
+hocus_focus_parser:
+  z_threshold: 3.0
+  eccentricity_threshold: 0.85
+
+# ============================================================================
+# 32. PYTHON BRIDGE EXTRA (python_bridge_extra)
+# ============================================================================
+python_bridge_extra:
+  max_message_length: 500
+  max_log_length: 1000
+
+# ============================================================================
+# 33. SAFETY INTERCEPTOR EXTRA (safety_interceptor_extra)
+# ============================================================================
+safety_interceptor_extra:
+  shutdown_delay_minutes: 10
+
+# ============================================================================
+# 34. PREFLIGHT EXTRA (preflight_extra)
+# ============================================================================
+preflight_extra:
+  freshness_days:
+    BIAS: 90
+    DARK: 30
+    FLAT: 7
+
+# ============================================================================
+# 35. WEBSOCKET CLIENT (websocket_client)
+# ============================================================================
+websocket_client:
+  reconnect_delay: 5.0
+  ping_interval: 20
+  ping_timeout: 10
+
+# ============================================================================
+# 36. LOG TAILER (log_tailer)
+# ============================================================================
+log_tailer:
+  poll_interval: 0.5
+  rotation_check_interval: 2.0
+
+# ============================================================================
+# 37. PROMETHEUS EXTRA (prometheus_extra)
+# ============================================================================
+prometheus_extra:
+  interval_seconds: 3.0
+  timeout: 5.0
+  error_log_interval_minutes: 1
+
+# ============================================================================
+# 38. INFLUXDB EXTRA (influxdb_extra)
+# ============================================================================
+influxdb_extra:
+  query_interval: 3.0
+  error_log_interval_minutes: 1
+  history_max_points: 100
+  progress_report_interval: 20
+
+# ============================================================================
+# 39. MASTERS AUDITOR (masters_auditor)
+# ============================================================================
+masters_auditor:
+  progress_report_interval: 50

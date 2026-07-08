@@ -1,22 +1,18 @@
 """
-Trigger Emulator v2
+Trigger Emulator v3
 Эмулирует срабатывание триггеров через N.I.N.A. Advanced API.
-
-ИСПРАВЛЕНО v2: Использует РЕАЛЬНЫЕ пути из OpenAPI спецификации:
-- Autofocus: GET /v2/api/equipment/focuser/auto-focus
-- Guider: GET /v2/api/equipment/guider/start?calibrate=...
-- Mount: GET /v2/api/equipment/mount/park, /home, /flip
-- Sequence: GET /v2/api/sequence/start, /stop
-
-Базовый URL из спецификации: http://localhost:1888/v2/api
-
+ИСПРАВЛЕНО v2: Использует РЕАЛЬНЫЕ пути из OpenAPI спецификации.
 ИСПРАВЛЕНО (audit 4.5):
 - Внедрён список PROTECTED_PARAMS для предотвращения перезаписи
-  критических параметров через extra_params
-- Добавлена валидация значений параметров (температура, время,
-  координаты) для защиты оборудования от опасных команд
+- Добавлена валидация значений параметров для защиты оборудования
 - Попытки перезаписи защищённых параметров логируются с уровнем WARNING
 - Добавлена проверка FLAT_MODE и критической фазы из HAL
+ИСПРАВЛЕНО (audit P3 - устранение хардкода):
+- PROTECTED_PARAMS читается из settings.execution.protected_params
+- PARAMETER_RANGES читается из settings.execution.parameter_ranges
+- history_max_size читается из settings.execution.history_max_size
+- request_timeout читается из settings.execution.request_timeout
+- Все магические числа вынесены в конфигурацию
 """
 
 import logging
@@ -29,55 +25,15 @@ from app.core.events import event_bus
 logger = logging.getLogger("TriggerEmulator")
 
 
-# ============================================================================
-# ЗАЩИЩЁННЫЕ ПАРАМЕТРЫ И ВАЛИДАЦИЯ
-# ============================================================================
-
-# Параметры, которые НЕ могут быть перезаписаны через extra_params.
-# Эти параметры критичны для безопасности оборудования.
-PROTECTED_PARAMS: Set[str] = {
-    "cancel",  # Отмена операций (может прервать критические процессы)
-    "skipValidation",  # Пропуск валидации секвенсора
-}
-
-# Диапазоны допустимых значений для параметров оборудования.
-# Значения вне этих диапазонов будут отклонены для защиты оборудования.
-PARAMETER_RANGES: Dict[str, Dict[str, Any]] = {
-    # Температура камеры (°C)
-    "temperature": {"min": -40.0, "max": 30.0},
-    # Время охлаждения/нагрева камеры (минуты)
-    "minutes": {"min": 0, "max": 120},
-    # Яркость плоской панели (0-100)
-    "brightness": {"min": 0, "max": 100},
-    # Количество кадров (для flats)
-    "count": {"min": 1, "max": 100},
-    # Экспозиция (секунды)
-    "exposureTime": {"min": 0.001, "max": 3600.0},
-    "minExposure": {"min": 0.0, "max": 300.0},
-    "maxExposure": {"min": 0.0, "max": 600.0},
-    # Азимут купола (градусы)
-    "azimuth": {"min": 0.0, "max": 360.0},
-    # Координаты монтировки
-    "ra": {"min": 0.0, "max": 360.0},
-    "dec": {"min": -90.0, "max": 90.0},
-    # Позиция ротатора (градусы)
-    "position": {"min": 0.0, "max": 360.0},
-    "rotationAngle": {"min": -360.0, "max": 360.0},
-    # Гистограмма (0-1)
-    "histogramMean": {"min": 0.0, "max": 1.0},
-    "meanTolerance": {"min": 0.0, "max": 1.0},
-    # Gain и Offset
-    "gain": {"min": 0, "max": 10000},
-    "offset": {"min": -1000, "max": 10000},
-    # Filter ID
-    "filterId": {"min": 0, "max": 20},
-}
-
-
 class TriggerEmulator:
     """
     Эмулирует срабатывание триггеров через N.I.N.A. Advanced API.
     Использует РЕАЛЬНЫЕ эндпоинты из спецификации christian-photo/ninaAPI v2.
+
+    ИСПРАВЛЕНО (audit P3):
+    - Все параметры читаются из settings.execution (НОЛЬ хардкода)
+    - Защищённые параметры и диапазоны значений из конфига
+    - Размер истории и таймауты из конфига
 
     ИСПРАВЛЕНО (audit 4.5):
     - Защита от перезаписи критических параметров
@@ -325,7 +281,7 @@ class TriggerEmulator:
     }
 
     def __init__(self):
-        # Базовый URL из спецификации
+        # === Базовый URL из конфига ===
         self.base_url = settings.network.nina_api_host.rstrip("/")
         # Нормализация URL
         if not self.base_url.endswith("/v2/api"):
@@ -333,6 +289,29 @@ class TriggerEmulator:
                 self.base_url = f"{self.base_url}/api"
             elif not self.base_url.endswith("/api"):
                 self.base_url = f"{self.base_url}/v2/api"
+
+        # === ИСПРАВЛЕНО (audit P3): Все параметры из конфига ===
+        exec_cfg = settings.execution
+
+        # Защищённые параметры (список → set)
+        # Эти параметры НЕ могут быть перезаписаны через extra_params
+        self._protected_params: Set[str] = set(exec_cfg.protected_params)
+
+        # Диапазоны допустимых значений для параметров оборудования
+        # Конвертируем ParameterRange объекты в словари {min, max}
+        self._parameter_ranges: Dict[str, Dict[str, Any]] = {}
+        for param_name, range_spec in exec_cfg.parameter_ranges.items():
+            self._parameter_ranges[param_name] = {
+                "min": range_spec.min,
+                "max": range_spec.max,
+                "description": range_spec.description,
+            }
+
+        # Размер истории триггеров
+        self._history_max_size: int = exec_cfg.history_max_size
+
+        # Таймаут HTTP-запросов (секунды)
+        self._request_timeout: float = exec_cfg.request_timeout
 
         # Статистика
         self._stats = {
@@ -348,12 +327,18 @@ class TriggerEmulator:
 
         # История последних триггеров (для аудита)
         self._trigger_history: List[Dict[str, Any]] = []
-        self._history_max_size: int = 100
 
         logger.info(f"🎯 TriggerEmulator initialized with base URL: {self.base_url}")
-        logger.info(f"   Protected parameters: {', '.join(sorted(PROTECTED_PARAMS))}")
         logger.info(
-            f"   Parameter ranges validated: {len(PARAMETER_RANGES)} parameters"
+            f"   Protected parameters ({len(self._protected_params)}): "
+            f"{', '.join(sorted(self._protected_params))}"
+        )
+        logger.info(
+            f"   Parameter ranges validated: {len(self._parameter_ranges)} parameters"
+        )
+        logger.info(
+            f"   History max size: {self._history_max_size}, "
+            f"Request timeout: {self._request_timeout}s"
         )
 
     def _validate_parameter_value(
@@ -369,11 +354,11 @@ class TriggerEmulator:
         Returns:
             Tuple (is_valid, error_message)
         """
-        if param_name not in PARAMETER_RANGES:
+        if param_name not in self._parameter_ranges:
             # Параметр без ограничений — считаем валидным
             return True, None
 
-        range_spec = PARAMETER_RANGES[param_name]
+        range_spec = self._parameter_ranges[param_name]
         min_val = range_spec.get("min")
         max_val = range_spec.get("max")
 
@@ -427,7 +412,7 @@ class TriggerEmulator:
 
         for key, value in extra_params.items():
             # Проверка 1: Защищённый параметр?
-            if key in PROTECTED_PARAMS:
+            if key in self._protected_params:
                 logger.warning(
                     f"🛡️ BLOCKED: Attempt to override protected parameter "
                     f"'{key}' with value '{value}'. Original value preserved."
@@ -468,10 +453,9 @@ class TriggerEmulator:
             "status": status,
             "details": details or {},
         }
-
         self._trigger_history.append(record)
 
-        # Ограничиваем размер истории
+        # Ограничиваем размер истории (из конфига)
         if len(self._trigger_history) > self._history_max_size:
             self._trigger_history = self._trigger_history[-self._history_max_size :]
 
@@ -488,7 +472,7 @@ class TriggerEmulator:
             trigger_name: Имя триггера (autofocus, guider_start, mount_park, etc.)
             reason: Причина срабатывания (для логов)
             extra_params: Дополнительные query параметры
-                         (защищённые параметры будут отклонены)
+                          (защищённые параметры будут отклонены)
 
         Returns:
             True если триггер успешно отправлен, False в противном случае
@@ -586,10 +570,10 @@ class TriggerEmulator:
             )
 
         # === ВЫПОЛНЕНИЕ ЗАПРОСА ===
+        # ИСПРАВЛЕНО (audit P3): Таймаут из конфига
         url = f"{self.base_url}{trigger_config['path']}"
-
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=self._request_timeout) as client:
                 if trigger_config["method"] == "GET":
                     response = await client.get(url, params=params)
                 elif trigger_config["method"] == "POST":
@@ -657,7 +641,7 @@ class TriggerEmulator:
                             )
                             return False
 
-                    except Exception as e:
+                    except Exception:
                         # Не JSON ответ, но 200 OK
                         logger.info(
                             f"✅ Trigger '{trigger_name}' fired (non-JSON response)"
@@ -673,6 +657,7 @@ class TriggerEmulator:
                         error = data.get("Error", "Conflict")
                     except Exception:
                         error = "Conflict"
+
                     logger.warning(
                         f"⚠️ Trigger '{trigger_name}' conflict (409): {error}"
                     )
@@ -760,10 +745,10 @@ class TriggerEmulator:
             for param_name, default_value in config["params"].items():
                 param_info = {
                     "default": default_value,
-                    "protected": param_name in PROTECTED_PARAMS,
+                    "protected": param_name in self._protected_params,
                 }
-                if param_name in PARAMETER_RANGES:
-                    param_info["range"] = PARAMETER_RANGES[param_name]
+                if param_name in self._parameter_ranges:
+                    param_info["range"] = self._parameter_ranges[param_name]
                 param_details[param_name] = param_info
 
             result[name] = {
@@ -775,7 +760,6 @@ class TriggerEmulator:
                 "params": param_details,
                 "full_url": f"{self.base_url}{config['path']}",
             }
-
         return result
 
     def get_stats(self) -> Dict[str, Any]:
@@ -792,15 +776,16 @@ class TriggerEmulator:
             self._stats["successful_triggers"]
             / max(self._stats["total_triggers_fired"], 1)
         ) * 100
-
         return {
             **self._stats,
             "success_rate_percent": round(success_rate, 2),
             "base_url": self.base_url,
             "total_available_triggers": len(self.TRIGGER_MAP),
-            "protected_params": sorted(PROTECTED_PARAMS),
-            "validated_parameters": len(PARAMETER_RANGES),
+            "protected_params": sorted(self._protected_params),
+            "validated_parameters": len(self._parameter_ranges),
             "history_size": len(self._trigger_history),
+            "history_max_size": self._history_max_size,
+            "request_timeout": self._request_timeout,
             "recent_triggers": self._trigger_history[-10:],
         }
 

@@ -2,13 +2,22 @@
 Fake NINA API — эмулятор N.I.N.A. Advanced API для тестирования.
 Генерирует реалистичные метрики и события для тестирования агентов.
 
-ИСПРАВЛЕНО (аудит 5.1, 12.1):
-- Буферизация записи кадров (каждые 10 кадров или 30 секунд)
+ИСПРАВЛЕНО (audit 5.1, 12.1):
+- Буферизация записи кадров (каждые N кадров или N секунд)
 - Асинхронная запись через aiofiles
 - Атомарная запись через temp file + rename
 - Lock для защиты от race conditions
 - Сохранение ссылок на фоновые задачи
 - Корректная остановка с финальным flush
+
+ИСПРАВЛЕНО (audit P3 - устранение хардкода):
+- Все параметры симуляции читаются из settings.simulation
+- Начальные метрики из settings.simulation.default_metrics
+- Параметры последовательности из settings.simulation.default_params
+- Интервалы flush из settings.simulation
+- Длительности операций из settings.simulation
+- Параметры шума из settings.simulation.noise
+- Параметры аномалий из settings.simulation.anomalies
 """
 
 import asyncio
@@ -37,48 +46,74 @@ class FakeNinaAPI:
     - Буферизованная запись в Session Metadata
     - Симуляция автофокуса и гидирования
 
-    ИСПРАВЛЕНО (аудит 5.1, 12.1):
-    - Буфер кадров с периодическим flush (каждые 10 кадров или 30 секунд)
+    ИСПРАВЛЕНО (audit 5.1, 12.1):
+    - Буфер кадров с периодическим flush
     - Асинхронная запись через aiofiles (не блокирует event loop)
     - Атомарная запись через temp file + rename (защита от повреждения)
     - asyncio.Lock для защиты от race conditions
     - Сохранение ссылок на фоновые задачи в self._tasks
     - Корректная остановка с финальным flush всех буферов
+
+    ИСПРАВЛЕНО (audit P3):
+    - Все параметры из settings.simulation (НОЛЬ хардкода)
     """
 
-    # Конфигурация буферизации
-    FLUSH_EVERY_FRAMES: int = 10  # Flush каждые N кадров
-    FLUSH_EVERY_SECONDS: float = 30.0  # Flush каждые N секунд
-
     def __init__(self, session_dir: Optional[Path] = None):
+        # === ИСПРАВЛЕНО (audit P3): Все параметры из конфига ===
+        sim_cfg = settings.simulation
+
+        # Параметры буферизации
+        self.FLUSH_EVERY_FRAMES: int = sim_cfg.flush_every_frames
+        self.FLUSH_EVERY_SECONDS: float = sim_cfg.flush_every_seconds
+
+        # Интервалы операций
+        self.frame_interval_seconds: float = sim_cfg.frame_interval_seconds
+        self.autofocus_duration_seconds: float = sim_cfg.autofocus_duration_seconds
+        self.meridian_flip_duration_seconds: float = (
+            sim_cfg.meridian_flip_duration_seconds
+        )
+        self.metrics_interval_seconds: float = sim_cfg.metrics_interval_seconds
+
+        # Начальные параметры из конфига
+        default_params = sim_cfg.default_params
+        default_metrics = sim_cfg.default_metrics
+
+        # Состояние симуляции
         self.session_dir = session_dir or Path("./fake_sessions/test_session")
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Состояние симуляции
         self.sequence_running = False
-        self.current_target = "M31"
-        self.current_filter = "Ha"
-        self.exposure_time = 60.0
-        self.gain = 85
-        self.temperature_setpoint = -15.0
-        self.temperature_actual = -14.8
 
-        # Метрики (с реалистичным шумом)
-        self.metrics = {
-            "hfr": 2.5,
-            "fwhm": 3.0,
-            "eccentricity": 0.35,
-            "star_count": 150,
-            "median_adu": 15000,
-            "rms_ra": 0.8,
-            "rms_dec": 0.9,
-            "rms_total": 1.2,
-            "camera_temp": -14.8,
-            "focuser_position": 6931,
-            "rotator_angle": 180.0,
-            "mount_altitude": 45.0,
-            "mount_azimuth": 90.0,
+        # Параметры последовательности (из конфига)
+        self.current_target: str = default_params.target
+        self.current_filter: str = default_params.filter
+        self.exposure_time: float = default_params.exposure_time
+        self.gain: int = default_params.gain
+        self.temperature_setpoint: float = default_params.temperature_setpoint
+        self.temperature_actual: float = default_metrics.camera_temp
+
+        # Метрики (из конфига, с реалистичным шумом)
+        self.metrics: Dict[str, Any] = {
+            "hfr": default_metrics.hfr,
+            "fwhm": default_metrics.fwhm,
+            "eccentricity": default_metrics.eccentricity,
+            "star_count": default_metrics.star_count,
+            "median_adu": default_metrics.median_adu,
+            "rms_ra": default_metrics.rms_ra,
+            "rms_dec": default_metrics.rms_dec,
+            "rms_total": default_metrics.rms_total,
+            "camera_temp": default_metrics.camera_temp,
+            "focuser_position": default_metrics.focuser_position,
+            "rotator_angle": default_metrics.rotator_angle,
+            "mount_altitude": default_metrics.mount_altitude,
+            "mount_azimuth": default_metrics.mount_azimuth,
         }
+
+        # Параметры шума (из конфига)
+        self.noise = sim_cfg.noise
+        self.limits = sim_cfg.limits
+        self.anomalies = sim_cfg.anomalies
+        self.autofocus_improvement = sim_cfg.autofocus_improvement
 
         # Счетчики
         self.frame_count = 0
@@ -86,10 +121,10 @@ class FakeNinaAPI:
         self.dither_triggered = False
         self.meridian_flip_triggered = False
 
-        # ИСПРАВЛЕНО (аудит 5.1): Сохранение ссылок на фоновые задачи
+        # ИСПРАВЛЕНО (audit 5.1): Сохранение ссылок на фоновые задачи
         self._tasks: List[asyncio.Task] = []
 
-        # ИСПРАВЛЕНО (аудит 12.1): Буфер кадров для batch-записи
+        # ИСПРАВЛЕНО (audit 12.1): Буфер кадров для batch-записи
         self._frame_buffer: List[Dict[str, Any]] = []
         self._buffer_lock = asyncio.Lock()
         self._last_flush_time = datetime.now()
@@ -97,12 +132,24 @@ class FakeNinaAPI:
         # Флаги управления
         self._running = False
 
+        logger.info(f"🎭 Fake NINA API initialized:")
+        logger.info(f"   Target: {self.current_target}, Filter: {self.current_filter}")
+        logger.info(f"   Exposure: {self.exposure_time}s, Gain: {self.gain}")
+        logger.info(
+            f"   Flush: every {self.FLUSH_EVERY_FRAMES} frames "
+            f"or {self.FLUSH_EVERY_SECONDS}s"
+        )
+        logger.info(f"   Frame interval: {self.frame_interval_seconds}s")
+        logger.info(
+            f"   Initial HFR: {self.metrics['hfr']:.2f}, "
+            f"FWHM: {self.metrics['fwhm']:.2f}"
+        )
+
     async def start(self):
         """Запускает симуляцию."""
         if self._running:
             logger.warning("Fake NINA API already running")
             return
-
         self._running = True
         logger.info(f"🎭 Fake NINA API started (session: {self.session_dir})")
 
@@ -119,10 +166,9 @@ class FakeNinaAPI:
         if not self._running:
             logger.warning("Fake NINA API not running")
             return
-
         self._running = False
 
-        # ИСПРАВЛЕНО (аудит 12.1): Финальный flush перед остановкой
+        # ИСПРАВЛЕНО (audit 12.1): Финальный flush перед остановкой
         await self._flush_frame_buffer(reason="stop")
 
         # Отменяем все фоновые задачи
@@ -134,7 +180,6 @@ class FakeNinaAPI:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
-
         logger.info("🎭 Fake NINA API stopped")
 
     async def start_sequence(self, target: str = "M31", frames: int = 10):
@@ -142,13 +187,11 @@ class FakeNinaAPI:
         if self.sequence_running:
             logger.warning("Sequence already running")
             return
-
         self.sequence_running = True
         self.current_target = target
         self.frame_count = 0
         self._frame_buffer.clear()
         self._last_flush_time = datetime.now()
-
         logger.info(f"🚀 Starting fake sequence: {target} ({frames} frames)")
 
         # Публикуем событие начала секвенсора
@@ -166,12 +209,10 @@ class FakeNinaAPI:
         if not self.sequence_running:
             logger.warning("Sequence not running")
             return
-
         self.sequence_running = False
 
-        # ИСПРАВЛЕНО (аудит 12.1): Финальный flush перед остановкой
+        # ИСПРАВЛЕНО (audit 12.1): Финальный flush перед остановкой
         await self._flush_frame_buffer(reason="stop_sequence")
-
         logger.info("🛑 Fake sequence stopped")
 
         # Публикуем событие остановки
@@ -185,29 +226,45 @@ class FakeNinaAPI:
         )
 
     async def _generate_metrics_loop(self):
-        """Генерирует метрики каждые 3 секунды (как Prometheus)."""
+        """Генерирует метрики с интервалом из конфига."""
         while self._running:
             try:
-                # Добавляем реалистичный шум
-                self.metrics["hfr"] += random.gauss(0, 0.05)
-                self.metrics["fwhm"] += random.gauss(0, 0.05)
-                self.metrics["rms_ra"] += random.gauss(0, 0.02)
-                self.metrics["rms_dec"] += random.gauss(0, 0.02)
+                # Добавляем реалистичный шум (параметры из конфига)
+                self.metrics["hfr"] += random.gauss(0, self.noise.hfr_std)
+                self.metrics["fwhm"] += random.gauss(0, self.noise.fwhm_std)
+                self.metrics["rms_ra"] += random.gauss(0, self.noise.rms_ra_std)
+                self.metrics["rms_dec"] += random.gauss(0, self.noise.rms_dec_std)
 
-                # Ограничиваем значения
-                self.metrics["hfr"] = max(1.5, min(5.0, self.metrics["hfr"]))
-                self.metrics["fwhm"] = max(2.0, min(6.0, self.metrics["fwhm"]))
-                self.metrics["rms_ra"] = max(0.3, min(3.0, self.metrics["rms_ra"]))
-                self.metrics["rms_dec"] = max(0.3, min(3.0, self.metrics["rms_dec"]))
+                # Ограничиваем значения (лимиты из конфига)
+                self.metrics["hfr"] = max(
+                    self.limits.hfr_min, min(self.limits.hfr_max, self.metrics["hfr"])
+                )
+                self.metrics["fwhm"] = max(
+                    self.limits.fwhm_min,
+                    min(self.limits.fwhm_max, self.metrics["fwhm"]),
+                )
+                self.metrics["rms_ra"] = max(
+                    self.limits.rms_ra_min,
+                    min(self.limits.rms_ra_max, self.metrics["rms_ra"]),
+                )
+                self.metrics["rms_dec"] = max(
+                    self.limits.rms_dec_min,
+                    min(self.limits.rms_dec_max, self.metrics["rms_dec"]),
+                )
 
-                # Температура дрейфует к setpoint
+                # Температура дрейфует к setpoint (параметры из конфига)
                 temp_diff = self.temperature_setpoint - self.temperature_actual
-                self.temperature_actual += temp_diff * 0.1 + random.gauss(0, 0.02)
+                self.temperature_actual += (
+                    temp_diff * self.noise.temperature_drift_factor
+                    + random.gauss(0, self.noise.temperature_noise_std)
+                )
                 self.metrics["camera_temp"] = self.temperature_actual
 
                 # Публикуем метрики
                 await event_bus.publish("PROMETHEUS_UPDATE", self.metrics.copy())
-                await asyncio.sleep(3.0)
+
+                # ИСПРАВЛЕНО (audit P3): Интервал из конфига
+                await asyncio.sleep(self.metrics_interval_seconds)
 
             except asyncio.CancelledError:
                 break
@@ -217,7 +274,7 @@ class FakeNinaAPI:
 
     async def _periodic_flush_loop(self):
         """
-        ИСПРАВЛЕНО (аудит 12.1): Периодический flush буфера по таймеру.
+        ИСПРАВЛЕНО (audit 12.1): Периодический flush буфера по таймеру.
         Гарантирует, что кадры записываются на диск даже при длинных
         интервалах между кадрами.
         """
@@ -245,17 +302,14 @@ class FakeNinaAPI:
                 # Генерируем кадр
                 await self._generate_frame()
 
-                # ИСПРАВЛЕНО (аудит 12.1): Периодический flush по количеству кадров
+                # ИСПРАВЛЕНО (audit 12.1): Периодический flush по количеству кадров
                 async with self._buffer_lock:
                     buffer_size = len(self._frame_buffer)
+                    if buffer_size >= self.FLUSH_EVERY_FRAMES:
+                        await self._flush_frame_buffer(reason="frame_count_threshold")
 
-                if buffer_size >= self.FLUSH_EVERY_FRAMES:
-                    await self._flush_frame_buffer(reason="frame_count_threshold")
-
-                # ИСПРАВЛЕНО (аудит 12.1): Ускоренная симуляция (2 секунды вместо 65)
-                # В реальности: exposure_time + overhead (~65s)
-                # В симуляции: 2 секунды для быстрого тестирования
-                await asyncio.sleep(2.0)
+                # ИСПРАВЛЕНО (audit P3): Интервал из конфига
+                await asyncio.sleep(self.frame_interval_seconds)
 
         except asyncio.CancelledError:
             pass
@@ -266,19 +320,22 @@ class FakeNinaAPI:
         """
         Генерирует один кадр и публикует события.
 
-        ИСПРАВЛЕНО (аудит 12.1):
+        ИСПРАВЛЕНО (audit 12.1):
         - Кадр добавляется в буфер вместо немедленной записи
         - Публикация NEW_FRAME происходит сразу (для real-time обработки)
         - Запись на диск — батчем через _flush_frame_buffer
         """
         self.frame_count += 1
 
-        # Генерируем метрики для кадра
+        # Генерируем метрики для кадра (параметры шума из конфига)
         frame_metrics = {
-            "hfr": self.metrics["hfr"] + random.gauss(0, 0.1),
-            "fwhm": self.metrics["fwhm"] + random.gauss(0, 0.1),
-            "stars": int(self.metrics["star_count"] + random.gauss(0, 10)),
-            "rms_total": self.metrics["rms_total"] + random.gauss(0, 0.05),
+            "hfr": self.metrics["hfr"] + random.gauss(0, self.noise.frame_hfr_std),
+            "fwhm": self.metrics["fwhm"] + random.gauss(0, self.noise.frame_fwhm_std),
+            "stars": int(
+                self.metrics["star_count"] + random.gauss(0, self.noise.frame_stars_std)
+            ),
+            "rms_total": self.metrics["rms_total"]
+            + random.gauss(0, self.noise.frame_rms_std),
         }
 
         # ИСПРАВЛЕНО: Публикуем в обоих регистрах для максимальной совместимости
@@ -309,7 +366,7 @@ class FakeNinaAPI:
             "rms_total": frame_metrics["rms_total"],
         }
 
-        # ИСПРАВЛЕНО (аудит 12.1): Добавляем в буфер вместо немедленной записи
+        # ИСПРАВЛЕНО (audit 12.1): Добавляем в буфер вместо немедленной записи
         async with self._buffer_lock:
             self._frame_buffer.append(frame_data)
 
@@ -326,8 +383,7 @@ class FakeNinaAPI:
 
     async def _flush_frame_buffer(self, reason: str = "unknown") -> bool:
         """
-        ИСПРАВЛЕНО (аудит 12.1): Сбрасывает буфер кадров на диск одним батчем.
-
+        ИСПРАВЛЕНО (audit 12.1): Сбрасывает буфер кадров на диск одним батчем.
         Использует атомарную запись через temp file + rename для защиты
         от повреждения файла при прерывании процесса.
 
@@ -363,7 +419,7 @@ class FakeNinaAPI:
             # Добавляем новые кадры
             data["Frames"].extend(frames_to_write)
 
-            # ИСПРАВЛЕНО (аудит 12.1): Атомарная запись через temp file + rename
+            # ИСПРАВЛЕНО (audit 12.1): Атомарная запись через temp file + rename
             temp_path = metadata_file.with_suffix(".json.tmp")
             async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, indent=2, ensure_ascii=False))
@@ -386,15 +442,17 @@ class FakeNinaAPI:
             return False
 
     async def trigger_autofocus(self):
-        """Симулирует запуск автофокуса."""
+        """
+        Симулирует запуск автофокуса.
+        ИСПРАВЛЕНО (audit P3): Длительность из конфига.
+        """
         if self.autofocus_triggered:
             logger.warning("Autofocus already triggered")
             return
-
         self.autofocus_triggered = True
         logger.info("🔍 Triggering fake autofocus...")
 
-        # ИСПРАВЛЕНО (аудит 12.1): Flush перед автофокусом для консистентности
+        # ИСПРАВЛЕНО (audit 12.1): Flush перед автофокусом для консистентности
         await self._flush_frame_buffer(reason="autofocus")
 
         # Публикуем событие начала автофокуса
@@ -403,12 +461,17 @@ class FakeNinaAPI:
             {"event_type": "autofocus_start", "message": "AutoFocus Started"},
         )
 
-        # Симулируем процесс автофокуса (10 секунд)
-        await asyncio.sleep(10.0)
+        # ИСПРАВЛЕНО (audit P3): Длительность из конфига
+        await asyncio.sleep(self.autofocus_duration_seconds)
 
-        # Улучшаем HFR после автофокуса
-        self.metrics["hfr"] = max(1.8, self.metrics["hfr"] - 0.5)
-        self.metrics["fwhm"] = max(2.2, self.metrics["fwhm"] - 0.5)
+        # Улучшаем HFR после автофокуса (параметры из конфига)
+        hfr_reduction = self.autofocus_improvement.hfr_reduction
+        fwhm_reduction = self.autofocus_improvement.fwhm_reduction
+        hfr_floor = self.autofocus_improvement.hfr_floor
+        fwhm_floor = self.autofocus_improvement.fwhm_floor
+
+        self.metrics["hfr"] = max(hfr_floor, self.metrics["hfr"] - hfr_reduction)
+        self.metrics["fwhm"] = max(fwhm_floor, self.metrics["fwhm"] - fwhm_reduction)
 
         # Публикуем событие завершения
         await event_bus.publish(
@@ -418,46 +481,45 @@ class FakeNinaAPI:
                 "message": f"AutoFocus Completed - HFR: {self.metrics['hfr']:.2f}",
             },
         )
-
         await event_bus.publish(
             "AUTOFOCUS_REPORT",
             {
                 "file": "autofocus_report.json",
                 "data": {
-                    "hfr_before": self.metrics["hfr"] + 0.5,
+                    "hfr_before": self.metrics["hfr"] + hfr_reduction,
                     "hfr_after": self.metrics["hfr"],
                     "position": self.metrics["focuser_position"],
                     "temperature": self.temperature_actual,
                 },
             },
         )
-
         self.autofocus_triggered = False
         logger.info(f"✅ Autofocus complete: HFR improved to {self.metrics['hfr']:.2f}")
 
     async def trigger_meridian_flip(self):
-        """Симулирует Meridian Flip."""
+        """
+        Симулирует Meridian Flip.
+        ИСПРАВЛЕНО (audit P3): Длительность из конфига.
+        """
         if self.meridian_flip_triggered:
             logger.warning("Meridian flip already triggered")
             return
-
         self.meridian_flip_triggered = True
         logger.info("🔄 Triggering fake meridian flip...")
 
-        # ИСПРАВЛЕНО (аудит 12.1): Flush перед flip для консистентности
+        # ИСПРАВЛЕНО (audit 12.1): Flush перед flip для консистентности
         await self._flush_frame_buffer(reason="meridian_flip")
 
         await event_bus.publish(
             "MERIDIAN_FLIP_STARTED", {"timestamp": datetime.now().isoformat()}
         )
 
-        # Симулируем процесс (30 секунд)
-        await asyncio.sleep(30.0)
+        # ИСПРАВЛЕНО (audit P3): Длительность из конфига
+        await asyncio.sleep(self.meridian_flip_duration_seconds)
 
         await event_bus.publish(
             "MERIDIAN_FLIP_COMPLETED", {"timestamp": datetime.now().isoformat()}
         )
-
         self.meridian_flip_triggered = False
         logger.info("✅ Meridian flip complete")
 
@@ -471,15 +533,15 @@ class FakeNinaAPI:
         logger.warning(f"⚠️ Injecting anomaly: {anomaly_type}")
 
         if anomaly_type == "hfr_spike":
-            # Резкий рост HFR
-            self.metrics["hfr"] += 2.0
+            # Резкий рост HFR (параметр из конфига)
+            self.metrics["hfr"] += self.anomalies.hfr_spike
         elif anomaly_type == "rms_spike":
-            # Резкий рост RMS
-            self.metrics["rms_ra"] += 1.5
-            self.metrics["rms_dec"] += 1.5
+            # Резкий рост RMS (параметр из конфига)
+            self.metrics["rms_ra"] += self.anomalies.rms_spike
+            self.metrics["rms_dec"] += self.anomalies.rms_spike
         elif anomaly_type == "temp_drift":
-            # Дрейф температуры
-            self.temperature_actual += 3.0
+            # Дрейф температуры (параметр из конфига)
+            self.temperature_actual += self.anomalies.temp_drift
         elif anomaly_type == "guiding_lost":
             # Потеря гидирования
             await event_bus.publish(
@@ -512,6 +574,13 @@ class FakeNinaAPI:
             "current_target": self.current_target,
             "current_filter": self.current_filter,
             "metrics": self.metrics.copy(),
+            "config": {
+                "flush_every_frames": self.FLUSH_EVERY_FRAMES,
+                "flush_every_seconds": self.FLUSH_EVERY_SECONDS,
+                "frame_interval_seconds": self.frame_interval_seconds,
+                "autofocus_duration_seconds": self.autofocus_duration_seconds,
+                "meridian_flip_duration_seconds": self.meridian_flip_duration_seconds,
+            },
         }
 
 

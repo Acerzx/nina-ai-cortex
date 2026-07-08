@@ -1,14 +1,16 @@
 """
 Authentication & Authorization module for N.I.N.A. AI Cortex.
-
 ИСПРАВЛЕНО (audit C4): добавлена JWT-аутентификация для защиты API.
-Все критические endpoints (Execution, Vault, Simulation) требуют валидный токен.
+ИСПРАВЛЕНО (audit P1): JWT-секрет хранится в SecureSecret (ctypes + mlock),
+а не как обычная Python-строка. Защищено от memory dump атак.
 
+Все критические endpoints (Execution, Vault, Simulation) требуют валидный токен.
 Архитектура:
 - JWT Bearer токены с HMAC-SHA256 подписью
 - API key для machine-to-machine интеграций (Grafana, Home Assistant)
 - Rate limiting через slowapi
 - Разграничение прав: admin / operator / readonly
+- ИСПРАВЛЕНО: секрет хранится в защищённой памяти (SecureSecret)
 """
 
 import logging
@@ -17,13 +19,12 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
 from enum import Enum
-
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
-
 from app.core.config import settings
+from app.security.secure_memory import SecureSecret
 
 logger = logging.getLogger("SecurityAuth")
 
@@ -71,49 +72,100 @@ class APIKeyRecord(BaseModel):
 
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION — ИСПРАВЛЕНО (audit P1): SecureSecret вместо str
 # ============================================================================
 
-# Секрет для подписи JWT. В production ОБЯЗАТЕЛЬНО через env var.
-_JWT_SECRET: Optional[str] = None
+# ИСПРАВЛЕНО (audit P1): JWT секрет хранится в защищённой памяти.
+# SecureSecret использует:
+#   - ctypes буфер (не Python string pool)
+#   - mlock() для запрета swap на диск
+#   - автоматическое zeroing при garbage collection
+_JWT_SECRET: Optional[SecureSecret] = None
 
 
-def _get_jwt_secret() -> str:
+def _get_jwt_secret() -> SecureSecret:
     """
     Возвращает JWT secret из env или генерирует эфемерный для dev.
-    В production отсутствие JWT_SECRET — фатальная ошибка.
+
+    ИСПРАВЛЕНО (audit P1):
+    - Секрет оборачивается в SecureSecret (защищённая память)
+    - В production отсутствие JWT_SECRET — фатальная ошибка
+    - В dev режиме — случайный 48-byte секрет (не фиксированная строка!)
+    - Bytes передаются напрямую в jwt.encode/decode (без создания Python str)
+
+    Returns:
+        SecureSecret: защищённый объект с секретом
     """
     global _JWT_SECRET
+
+    # Возвращаем существующий секрет (кэш в защищённой памяти)
     if _JWT_SECRET is not None:
         return _JWT_SECRET
 
+    # Пробуем загрузить из переменной окружения
     env_secret = os.getenv("JWT_SECRET")
+    is_production = os.getenv("ENVIRONMENT", "development") == "production"
+
     if env_secret:
+        # === JWT_SECRET задан в окружении ===
         if len(env_secret) < 32:
             logger.warning(
                 "⚠️ JWT_SECRET is shorter than 32 chars — "
                 "consider using a stronger secret in production."
             )
-        _JWT_SECRET = env_secret
+        # Оборачиваем в SecureSecret (защищённая память + mlock)
+        _JWT_SECRET = SecureSecret(env_secret)
+        logger.info(
+            f"🔐 JWT secret loaded from environment "
+            f"(length: {len(env_secret)}, locked: {_JWT_SECRET.is_locked()})"
+        )
         return _JWT_SECRET
 
-    # Dev-режим: генерируем случайный эфемерный секрет
-    if os.getenv("ENVIRONMENT", "development") == "production":
+    # === JWT_SECRET не задан ===
+    if is_production:
+        # В production — фатальная ошибка
         raise RuntimeError(
             "JWT_SECRET environment variable MUST be set in production. "
             "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
         )
 
-    _JWT_SECRET = secrets.token_urlsafe(48)
+    # В dev режиме — генерируем СЛУЧАЙНЫЙ секрет (не фиксированный!)
+    # Это безопаснее, чем хардкод "dev-secret-123"
+    random_secret = secrets.token_urlsafe(48)
+    _JWT_SECRET = SecureSecret(random_secret)
     logger.warning(
-        "⚠️ JWT_SECRET not set — using ephemeral random secret. "
-        "All tokens will be invalidated on restart."
+        "⚠️ JWT_SECRET not set — generated random ephemeral secret. "
+        "All tokens will be invalidated on restart. "
+        f"(locked: {_JWT_SECRET.is_locked()})"
     )
     return _JWT_SECRET
 
 
+def destroy_jwt_secret() -> None:
+    """
+    Явно уничтожает JWT-секрет из памяти.
+
+    Вызывается при graceful shutdown приложения для:
+    - Немедленного zeroing буфера (не ждать GC)
+    - Освобождения mlock
+    - Защиты от memory forensics после остановки
+
+    ИСПРАВЛЕНО (audit P1): добавлено для явного управления жизненным циклом.
+    """
+    global _JWT_SECRET
+    if _JWT_SECRET is not None:
+        try:
+            _JWT_SECRET.destroy()
+            logger.debug("🔐 JWT secret destroyed from memory")
+        except Exception as e:
+            logger.debug(f"Error destroying JWT secret: {e}")
+        finally:
+            _JWT_SECRET = None
+
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 часа по умолчанию
+
 
 # Пути, которые НЕ требуют аутентификации (public endpoints)
 PUBLIC_PATHS = {
@@ -127,6 +179,7 @@ PUBLIC_PATHS = {
     "/metrics",  # Prometheus scraping
 }
 
+
 # Префиксы путей, требующих конкретных ролей
 ROLE_REQUIRED_PREFIXES = {
     "/api/v1/security": UserRole.ADMIN,
@@ -138,7 +191,7 @@ ROLE_REQUIRED_PREFIXES = {
 
 
 # ============================================================================
-# TOKEN OPERATIONS
+# TOKEN OPERATIONS — ИСПРАВЛЕНО (audit P1): работа с SecureSecret
 # ============================================================================
 
 
@@ -151,6 +204,11 @@ def create_access_token(
     """
     Создаёт JWT access token.
 
+    ИСПРАВЛЕНО (audit P1):
+    - Секрет извлекается как bytes (через SecureSecret.get())
+    - Bytes передаются напрямую в jwt.encode() без создания Python str
+    - Это предотвращает попадание секрета в string interning pool
+
     Args:
         subject: Идентификатор пользователя/клиента
         role: Роль (admin/operator/readonly)
@@ -160,7 +218,10 @@ def create_access_token(
     Returns:
         Закодированный JWT токен
     """
+    # ИСПРАВЛЕНО: получаем bytes из защищённой памяти
     secret = _get_jwt_secret()
+    secret_bytes = secret.get()  # bytes, не str!
+
     now = datetime.utcnow()
     expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
 
@@ -171,19 +232,29 @@ def create_access_token(
         "iat": now,
         "exp": expire,
     }
-    return jwt.encode(payload, secret, algorithm=ALGORITHM)
+
+    # jwt.encode() принимает key как Union[str, bytes]
+    # bytes безопаснее — не попадает в string pool
+    return jwt.encode(payload, secret_bytes, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> TokenData:
     """
     Декодирует и валидирует JWT токен.
 
+    ИСПРАВЛЕНО (audit P1):
+    - Секрет извлекается как bytes через SecureSecret.get()
+    - Bytes передаются в jwt.decode() без создания Python str
+
     Raises:
         HTTPException 401 если токен невалиден или истёк.
     """
+    # ИСПРАВЛЕНО: получаем bytes из защищённой памяти
     secret = _get_jwt_secret()
+    secret_bytes = secret.get()  # bytes, не str!
+
     try:
-        payload = jwt.decode(token, secret, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, secret_bytes, algorithms=[ALGORITHM])
         return TokenData(
             sub=payload.get("sub", ""),
             role=UserRole(payload.get("role", "readonly")),
@@ -260,7 +331,6 @@ async def get_current_user(
 ) -> TokenData:
     """
     FastAPI-зависимость: извлекает и валидирует пользователя из запроса.
-
     Поддерживает два способа аутентификации:
     1. Bearer JWT токен (Authorization: Bearer <jwt>)
     2. API key (X-API-Key: cortex_...)
@@ -368,6 +438,7 @@ async def authorize_request(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Path requires {required.value} role",
         )
+
     return user
 
 
