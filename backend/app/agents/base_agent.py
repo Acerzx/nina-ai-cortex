@@ -2,9 +2,11 @@
 Base Agent — базовый класс для всех AI-агентов в Multi-Agent Swarm.
 Обеспечивает единый интерфейс, логирование решений и интеграцию с ObservatoryState.
 
-ИСПРАВЛЕНО (audit 7.1): Добавлен Template Method pattern для устранения
-дублирования логики в методах analyze() и execute().
+ИСПРАВЛЕНО (audit 7.1): Внедрён Template Method pattern.
+Методы analyze() и execute() реализуют общий алгоритм с хуками
+для специфичной логики каждого агента, устраняя дублирование.
 """
+
 import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
@@ -19,6 +21,7 @@ logger = logging.getLogger("BaseAgent")
 
 class AgentDecision(BaseModel):
     """Структура решения агента (для Decision Audit Trail)."""
+
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     agent: str
     decision_type: str
@@ -32,6 +35,7 @@ class AgentDecision(BaseModel):
 
 class AgentContext(BaseModel):
     """Контекст, передаваемый агенту для принятия решения."""
+
     current_metrics: Dict[str, Any]
     weather: Dict[str, Any]
     astronomy: Dict[str, Any]
@@ -45,11 +49,13 @@ class AgentContext(BaseModel):
 class BaseAgent(ABC):
     """
     Базовый класс для всех AI-агентов.
-    
-    ИСПРАВЛЕНО (audit 7.1): Добавлен Template Method pattern.
-    Методы analyze() и execute() теперь используют шаблонный метод
-    с хуками для специфичной логики каждого агента.
-    
+
+    ИСПРАВЛЕНО (audit 7.1): Внедрён Template Method pattern.
+    Методы analyze() и execute() теперь реализуют общий алгоритм
+    с хуками (_validate_context, _gather_data, _make_decision,
+    _log_decision, _validate_decision, _prepare_execution,
+    _perform_action, _post_process) для специфичной логики.
+
     Архитектурные принципы:
     - Все агенты обращаются к ObservatoryState для получения данных
     - Все решения логируются в Decision Audit Trail
@@ -75,31 +81,31 @@ class BaseAgent(ABC):
         logger.info(f"🛑 Agent '{self.name}' shutdown")
 
     # ========================================================================
-    # TEMPLATE METHOD PATTERN (audit 7.1)
+    # TEMPLATE METHOD: analyze()
     # ========================================================================
-    
+
     async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
         """
         TEMPLATE METHOD: Анализирует контекст и принимает решение.
-        
-        Этот метод реализует общий алгоритм анализа:
+
+        Общий алгоритм:
         1. Валидация контекста (hook: _validate_context)
         2. Сбор дополнительных данных (hook: _gather_data)
         3. Анализ и принятие решения (hook: _make_decision)
         4. Логирование решения (hook: _log_decision)
-        
+
         Args:
             context: Текущий контекст обсерватории
-            
+
         Returns:
-            AgentDecision если решение принято, None если нет необходимости действовать
+            AgentDecision если решение принято, None если нет необходимости
         """
         # Hook 1: Валидация контекста
         if not await self._validate_context(context):
-            logger.debug(f"{self.name}: Context validation failed, skipping analysis")
+            logger.debug(f"{self.name}: Context validation failed, skipping")
             return None
 
-        # Hook 2: Сбор дополнительных данных
+        # Hook 2: Сбор дополнительных данных (RAG, внешние API)
         enriched_context = await self._gather_data(context)
 
         # Hook 3: Анализ и принятие решения
@@ -111,19 +117,23 @@ class BaseAgent(ABC):
 
         return decision
 
+    # ========================================================================
+    # TEMPLATE METHOD: execute()
+    # ========================================================================
+
     async def execute(self, decision: AgentDecision) -> bool:
         """
         TEMPLATE METHOD: Выполняет принятое решение.
-        
-        Этот метод реализует общий алгоритм выполнения:
+
+        Общий алгоритм:
         1. Валидация решения (hook: _validate_decision)
         2. Подготовка к выполнению (hook: _prepare_execution)
         3. Выполнение действия (hook: _perform_action)
         4. Постобработка (hook: _post_process)
-        
+
         Args:
             decision: Решение для выполнения
-            
+
         Returns:
             True если выполнение успешно, False в противном случае
         """
@@ -136,7 +146,11 @@ class BaseAgent(ABC):
         await self._prepare_execution(decision)
 
         # Hook 3: Выполнение действия
-        success = await self._perform_action(decision)
+        try:
+            success = await self._perform_action(decision)
+        except Exception as e:
+            logger.error(f"{self.name}: Action failed with error: {e}")
+            success = False
 
         # Hook 4: Постобработка
         await self._post_process(decision, success)
@@ -200,7 +214,7 @@ class BaseAgent(ABC):
         """
         HOOK (АБСТРАКТНЫЙ): Выполняет действие решения.
         ДОЛЖЕН быть реализован в каждом наследнике.
-        
+
         Returns:
             True если действие успешно, False в противном случае
         """
@@ -229,11 +243,11 @@ class BaseAgent(ABC):
     def log_decision(self, decision: AgentDecision):
         """Логирует решение в Decision Audit Trail."""
         self._decision_log.append(decision)
-        
+
         # Ограничиваем размер лога
         if len(self._decision_log) > 1000:
             self._decision_log = self._decision_log[-1000:]
-        
+
         # Логируем в ObservatoryState для объяснимости
         observatory_state.log_ai_action(
             agent=self.name,
@@ -252,7 +266,7 @@ class BaseAgent(ABC):
         Вызывается после выполнения действия и оценки результата.
         """
         decision.outcome = outcome
-        
+
         # Автоматическая оценка hindsight verdict
         if outcome == "SUCCESS":
             decision.hindsight_verdict = "CORRECT"
