@@ -211,27 +211,27 @@ class HybridLangGraphOrchestrator:
     async def _diagnostic_analysis_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """
-        Diagnostic Workflow: поиск корневых причин проблем
-        """
         logger.info(f"🔬 Running diagnostic analysis for {state['workflow_id']}")
 
-        # TODO: Интеграция с Diagnostician Agent
-        # Вызываем Diagnostician Agent для анализа
+        # ИСПРАВЛЕНО (проблема #2): Формируем корректный AgentContext
         from app.agents.diagnostician_agent import DiagnosticianAgent
+        from app.agents.base_agent import AgentContext
 
         diagnostician = DiagnosticianAgent()
 
-        # Создаем решение для анализа
-        decision = AgentDecision(
-            agent="HybridWorkflow",
-            decision_type="DIAGNOSTIC_ANALYSIS",
-            inputs={"trigger": state["trigger_event"], "context": state["context"]},
-            rationale="Hybrid workflow diagnostic analysis",
+        # ИСПРАВЛЕНО: Создаём AgentContext, а не AgentDecision
+        context = AgentContext(
+            current_metrics=observatory_state.current_metrics,
+            weather=observatory_state.weather,
+            astronomy=observatory_state.astronomy,
+            sequence_state=state_tracker.get_state(),
+            safety_status=observatory_state.safety_status,
+            active_alerts=observatory_state.active_alerts,
+            custom_data={"trigger": state["trigger_event"]},
         )
 
         # Выполняем анализ (асинхронно)
-        analysis_result = await diagnostician.analyze(decision)
+        analysis_result = await diagnostician.analyze(context)
 
         # Извлекаем результаты
         if analysis_result and analysis_result.outputs:
@@ -252,13 +252,11 @@ class HybridLangGraphOrchestrator:
     async def _post_mortem_analysis_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """
-        Post-Mortem Workflow: анализ завершенной сессии
-        """
         logger.info(f"📊 Running post-mortem analysis for {state['workflow_id']}")
 
-        # TODO: Интеграция с Auditor Agent
+        # ИСПРАВЛЕНО (проблема #2): Формируем корректный AgentContext
         from app.agents.auditor_agent import AuditorAgent
+        from app.agents.base_agent import AgentContext
 
         auditor = AuditorAgent()
 
@@ -266,16 +264,19 @@ class HybridLangGraphOrchestrator:
         session_id = state["context"].get("session_id", "unknown")
         state["session_id"] = session_id
 
-        # Создаем решение для аудита
-        decision = AgentDecision(
-            agent="HybridWorkflow",
-            decision_type="POST_MORTEM_ANALYSIS",
-            inputs={"session_id": session_id, "context": state["context"]},
-            rationale="Hybrid workflow post-mortem analysis",
+        # ИСПРАВЛЕНО: Создаём AgentContext, а не AgentDecision
+        context = AgentContext(
+            current_metrics=observatory_state.current_metrics,
+            weather=observatory_state.weather,
+            astronomy=observatory_state.astronomy,
+            sequence_state=state_tracker.get_state(),
+            safety_status=observatory_state.safety_status,
+            active_alerts=[],
+            custom_data={"session_id": session_id, "context": state["context"]},
         )
 
         # Выполняем анализ
-        audit_result = await auditor.analyze(decision)
+        audit_result = await auditor.analyze(context)
 
         # Извлекаем результаты
         if audit_result and audit_result.outputs:

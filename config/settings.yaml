@@ -1,10 +1,10 @@
 # ============================================================================
-# N.I.N.A. AI Cortex — Конфигурация (v3.0)
+# N.I.N.A. AI Cortex — Конфигурация (v4.0)
 # ============================================================================
-# Упрощена для локального использования:
-#   - Удалены: auth, security, home_assistant, plugins_status
-#   - Добавлены: simulation, metrics, openapi, execution
-#   - model_name (deprecated) удалён из ai_settings
+# v4.0 изменения:
+#   - Добавлена секция session_metadata (исправление проблемы #7)
+#   - Добавлены feature flags для новых идей (RAG, Predictive HAL, ML, etc.)
+#   - Добавлена секция security для sensitive patterns
 # ============================================================================
 
 # 1. ПУТИ N.I.N.A.
@@ -26,7 +26,6 @@ network:
 # 3. INFLUXDB
 influxdb:
   url: "http://localhost:8086"
-  # ИСПРАВЛЕНО: используем переменную окружения вместо захардкоженного токена
   token: "${INFLUXDB_TOKEN}"
   org: "observatory"
   bucket: "nina_telemetry"
@@ -61,6 +60,12 @@ watchers:
   dither_statistics_path: null
   guiding_analyzer_path: null
   dynamic_sequencer_path: null
+  # ИСПРАВЛЕНО (проблема #7): Добавлена секция session_metadata
+  session_metadata:
+    files:
+      - "ImageMetaData.json"
+      - "AcquisitionDetails.json"
+      - "WeatherData.json"
 
 # 9. ЛОГИРОВАНИЕ
 logging:
@@ -94,21 +99,18 @@ thresholds:
     z_score_threshold: 3.0
     min_history_points: 5
     anomaly_cooldown_seconds: 300
-
   calibrator:
     bias_freshness_days: 90
     dark_freshness_days: 30
     flat_freshness_days: 7
     temperature_tolerance: 2.0
     alert_cooldown_seconds: 600
-
   preflight:
     cloud_cover_max: 80.0
     wind_speed_max: 20.0
     humidity_max: 90.0
     min_free_disk_space_gb: 50.0
     camera_cooled_threshold: -10.0
-
   strategist:
     snr_target: 20.0
     hfr_target: 2.5
@@ -120,15 +122,12 @@ thresholds:
     hfr_degradation_threshold: 0.05
     min_proposal_interval_seconds: 600
     wind_load_warning: 10.0
-
   guardian:
     wind_speed_park: 20.0
     cloud_cover_pause: 80.0
     humidity_warning: 90.0
     rms_recalibration: 3.0
     temperature_alarm: 5.0
-
-  # Disk Monitor (ИСПРАВЛЕНО: вынесено из хардкода)
   storage:
     warning_threshold_gb: 50.0
     critical_threshold_gb: 20.0
@@ -150,26 +149,26 @@ decision_audit:
   auto_cleanup_enabled: true
   auto_cleanup_interval_hours: 24
 
-# 14. SIMULATION MODE (НОВОЕ — вынесено из fake_nina.py)
+# 14. SIMULATION MODE
 simulation:
   flush_every_frames: 10
   flush_every_seconds: 30.0
   frame_delay_seconds: 2.0
 
-# 15. МЕТРИКИ И ИСТОРИЯ (НОВОЕ — вынесено из observatory_state.py)
+# 15. МЕТРИКИ И ИСТОРИЯ
 metrics:
   history_max_points: 100
   ai_action_log_max: 1000
   active_alerts_max: 50
   update_interval: 3.0
 
-# 16. OPENAPI (НОВОЕ — для dynamic trigger emulator)
+# 16. OPENAPI
 openapi:
   spec_path: "config/nina_api_spec.json"
   auto_load: true
   cache_enabled: true
 
-# 17. EXECUTION (НОВОЕ — конфигурация trigger emulator)
+# 17. EXECUTION
 execution:
   agent_aliases:
     autofocus: autofocus
@@ -177,9 +176,64 @@ execution:
     guider_calibration: guider_calibrate
     phd2_settle: guider_start
     emergency_park: mount_park
-  # trigger_patterns:  # Опционально — переопределение DEFAULT_TRIGGER_PATTERNS
-  #   autofocus:
-  #     method: GET
-  #     path_pattern: "/equipment/focuser/auto-focus"
-  #     category: focuser
-  #     risk_level: LOW
+
+# ============================================================================
+# НОВОЕ v4.0: FEATURE FLAGS (поведенческие флаги)
+# ============================================================================
+feature_flags:
+  # RAG расширения
+  rag:
+    auto_update_enabled: false
+    multimodal_enabled: false
+    sqlite_integration_enabled: true
+
+  # Predictive HAL
+  hal:
+    predictive_enabled: false
+    confidence_threshold_critical: 0.95
+    confidence_threshold_medium: 0.85
+    confidence_threshold_low: 0.70
+
+  # ML и аналитика
+  analytics:
+    decision_analyzer_enabled: true
+    ml_parameter_optimizer: false
+
+  # Shadow Engine
+  shadow:
+    mermaid_export_enabled: true
+    d3_visualization_enabled: false
+
+  # Метрики
+  metrics:
+    auto_source_selection: true
+
+  # Интеграции
+  integrations:
+    siril_enabled: false
+
+  # Reinforcement Learning (заглушка)
+  ml:
+    rl_pipeline_enabled: false
+
+# ============================================================================
+# НОВОЕ v4.0: SECURITY (паттерны чувствительных данных)
+# ============================================================================
+security:
+  sensitive_patterns:
+    - token
+    - password
+    - passwd
+    - secret
+    - api_key
+    - apikey
+    - api-key
+    - private_key
+    - privatekey
+    - credentials
+    - auth
+    - bearer
+    - access_key
+    - accesskey
+    - secret_key
+    - secretkey

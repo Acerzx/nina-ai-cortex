@@ -206,7 +206,11 @@ async def lifespan(app: FastAPI):
         await orchestrator.start()
 
         # 10. ИСПРАВЛЕНО (audit 11.2): Подписка на события для сбора метрик
+
         logger.info("📊 Subscribing to EventBus for metrics collection...")
+
+        # ИСПРАВЛЕНО: Храним ссылки на все обработчики
+        _event_handlers: Dict[str, Callable] = {}
 
         # Подписываемся на все события для общего счётчика
         for event_type in [
@@ -227,11 +231,18 @@ async def lifespan(app: FastAPI):
             "RAG_SEARCH",
             "MASTERS_INDEXED",
         ]:
-            event_bus.subscribe(
-                event_type, lambda data, et=event_type: _on_event_bus_event(et, data)
-            )
+            # ИСПРАВЛЕНО: Сохраняем ссылку на обработчик
+            async def _handler(data: Dict[str, Any], et: str = event_type) -> None:
+                await _on_event_bus_event(et, data)
+
+            _event_handlers[event_type] = _handler
+            event_bus.subscribe(event_type, _handler)
 
         # Специальные подписки для детальных метрик
+        _event_handlers["DECISION_MADE"] = _on_decision_made
+        _event_handlers["TRIGGER_FIRED"] = _on_trigger_fired
+        _event_handlers["LLM_RESPONSE"] = _on_llm_response
+
         event_bus.subscribe("DECISION_MADE", _on_decision_made)
         event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
         event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
@@ -260,39 +271,20 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
 
     try:
-        # 1. Отписка от событий метрик (audit 11.2)
-        for event_type in [
-            "SEQUENCE_STARTED",
-            "SEQUENCE_STOPPED",
-            "SEQUENCE_ITEM_STARTED",
-            "SEQUENCE_ITEM_COMPLETED",
-            "NEW_FRAME",
-            "ALERT",
-            "LOG_EVENT",
-            "PROMETHEUS_UPDATE",
-            "INFLUXDB_UPDATE",
-            "WEATHER_UPDATE",
-            "MODE_CHANGED",
-            "TRIGGER_FIRED",
-            "DECISION_MADE",
-            "LLM_RESPONSE",
-            "RAG_SEARCH",
-            "MASTERS_INDEXED",
-        ]:
-            try:
-                event_bus.unsubscribe(
-                    event_type,
-                    lambda data, et=event_type: _on_event_bus_event(et, data),
-                )
-            except Exception:
-                pass
 
-        try:
-            event_bus.unsubscribe("DECISION_MADE", _on_decision_made)
-            event_bus.unsubscribe("TRIGGER_FIRED", _on_trigger_fired)
-            event_bus.unsubscribe("LLM_RESPONSE", _on_llm_response)
-        except Exception:
-            pass
+
+
+        # 1. ИСПРАВЛЕНО (проблема #1): Корректная отписка с использованием сохранённых ссылок
+        for event_type, handler in _event_handlers.items():
+            try:
+                event_bus.unsubscribe(event_type, handler)
+            except Exception as e:
+                logger.debug(f"Failed to unsubscribe from {event_type}: {e}")
+"""
+
+
+
+
 
         # 2. Останавливаем агентов
         await orchestrator.stop()
@@ -576,8 +568,22 @@ async def get_observatory_full_state(request: Request):
 
 @app.get("/api/v1/observatory/session-summary", tags=["AI Agents"])
 async def get_session_summary(request: Request):
-    """Возвращает краткую сводку текущей сессии для LLM контекста."""
-    return observatory_state.get_session_summary()
+    \"\"\"Возвращает краткую сводку текущей сессии для LLM контекста.\"\"\"
+    # ИСПРАВЛЕНО (проблема #4): get_session_summary удалён, используем get_full_state
+    full_state = observatory_state.get_full_state()
+    
+    # Формируем краткую сводку из полного состояния
+    summary = {
+        "metrics": full_state.get("metrics", {}),
+        "weather": full_state.get("weather", {}),
+        "astronomy": full_state.get("astronomy", {}),
+        "safety": full_state.get("safety"),
+        "sequence": full_state.get("sequence", {}),
+        "active_alerts_count": len(full_state.get("active_alerts", [])),
+        "targets_count": len(full_state.get("targets", [])),
+    }
+    
+    return summary
 
 
 @app.get("/api/v1/agents/status", tags=["AI Agents"])

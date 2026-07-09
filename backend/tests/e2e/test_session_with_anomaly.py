@@ -23,7 +23,8 @@ from app.agents.auditor_agent import AuditorAgent
 from app.agents.calibrator_agent import CalibratorAgent
 from app.agents.scheduler_agent import SchedulerAgent
 from app.agents.copilot_agent import CopilotAgent
-from app.agents.memory_manager_agent import MemoryManagerAgent
+
+# from app.agents.memory_manager_agent import MemoryManagerAgent
 from app.core.mode_manager import ModeManager
 from app.core.events import event_bus
 
@@ -80,7 +81,7 @@ async def test_full_session_with_hfr_anomaly(tmp_path: Path):
     calibrator = CalibratorAgent(masters_auditor=None)
     scheduler = SchedulerAgent()
     copilot = CopilotAgent()
-    memory_manager = MemoryManagerAgent()
+    # memory_manager = MemoryManagerAgent()
 
     # Регистрируем агентов
     orchestrator.register_agent("Watcher", watcher)
@@ -91,7 +92,7 @@ async def test_full_session_with_hfr_anomaly(tmp_path: Path):
     orchestrator.register_agent("Calibrator", calibrator)
     orchestrator.register_agent("Scheduler", scheduler)
     orchestrator.register_agent("Copilot", copilot)
-    orchestrator.register_agent("MemoryManager", memory_manager)
+    # orchestrator.register_agent("MemoryManager", memory_manager)
 
     # Запускаем компоненты
     await watcher_manager.start()

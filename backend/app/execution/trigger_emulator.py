@@ -872,8 +872,9 @@ class TriggerEmulator:
                 },
             )
             # Публикуем событие
+
             try:
-                event_bus.publish_nowait(
+                await event_bus.publish(
                     "TRIGGER_FIRED",
                     {
                         "trigger": trigger_name,
@@ -889,9 +890,8 @@ class TriggerEmulator:
                         ),
                     },
                 )
-            except Exception:
-                # publish_nowait может не существовать — используем publish
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to publish TRIGGER_FIRED event: {e}")
             return True
 
         # Валидационная ошибка

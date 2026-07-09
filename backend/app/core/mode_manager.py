@@ -1,8 +1,8 @@
 """
 Mode Manager — управление режимами работы системы.
 Обеспечивает graceful degradation при потере LLM API или других компонентов.
-
 ИСПРАВЛЕНО: Убран спам логов httpx при health check.
+ИСПРАВЛЕНО (проблема #6): model_name → primary_model
 """
 
 import asyncio
@@ -29,7 +29,6 @@ class OperationMode(Enum):
 class ModeManager:
     """
     Менеджер режимов работы системы.
-
     Responsibilities:
     - Мониторинг здоровья LLM API (Ollama)
     - Автоматическое переключение в SAFE_AUTONOMOUS при потере LLM
@@ -93,16 +92,13 @@ class ModeManager:
         """Запускает менеджер режимов."""
         if self._running:
             return
-
         self._running = True
 
         # ИСПРАВЛЕНО: Снижаем уровень логирования httpx для этого модуля
-        # Это убирает спам "HTTP Request: GET ..." каждые 30 секунд
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
         # Запускаем health check loop
         self._health_check_task = asyncio.create_task(self._health_check_loop())
-
         logger.info(
             f"✅ Mode Manager started (current mode: {self.current_mode.value})"
         )
@@ -110,22 +106,18 @@ class ModeManager:
     async def stop(self):
         """Останавливает менеджер режимов."""
         self._running = False
-
         if self._health_check_task:
             self._health_check_task.cancel()
             try:
                 await self._health_check_task
             except asyncio.CancelledError:
                 pass
-
-        # ИСПРАВЛЕНО: Нет постоянного клиента, создаем каждый раз
         logger.info("🛑 Mode Manager stopped")
 
     async def set_mode(self, mode: OperationMode, reason: str = "Manual override"):
         """Устанавливает режим работы системы."""
         old_mode = self.current_mode
         self.current_mode = mode
-
         logger.info(
             f"🔄 Mode changed: {old_mode.value} -> {mode.value} (reason: {reason})"
         )
@@ -160,12 +152,10 @@ class ModeManager:
         """Периодически проверяет здоровье LLM API."""
         # ИСПРАВЛЕНО: Первая проверка сразу, потом каждые 30 секунд
         await self._check_llm_health()
-
         while self._running:
             try:
                 await asyncio.sleep(30)
                 await self._check_llm_health()
-
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -175,8 +165,8 @@ class ModeManager:
     async def _check_llm_health(self):
         """
         Проверяет доступность LLM API (Ollama).
-
         ИСПРАВЛЕНО: Используем контекстный менеджер для автоматического закрытия.
+        ИСПРАВЛЕНО (проблема #6): model_name → primary_model
         """
         try:
             ollama_host = settings.ai_settings.ollama_host
@@ -184,12 +174,10 @@ class ModeManager:
             # ИСПРАВЛЕНО: async with гарантирует закрытие клиента
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"{ollama_host}/api/tags")
-
                 is_healthy = response.status_code == 200
 
                 if is_healthy != self.llm_healthy:
                     self.llm_healthy = is_healthy
-
                     if is_healthy:
                         logger.info("✅ LLM API восстановлен")
                         if self.current_mode == OperationMode.SAFE_AUTONOMOUS:
@@ -220,9 +208,10 @@ class ModeManager:
                     >= self._health_log_interval
                 )
 
+                # ИСПРАВЛЕНО (проблема #6): Используем primary_model вместо model_name
                 if should_log_periodic and is_healthy:
                     logger.debug(
-                        f"LLM health check: OK (model: {settings.ai_settings.model_name})"
+                        f"LLM health check: OK (model: {settings.ai_settings.primary_model})"
                     )
                     self._last_health_log_time = now
 
@@ -235,7 +224,6 @@ class ModeManager:
                         OperationMode.SAFE_AUTONOMOUS,
                         reason="LLM API connection failed",
                     )
-
         except Exception as e:
             logger.debug(f"LLM health check error: {type(e).__name__}")
 
