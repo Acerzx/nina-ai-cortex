@@ -304,7 +304,8 @@ class FakeNinaAPI:
     async def _flush_frame_buffer(self, reason: str = "unknown") -> bool:
         """
         Сбрасывает буфер кадров на диск одним батчем.
-        Атомарная запись через temp file + rename.
+        ИСПРАВЛЕНО (v4.0 — проблема #23): использует shutil.move через run_in_executor
+        вместо aiofiles.os.replace для совместимости с Windows.
         """
         async with self._buffer_lock:
             if not self._frame_buffer:
@@ -317,32 +318,40 @@ class FakeNinaAPI:
         metadata_file = self.session_dir / "ImageMetaData.json"
 
         try:
+            # Читаем существующие данные
             if metadata_file.exists():
                 async with aiofiles.open(metadata_file, "r", encoding="utf-8") as f:
                     content = await f.read()
-                try:
-                    data = json.loads(content)
-                except json.JSONDecodeError:
-                    logger.warning(f"Corrupted metadata file, starting fresh")
-                    data = {"Frames": []}
+                    try:
+                        data = json.loads(content)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Corrupted metadata file, starting fresh")
+                        data = {"Frames": []}
             else:
                 data = {"Frames": []}
 
+            # Добавляем новые кадры
             data["Frames"].extend(frames_to_write)
 
-            # Атомарная запись через temp file + rename
+            # Атомарная запись через temp file + move
             temp_path = metadata_file.with_suffix(".json.tmp")
             async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, indent=2, ensure_ascii=False))
                 await f.flush()
 
-            await aiofiles.os.replace(temp_path, metadata_file)
+            # ИСПРАВЛЕНО: используем shutil.move через run_in_executor
+            # (aiofiles.os.replace может не работать на Windows)
+            import shutil
+            from app.core.executors import run_io
+
+            await run_io(shutil.move, str(temp_path), str(metadata_file))
 
             logger.debug(
                 f"💾 Flushed {len(frames_to_write)} frames to disk "
                 f"(reason: {reason}, total: {len(data['Frames'])})"
             )
             return True
+
         except Exception as e:
             logger.error(f"Failed to flush frame buffer: {e}")
             # Возвращаем кадры обратно в буфер

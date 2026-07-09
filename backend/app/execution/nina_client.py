@@ -205,12 +205,50 @@ class NinaAdvancedClient:
                     )
                     raise
 
+
+
             except httpx.HTTPStatusError as e:
-                # HTTP errors (4xx, 5xx) не retry-ятся
-                logger.error(
-                    f"API error {e.response.status_code}: {e.response.text[:200]}"
-                )
-                raise
+                # ИСПРАВЛЕНО (v4.0 — проблема #37): не пробрасываем исключение,
+                # а возвращаем словарь с ошибкой для graceful handling
+                error_msg = f"API error {e.response.status_code}"
+                error_details = e.response.text[:200] if e.response.text else "No details"
+                
+                logger.error(f"❌ {error_msg}: {error_details}")
+                
+                # Для 4xx ошибок — возвращаем сразу (они финальные)
+                if 400 <= e.response.status_code < 500:
+                    return {
+                        "status": "error",
+                        "code": e.response.status_code,
+                        "message": error_msg,
+                        "details": error_details,
+                        "client_error": True,
+                    }
+                
+                # Для 5xx ошибок — можно retry
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self._calculate_backoff(attempt)
+                    logger.warning(
+                        f"Server error {e.response.status_code}, "
+                        f"retrying in {delay:.1f}s "
+                        f"(attempt {attempt + 1}/{self.MAX_RETRIES})"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"❌ Server error after {self.MAX_RETRIES} attempts: "
+                        f"{e.response.status_code}"
+                    )
+                    return {
+                        "status": "error",
+                        "code": e.response.status_code,
+                        "message": error_msg,
+                        "details": error_details,
+                        "server_error": True,
+                    }
+
+
+
 
             except Exception as e:
                 last_error = e

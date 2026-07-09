@@ -232,45 +232,49 @@ class SchedulerAgent(BaseAgent):
     ) -> float:
         """
         Рассчитывает score цели на основе различных факторов.
-        ИСПРАВЛЕНО (v4.0): Используем данные N.I.N.A.
+        ИСПРАВЛЕНО (v4.0 — проблемы #29, #30):
+        - Используем mount_altitude из ObservatoryState (не пересчитываем!)
+        - Используем moon_angle из FITS (угловое расстояние, не фаза!)
         """
         score = 0.0
 
         # 1. Приоритет цели (0-40 баллов)
         score += target.priority * 4.0
 
-        # 2. Видимость (высота над горизонтом) — 0-30 баллов
-        # ИСПРАВЛЕНО: Используем mount_altitude от N.I.N.A. (не пересчитываем!)
-        altitude = target.current_altitude
-        if altitude is not None:
-            if altitude > self.min_altitude:
-                altitude_score = min(30.0, (altitude - self.min_altitude) / 2.0)
-                score += altitude_score
-            else:
-                # Цель ниже горизонта — большой штраф
-                score -= 50.0
-        else:
+        # 2. Видимость (высота над горизонтом) - 0-30 баллов
+        # ИСПРАВЛЕНО: используем текущую высоту монтировки из ObservatoryState
+        mount_altitude = observatory_state.current_metrics.get("mount_altitude")
+
+        if mount_altitude is not None and mount_altitude > self.min_altitude:
+            # Нормализуем: 30° = 0 баллов, 90° = 30 баллов
+            altitude_score = min(30.0, (mount_altitude - self.min_altitude) / 2.0)
+            score += altitude_score
+        elif mount_altitude is None:
             # Данные недоступны — небольшой штраф
             logger.debug(f"Altitude not available for target {target.name}")
-            score -= 10.0
+            score -= 5.0
+        else:
+            # Цель ниже горизонта - большой штраф
+            score -= 50.0
 
-        # 3. Расстояние до Луны — 0-20 баллов
-        # ИСПРАВЛЕНО: Используем moon_angle из FITS (угловое расстояние, не фаза!)
+        # 3. Расстояние до Луны - 0-20 баллов
+        # ИСПРАВЛЕНО: moon_angle из FITS — это уже угловое расстояние!
         if moon_angle is not None:
             moon_distance = moon_angle  # Уже угловое расстояние от N.I.N.A.
             if moon_distance > self.moon_avoidance_angle:
-                # Далеко от Луны — бонус
+                # Далеко от Луны - бонус
                 score += min(20.0, (moon_distance - self.moon_avoidance_angle))
             else:
-                # Близко к Луне — штраф (особенно для широкополосных фильтров)
+                # Близко к Луне - штраф (особенно для узкополосных фильтров)
                 if target.filter not in ["Ha", "OIII", "SII"]:
                     score -= 10.0
         else:
             logger.debug(f"Moon angle not available for target {target.name}")
 
-        # 4. Прогресс съемки — 0-10 баллов
+        # 4. Прогресс съемки - 0-10 баллов
         if target.frames_needed > 0:
             progress = target.frames_completed / target.frames_needed
+            # Бонус за частично отснятые цели
             score += progress * 10.0
 
         return score
@@ -278,7 +282,8 @@ class SchedulerAgent(BaseAgent):
     async def _apply_plan_to_dynamic_sequencer(self, plan_data: Dict[str, Any]) -> bool:
         """
         Применяет план к Dynamic Sequencer.
-        ИСПРАВЛЕНО (v4.0): Обновляем все параметры, не только priority.
+        ИСПРАВЛЕНО (v4.0 — проблема #31): обновляем все параметры целей,
+        не только priority.
         """
         try:
             projects = await dynamic_editor.list_projects()
@@ -291,13 +296,23 @@ class SchedulerAgent(BaseAgent):
             # Обновляем приоритеты и другие параметры
             for i, target_data in enumerate(targets):
                 target_name = target_data.get("name")
-                new_priority = len(targets) - i  # Обратный порядок
+                new_priority = (
+                    len(targets) - i
+                )  # Обратный порядок (первый = высший приоритет)
 
-                # ИСПРАВЛЕНО: Обновляем не только priority, но и другие поля
+                # ИСПРАВЛЕНО: обновляем не только priority, но и другие поля
                 updates = {
                     "priority": new_priority,
                     "active": True,
                 }
+
+                # Если есть дополнительные параметры в target_data — добавляем их
+                if "exposure_time" in target_data:
+                    updates["exposureTime"] = target_data["exposure_time"]
+                if "filter" in target_data:
+                    updates["filter"] = target_data["filter"]
+                if "frames_needed" in target_data:
+                    updates["acceptedAmount"] = target_data["frames_needed"]
 
                 await dynamic_editor.update_target(
                     project_name=project_name,

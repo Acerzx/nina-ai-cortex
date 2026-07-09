@@ -162,6 +162,10 @@ class PythonBridge:
 
     def __init__(self):
         self._templates = ALLOWED_TEMPLATES
+        # ИСПРАВЛЕНО (v4.0 — проблема #33): проверка версии N.I.N.A. для Task.Delay
+        self._nina_version: Optional[str] = None
+        self._use_task_delay: bool = True  # По умолчанию используем Task.Delay
+        self._version_checked: bool = False
         logger.info(
             f"🔒 PythonBridge initialized "
             f"(whitelist mode, {len(self._templates)} templates available)"
@@ -262,19 +266,8 @@ class PythonBridge:
         description: str = "AI Cortex Template Execution",
     ) -> dict:
         """
-        Выполняет заранее определённый шаблон скрипта с валидированными
-        параметрами.
-
-        Args:
-            template_name: Имя шаблона из ALLOWED_TEMPLATES
-            params: Словарь параметров (валидируются по спецификации)
-            description: Описание операции (для логов)
-
-        Returns:
-            dict с результатами выполнения или ошибкой
-
-        Raises:
-            ValueError: если шаблон не найден или параметры некорректны
+        Выполняет заранее определённый шаблон скрипта с валидированными параметрами.
+        ИСПРАВЛЕНО (v4.0 — проблема #33): проверка версии N.I.N.A. для Task.Delay.
         """
         params = params or {}
 
@@ -296,22 +289,37 @@ class PythonBridge:
             logger.error(f"❌ Parameter validation failed: {e}")
             return {"status": "error", "message": str(e)}
 
-        # 3. Безопасная подстановка параметров через string.Template
+        # 3. ИСПРАВЛЕНО: проверка версии N.I.N.A. для Task.Delay
+        await self._check_nina_version()
+
+        # Если используем Thread.Sleep fallback — заменяем Task.Delay в шаблоне
+        if not self._use_task_delay and "Task.Delay" in template_config["template"]:
+            logger.debug(
+                f"Converting Task.Delay to Thread.Sleep for N.I.N.A. {self._nina_version}"
+            )
+            # Создаём модифицированный шаблон с Thread.Sleep
+            template_text = template_config["template"].replace(
+                "await Task.Delay(", "System.Threading.Thread.Sleep("
+            )
+        else:
+            template_text = template_config["template"]
+
+        # 4. Безопасная подстановка параметров через string.Template
         try:
-            tmpl = Template(template_config["template"])
+            tmpl = Template(template_text)
             code = tmpl.safe_substitute(validated_params)
         except Exception as e:
             logger.error(f"❌ Template substitution failed: {e}")
             return {"status": "error", "message": f"Template error: {e}"}
 
-        # 4. Финальная проверка сгенерированного кода
+        # 5. Финальная проверка сгенерированного кода
         for forbidden in FORBIDDEN_SUBSTRINGS:
             if forbidden.lower() in code.lower():
                 error_msg = f"Generated code contains forbidden substring: {forbidden}"
                 logger.error(f"❌ {error_msg}")
                 return {"status": "error", "message": error_msg}
 
-        # 5. Логирование и отправка
+        # 6. Логирование и отправка
         logger.info(
             f"🔒 Executing whitelisted template: {template_name} "
             f"(description: {description})"
@@ -407,6 +415,58 @@ class PythonBridge:
                 },
             }
         return result
+
+    async def _check_nina_version(self) -> bool:
+        """
+        Проверяет версию N.I.N.A. для определения поддержки Task.Delay.
+        Task.Delay доступен в N.I.N.A. >= 3.0 с IronPython 2.7.9+
+        """
+        if self._version_checked:
+            return self._use_task_delay
+
+        try:
+            from app.execution.nina_client import nina_client
+
+            # Получаем версию через API
+            response = await nina_client.get("version")
+            version_str = response.get("Response", response.get("text", ""))
+
+            # Парсим версию
+            if version_str:
+                self._nina_version = version_str.strip()
+
+                # Проверяем, что версия >= 3.0
+                try:
+                    version_parts = self._nina_version.split(".")
+                    major = int(version_parts[0]) if version_parts else 0
+
+                    if major >= 3:
+                        self._use_task_delay = True
+                        logger.info(
+                            f"✅ N.I.N.A. version {self._nina_version} supports Task.Delay"
+                        )
+                    else:
+                        self._use_task_delay = False
+                        logger.warning(
+                            f"⚠️ N.I.N.A. version {self._nina_version} is older than 3.0, "
+                            f"using Thread.Sleep fallback"
+                        )
+                except (ValueError, IndexError):
+                    # Не удалось распарсить — используем Task.Delay по умолчанию
+                    self._use_task_delay = True
+                    logger.debug(
+                        f"Could not parse N.I.N.A. version: {version_str}, "
+                        f"using Task.Delay by default"
+                    )
+
+            self._version_checked = True
+            return self._use_task_delay
+
+        except Exception as e:
+            logger.debug(f"Could not check N.I.N.A. version: {e}")
+            # По умолчанию используем Task.Delay
+            self._version_checked = True
+            return True
 
 
 python_bridge = PythonBridge()

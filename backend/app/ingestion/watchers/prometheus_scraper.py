@@ -26,19 +26,50 @@ class PrometheusScraper:
     Устраняет Упрощение #8: парсит ВСЕ метрики оборудования и погоды.
     """
 
-    def __init__(self, interval_sec: float = 3.0):
+    def __init__(self, interval_sec: Optional[float] = None):
+        # ИСПРАВЛЕНО (v4.0 — проблема #42): интервал читается из конфига
+        if interval_sec is not None:
+            self.interval = interval_sec
+        else:
+            # Читаем из settings.data_sources.metrics_poll_interval
+            try:
+                ds_cfg = getattr(settings, "data_sources", None)
+                if ds_cfg:
+                    self.interval = getattr(ds_cfg, "metrics_poll_interval", 3.0)
+                else:
+                    self.interval = 3.0
+            except Exception as e:
+                logger.debug(f"Could not load metrics_poll_interval: {e}")
+                self.interval = 3.0
+
+        # Валидация интервала
+        if self.interval < 1.0:
+            logger.warning(
+                f"⚠️ Prometheus scrape interval {self.interval}s is too small, "
+                f"setting to 1.0s minimum"
+            )
+            self.interval = 1.0
+        elif self.interval > 60.0:
+            logger.warning(
+                f"⚠️ Prometheus scrape interval {self.interval}s is too large, "
+                f"setting to 60.0s maximum"
+            )
+            self.interval = 60.0
+
         self.url = f"{settings.network.prometheus_url}/metrics"
-        self.interval = interval_sec
         self._running = False
         self._task: asyncio.Task = None
 
-        # ИСПРАВЛЕНО: Трекинг состояния для защиты от спама
+        # Трекинг состояния для защиты от спама
         self._last_error_time: datetime = None
         self._consecutive_errors: int = 0
-        self._error_log_interval = timedelta(
-            minutes=1
-        )  # Логировать ошибку раз в минуту
-        self._was_connected: bool = False  # Для логирования восстановления
+        self._error_log_interval = timedelta(minutes=1)
+        self._was_connected: bool = False
+
+        logger.info(
+            f"📊 PrometheusScraper initialized "
+            f"(interval: {self.interval}s, url: {self.url})"
+        )
 
     async def start(self):
         self._running = True

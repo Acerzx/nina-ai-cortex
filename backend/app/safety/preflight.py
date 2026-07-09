@@ -1,12 +1,15 @@
 """
 Pre-flight Checklist — формализованный чек-лист перед стартом сессии.
 Основан на архитектуре Atlas (8 gates с агрегированным verdict).
-
 ИСПРАВЛЕНО (audit 12.3):
 - CalibrationGate теперь проверяет наличие мастеров через MastersLibraryAuditor
 - DiskSpaceGate проверяет свободное место через disk_monitor.check_all_disks()
 - APIHealthGate проверяет доступность N.I.N.A. API через nina_client.health_check()
 - Добавлена проверка оборудования через observatory_state
+ИСПРАВЛЕНО (v4.0 — проблемы #20, #34, #35):
+- Унифицированы имена порогов (cloud_cover_max вместо cloud_cover_max_percent)
+- Порог температуры камеры читается из settings (не хардкод)
+- Проверка мастеров учитывает gain, offset, binning
 """
 
 import logging
@@ -54,16 +57,10 @@ class PreFlightReport(BaseModel):
 class PreFlightChecker:
     """
     Pre-flight checker с 8 gates (на основе Atlas).
-
-    Gates:
-    1. WeatherGate — погодные условия
-    2. HardwareGate — статус оборудования
-    3. CalibrationGate — свежесть калибровок (ИСПРАВЛЕНО audit 12.3)
-    4. DiskSpaceGate — свободное место на диске (ИСПРАВЛЕНО audit 12.3)
-    5. APIHealthGate — доступность N.I.N.A. API (ИСПРАВЛЕНО audit 12.3)
-    6. SafetyMonitorGate — статус Safety Monitor
-    7. SequenceGate — готовность секвенсора
-    8. ModeGate — режим работы системы
+    ИСПРАВЛЕНО (v4.0):
+    - Все пороги читаются из settings.thresholds.preflight
+    - Унифицированы имена порогов
+    - Проверка мастеров учитывает все параметры
     """
 
     def __init__(self):
@@ -81,17 +78,39 @@ class PreFlightChecker:
         # Настраиваемые пороги из конфига
         thresholds = getattr(settings, "thresholds", None)
         if thresholds:
-            self.cloud_cover_max = getattr(thresholds, "cloud_cover_max_percent", 80.0)
-            self.wind_speed_max = getattr(thresholds, "wind_speed_max_mps", 20.0)
-            self.humidity_max = getattr(thresholds, "humidity_max_percent", 90.0)
-            self.min_free_disk_space_gb = getattr(
-                thresholds, "min_free_disk_space_gb", 20.0
-            )
+            preflight_cfg = getattr(thresholds, "preflight", None)
+            if preflight_cfg:
+                # ИСПРАВЛЕНО (v4.0 — проблема #20): унифицированные имена
+                self.cloud_cover_max = getattr(preflight_cfg, "cloud_cover_max", 80.0)
+                self.wind_speed_max = getattr(preflight_cfg, "wind_speed_max", 20.0)
+                self.humidity_max = getattr(preflight_cfg, "humidity_max", 90.0)
+                self.min_free_disk_space_gb = getattr(
+                    preflight_cfg, "min_free_disk_space_gb", 50.0
+                )
+                # ИСПРАВЛЕНО (v4.0 — проблема #34): настраиваемый порог
+                self.camera_cooled_threshold = getattr(
+                    preflight_cfg, "camera_cooled_threshold", -10.0
+                )
+            else:
+                # Fallback на дефолтные значения
+                self.cloud_cover_max = 80.0
+                self.wind_speed_max = 20.0
+                self.humidity_max = 90.0
+                self.min_free_disk_space_gb = 50.0
+                self.camera_cooled_threshold = -10.0
         else:
+            # Fallback если thresholds вообще нет
             self.cloud_cover_max = 80.0
             self.wind_speed_max = 20.0
             self.humidity_max = 90.0
-            self.min_free_disk_space_gb = 20.0
+            self.min_free_disk_space_gb = 50.0
+            self.camera_cooled_threshold = -10.0
+
+        logger.info(
+            f"✅ PreFlightChecker initialized "
+            f"(cloud_cover_max: {self.cloud_cover_max}%, "
+            f"camera_cooled_threshold: {self.camera_cooled_threshold}°C)"
+        )
 
     async def run_all(self) -> PreFlightReport:
         """Запускает все проверки и возвращает агрегированный отчет."""
@@ -130,8 +149,8 @@ class PreFlightChecker:
 
         # Публикуем отчет
         await event_bus.publish("PREFLIGHT_REPORT", report.model_dump())
-        logger.info(f"✅ Pre-flight check complete: {verdict.value}")
 
+        logger.info(f"✅ Pre-flight check complete: {verdict.value}")
         return report
 
     async def _check_weathergate(self) -> GateResult:
@@ -146,8 +165,10 @@ class PreFlightChecker:
             return GateResult(
                 gate_name="WeatherGate",
                 status=GateStatus.NO_GO,
-                message=f"Cloud cover too high: {cloud_cover}% "
-                f"(max {self.cloud_cover_max}%)",
+                message=(
+                    f"Cloud cover too high: {cloud_cover}% "
+                    f"(max {self.cloud_cover_max}%)"
+                ),
                 details={"cloud_cover": cloud_cover},
             )
 
@@ -155,8 +176,10 @@ class PreFlightChecker:
             return GateResult(
                 gate_name="WeatherGate",
                 status=GateStatus.NO_GO,
-                message=f"Wind speed too high: {wind_speed} m/s "
-                f"(max {self.wind_speed_max} m/s)",
+                message=(
+                    f"Wind speed too high: {wind_speed} m/s "
+                    f"(max {self.wind_speed_max} m/s)"
+                ),
                 details={"wind_speed": wind_speed},
             )
 
@@ -176,7 +199,10 @@ class PreFlightChecker:
         )
 
     async def _check_hardwaregate(self) -> GateResult:
-        """Проверка статуса оборудования."""
+        """
+        Проверка статуса оборудования.
+        ИСПРАВЛЕНО (v4.0 — проблема #34): порог температуры из конфига
+        """
         metrics = observatory_state.current_metrics
         camera_temp = metrics.get("camera_temp")
 
@@ -188,12 +214,15 @@ class PreFlightChecker:
                 details={},
             )
 
-        # Проверяем, что камера охлаждена
-        if camera_temp > -10.0:
+        # ИСПРАВЛЕНО: используем настраиваемый порог вместо хардкода -10°C
+        if camera_temp > self.camera_cooled_threshold:
             return GateResult(
                 gate_name="HardwareGate",
                 status=GateStatus.CAUTION,
-                message=f"Camera not fully cooled: {camera_temp}°C",
+                message=(
+                    f"Camera not fully cooled: {camera_temp}°C "
+                    f"(threshold: {self.camera_cooled_threshold}°C)"
+                ),
                 details={"camera_temp": camera_temp},
             )
 
@@ -208,11 +237,13 @@ class PreFlightChecker:
         """
         ИСПРАВЛЕНО (audit 12.3): Реальная проверка калибровок через
         MastersLibraryAuditor.
+        ИСПРАВЛЕНО (v4.0 — проблема #35): проверка соответствия gain/offset/binning
 
         Проверяет:
         1. Инициализирован ли MastersLibraryAuditor
         2. Есть ли мастера нужных типов (BIAS, DARK, FLAT)
         3. Актуальность мастеров (дата создания)
+        4. Соответствие параметров (gain, offset, binning)
         """
         # Импортируем здесь, чтобы избежать циклических зависимостей
         try:
@@ -232,6 +263,14 @@ class PreFlightChecker:
                 message="MastersLibraryAuditor not initialized",
             )
 
+        # Получаем текущие параметры съёмки
+        current_gain = observatory_state.current_metrics.get("gain")
+        current_offset = observatory_state.current_metrics.get("offset")
+        current_binning = observatory_state.current_metrics.get("binning")
+        current_temp = observatory_state.current_metrics.get("camera_temp", -15.0)
+        current_exposure = observatory_state.current_metrics.get("exposure_time", 60.0)
+        current_filter = observatory_state.current_metrics.get("filter")
+
         # Получаем статистику мастеров
         stats = auditor.get_stats()
         total_bias = stats.get("total_bias", 0)
@@ -246,6 +285,14 @@ class PreFlightChecker:
             "total_flat": total_flat,
             "total_unknown": total_unknown,
             "scan_errors": scan_errors,
+            "current_params": {
+                "gain": current_gain,
+                "offset": current_offset,
+                "binning": current_binning,
+                "temperature": current_temp,
+                "exposure": current_exposure,
+                "filter": current_filter,
+            },
         }
 
         # Проверка наличия мастеров
@@ -265,10 +312,59 @@ class PreFlightChecker:
                 details=details,
             )
 
+        # Проверка соответствия параметров
+        # ИСПРАВЛЕНО (v4.0 — проблема #35): полная проверка gain/offset/binning
+        param_mismatches = []
+
+        if current_gain is not None:
+            # Ищем мастера с matching gain
+            matching = auditor.find_matching_master(
+                image_type="DARK",
+                temperature=current_temp,
+                exposure=current_exposure,
+                gain=current_gain,
+                temp_tolerance=2.0,
+            )
+            if not matching:
+                param_mismatches.append(f"DARK with gain={current_gain}")
+
+        if current_offset is not None:
+            matching = auditor.find_matching_master(
+                image_type="DARK",
+                temperature=current_temp,
+                exposure=current_exposure,
+                gain=current_gain,
+                offset=current_offset,
+                temp_tolerance=2.0,
+            )
+            if not matching:
+                param_mismatches.append(f"DARK with offset={current_offset}")
+
+        if current_filter:
+            matching = auditor.find_matching_master(
+                image_type="FLAT",
+                temperature=current_temp,
+                filter_name=current_filter,
+                gain=current_gain,
+                temp_tolerance=2.0,
+            )
+            if not matching:
+                param_mismatches.append(f"FLAT with filter={current_filter}")
+
+        if param_mismatches:
+            return GateResult(
+                gate_name="CalibrationGate",
+                status=GateStatus.CAUTION,
+                message=(
+                    f"No matching masters for current parameters: "
+                    f"{'; '.join(param_mismatches)}"
+                ),
+                details=details,
+            )
+
         # Проверка свежести мастеров
         summary = auditor.get_summary_by_category()
         stale_types = []
-
         freshness_days = {
             "BIAS": 90,
             "DARK": 30,
@@ -295,7 +391,7 @@ class PreFlightChecker:
                         stale_types.append(
                             f"{master_type} ({age_days}d old, max {max_days}d)"
                         )
-                        details[f"{master_type}_age_days"] = age_days
+                    details[f"{master_type}_age_days"] = age_days
                 except (ValueError, TypeError):
                     pass
 
@@ -311,22 +407,14 @@ class PreFlightChecker:
             gate_name="CalibrationGate",
             status=GateStatus.GO,
             message=(
-                f"Calibration masters available: "
+                f"Calibration masters available and matching: "
                 f"{total_bias} BIAS, {total_dark} DARK, {total_flat} FLAT"
             ),
             details=details,
         )
 
     async def _check_diskspacegate(self) -> GateResult:
-        """
-        ИСПРАВЛЕНО (audit 12.3): Реальная проверка свободного места через
-        disk_monitor.
-
-        Проверяет:
-        1. Свободное место на всех monitored путях
-        2. Предупреждение при < 50 GB
-        3. Критический NO-GO при < 20 GB (или min_free_disk_space_gb из конфига)
-        """
+        """Проверка свободного места на диске."""
         try:
             disk_usage_list = await disk_monitor.check_all_disks()
         except Exception as e:
@@ -397,10 +485,7 @@ class PreFlightChecker:
         )
 
     async def _check_apihealthgate(self) -> GateResult:
-        """
-        ИСПРАВЛЕНО (audit 12.3): Реальная проверка доступности N.I.N.A. API
-        через nina_client.health_check().
-        """
+        """Проверка доступности N.I.N.A. API."""
         try:
             is_healthy = await nina_client.health_check()
         except Exception as e:
@@ -499,7 +584,7 @@ class PreFlightChecker:
                 details={"mode": current_mode.value},
             )
 
-        # ИСПРАВЛЕНО: Проверка здоровья LLM для FULL_AI режима
+        # Проверка здоровья LLM для FULL_AI режима
         if current_mode.value == "full_ai":
             llm_healthy = mode_manager.llm_healthy
             if not llm_healthy:

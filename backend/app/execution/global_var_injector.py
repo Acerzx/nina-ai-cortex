@@ -134,8 +134,13 @@ class GlobalVarInjector:
     def _is_sensitive_value(self, value: Any) -> bool:
         """
         Проверяет, является ли значение чувствительным по своему формату.
+        ИСПРАВЛЕНО (v4.0 — проблема #32): добавлены дополнительные проверки.
 
         Использует regex-паттерны для детекции JWT, hex-строк, AWS-ключей и т.д.
+        Дополнительно проверяет:
+        - Короткие токены (16+ символов, похожие на ключи)
+        - Base64-строки
+        - UUID форматы
 
         Args:
             value: Значение для проверки
@@ -143,8 +148,20 @@ class GlobalVarInjector:
         Returns:
             True если значение соответствует чувствительному паттерну
         """
-        if not isinstance(value, str) or len(value) < 16:
+        if not isinstance(value, str) or len(value) < 8:
             return False
+
+        # ИСПРАВЛЕНО: более агрессивная проверка для коротких значений
+        if len(value) < 16:
+            # Короткие значения маскируем если они выглядят как hex/base64
+            import re
+
+            # Hex строки (8+ символов)
+            if re.match(r"^[a-fA-F0-9]{8,}$", value):
+                return True
+            # Base64-подобные (с символами +/=)
+            if re.match(r"^[A-Za-z0-9+/]{8,}={0,2}$", value):
+                return True
 
         return any(pattern.match(value) for pattern in VALUE_PATTERNS)
 

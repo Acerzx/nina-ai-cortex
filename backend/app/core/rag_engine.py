@@ -517,14 +517,7 @@ class RAGEngine:
     ) -> int:
         """
         Добавляет документ в векторную базу.
-
-        Args:
-            text: Текст документа
-            metadata: Метаданные
-            chunk_type: Тип чанкинга (documentation/session/error_log)
-
-        Returns:
-            Количество добавленных чанков
+        ИСПРАВЛЕНО (v4.0 — проблема #40): логирование пропущенных чанков.
         """
         if not self._initialized:
             logger.warning("RAG Engine not initialized")
@@ -536,10 +529,17 @@ class RAGEngine:
 
         chunks = self._chunk_text(text, chunk_type)
         points = []
+        skipped_chunks = 0  # ИСПРАВЛЕНО: счётчик пропущенных чанков
 
         for i, chunk in enumerate(chunks):
             embedding = await self._get_embedding(chunk)
+
             if not embedding:
+                # ИСПРАВЛЕНО: логируем пропущенные чанки
+                skipped_chunks += 1
+                logger.debug(
+                    f"Skipped chunk {i + 1}/{len(chunks)} (embedding generation failed)"
+                )
                 continue
 
             chunk_metadata = {
@@ -551,12 +551,21 @@ class RAGEngine:
             }
 
             point_id = self._generate_point_id(chunk, chunk_metadata)
+
             points.append(
                 PointStruct(
                     id=point_id,
                     vector=embedding,
                     payload={"text": chunk, **chunk_metadata},
                 )
+            )
+
+        # ИСПРАВЛЕНО: логируем статистику пропущенных чанков
+        if skipped_chunks > 0:
+            logger.warning(
+                f"⚠️ Skipped {skipped_chunks}/{len(chunks)} chunks "
+                f"from {metadata.get('source', 'unknown')} "
+                f"(embedding generation failed)"
             )
 
         if not points:
@@ -582,8 +591,9 @@ class RAGEngine:
 
             self._stats["documents_added"] += 1
             self._stats["chunks_added"] += len(points)
+
             logger.info(
-                f"✅ Added {len(points)} chunks from "
+                f"✅ Added {len(points)}/{len(chunks)} chunks from "
                 f"{metadata.get('source', 'unknown')}"
             )
             return len(points)
@@ -643,14 +653,7 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
     ) -> List[Dict[str, Any]]:
         """
         Семантический поиск по базе знаний.
-
-        Args:
-            query: Поисковый запрос
-            top_k: Количество результатов
-            filters: Фильтры по метаданным
-
-        Returns:
-            Список результатов поиска
+        ИСПРАВЛЕНО (v4.0 — проблема #41): логирование ошибок поиска.
         """
         if not self._initialized:
             return []
@@ -662,8 +665,13 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
 
         # Получаем эмбеддинг запроса (с кэшированием)
         query_embedding = await self._get_embedding(query)
+
         if not query_embedding:
-            logger.warning(f"Failed to get embedding for query: {query[:50]}")
+            # ИСПРАВЛЕНО: логируем ошибку генерации эмбеддинга
+            logger.warning(
+                f"⚠️ RAG search failed: could not generate embedding "
+                f"for query: {query[:50]}..."
+            )
             return []
 
         # Строим фильтр
@@ -681,6 +689,7 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
         try:
             # Поддержка обоих API qdrant-client
             results = []
+
             try:
                 # Новый API (>= 1.7.0)
                 response = await self._client.query_points(
@@ -716,7 +725,11 @@ RMS: {session_data.get("avg_rms_ra")}" (RA), {session_data.get("avg_rms_dec")}" 
             return formatted_results
 
         except Exception as e:
-            logger.error(f"RAG search failed: {e}")
+            # ИСПРАВЛЕНО: логируем ошибку поиска
+            logger.error(
+                f"❌ RAG search failed for query '{query[:50]}...': "
+                f"{type(e).__name__}: {e}"
+            )
             return []
 
     async def get_context(

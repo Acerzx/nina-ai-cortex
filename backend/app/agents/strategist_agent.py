@@ -437,23 +437,54 @@ class StrategistAgent(BaseAgent):
                     "EXPOSURE_TIME", proposal.proposed_value, proposal.rationale
                 )
             elif proposal.parameter == "autofocus_interval":
-                # ИСПРАВЛЕНО (audit 4.2): обновляем все возможные варианты
-                # глобальной переменной
-                success = False
-                for var_name in self.AUTOFOCUS_INTERVAL_VARS:
-                    if var_name in state_tracker.state.global_variables:
-                        result = await global_var_injector.set_variable(
-                            var_name, proposal.proposed_value, proposal.rationale
-                        )
-                        success = success or result
-                        break
+                # ИСПРАВЛЕНО (v4.0 — проблема #21): используем единое имя из конфига
+                # и обновляем только существующие переменные
 
-                # Если переменная не найдена в Shadow Engine — создаём новую
-                if not success:
-                    success = await global_var_injector.set_variable(
-                        self.AUTOFOCUS_INTERVAL_VARS[0],
-                        proposal.proposed_value,
-                        proposal.rationale,
+                # Читаем имя переменной из конфига (или используем default)
+                var_name = self.autofocus_config.get(
+                    "interval_variable_name",
+                    self.AUTOFOCUS_INTERVAL_VARS[0],  # Fallback на первое имя
+                )
+
+                # Проверяем, существует ли переменная в Shadow Engine
+                existing_vars = []
+                for vname in self.AUTOFOCUS_INTERVAL_VARS:
+                    if vname in state_tracker.state.global_variables:
+                        existing_vars.append(vname)
+
+                if not existing_vars:
+                    # Ни одна переменная не найдена — создаём новую с именем из конфига
+                    logger.warning(
+                        f"No autofocus interval variable found in Shadow Engine. "
+                        f"Creating new variable: {var_name}"
+                    )
+                    result = await global_var_injector.set_variable(
+                        var_name, proposal.proposed_value, proposal.rationale
+                    )
+                    success = result
+                else:
+                    # Обновляем все найденные переменные
+                    success = True
+                    for vname in existing_vars:
+                        logger.info(
+                            f"🔧 Updating autofocus interval variable: {vname} "
+                            f"({proposal.current_value} → {proposal.proposed_value})"
+                        )
+                        result = await global_var_injector.set_variable(
+                            vname, proposal.proposed_value, proposal.rationale
+                        )
+                        success = success and result
+
+                # Логируем результат
+                if success:
+                    logger.info(
+                        f"✅ Autofocus interval updated successfully "
+                        f"({len(existing_vars)} variables)"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ Autofocus interval update partially failed "
+                        f"({len(existing_vars)} variables attempted)"
                     )
             elif proposal.parameter == "active_target":
                 # Переключение цели через Dynamic Sequencer

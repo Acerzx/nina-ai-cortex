@@ -76,10 +76,30 @@ class LogTailer:
             self._file_position = 0
 
     async def _tail_loop(self):
+        """
+        Основной цикл чтения лога.
+        ИСПРАВЛЕНО (v4.0 — проблема #39): защита от зацикливания при ошибках.
+        """
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        error_cooldown = 5.0  # Увеличиваем задержку при ошибках
+
         while self._running:
+            # Проверяем, существует ли активный лог
             if not self._active_log or not self._active_log.exists():
-                await asyncio.sleep(2)
-                continue
+                # ИСПРАВЛЕНО: ищем новый лог вместо зацикливания
+                logger.debug("Active log file not found, searching for new log...")
+                new_log = self._find_latest_log()
+
+                if new_log and new_log != self._active_log:
+                    logger.info(f"Switching to new log file: {new_log.name}")
+                    self._active_log = new_log
+                    self._file_position = 0
+                    consecutive_errors = 0  # Сбрасываем счётчик ошибок
+                else:
+                    # Нет доступных логов — ждём дольше
+                    await asyncio.sleep(2.0)
+                    continue
 
             try:
                 async with aiofiles.open(
@@ -87,17 +107,76 @@ class LogTailer:
                 ) as f:
                     await f.seek(self._file_position)
                     lines = await f.readlines()
+
                     if lines:
                         self._file_position = await f.tell()
+
                         for line in lines:
                             event = classify_log_line(line)
                             if event and event.event_type != "generic":
                                 await event_bus.publish("LOG_EVENT", event.model_dump())
+
                                 if event.level in ("ERROR", "FATAL"):
                                     await event_bus.publish(
                                         "LOG_ERROR", event.model_dump()
                                     )
-            except Exception as e:
-                logger.error(f"Error tailing log: {e}")
 
-            await asyncio.sleep(0.5)  # Читаем 2 раза в секунду
+                        # Успешное чтение — сбрасываем счётчик ошибок
+                        consecutive_errors = 0
+
+            except FileNotFoundError:
+                # Файл был удалён (ротация логов)
+                logger.info(f"Log file removed: {self._active_log.name}")
+                self._active_log = None
+                self._file_position = 0
+                consecutive_errors = 0
+
+            except PermissionError:
+                consecutive_errors += 1
+                logger.warning(
+                    f"Permission denied reading {self._active_log.name} "
+                    f"(errors: {consecutive_errors})"
+                )
+
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        f"Too many consecutive errors ({consecutive_errors}), "
+                        f"switching to new log file"
+                    )
+                    self._active_log = None
+                    self._file_position = 0
+                    consecutive_errors = 0
+
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"Error tailing log (attempt {consecutive_errors}): {e}")
+
+                # ИСПРАВЛЕНО: при слишком многих ошибках — переключаемся на новый лог
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        f"Too many consecutive errors ({consecutive_errors}), "
+                        f"searching for new log file"
+                    )
+                    new_log = self._find_latest_log()
+
+                    if new_log and new_log != self._active_log:
+                        logger.info(f"Switching to new log: {new_log.name}")
+                        self._active_log = new_log
+                        self._file_position = 0
+                        consecutive_errors = 0
+                    else:
+                        # Нет альтернативы — увеличиваем задержку
+                        logger.warning(
+                            "No alternative log file found, increasing delay"
+                        )
+                        await asyncio.sleep(error_cooldown * consecutive_errors)
+                        continue
+
+            # ИСПРАВЛЕНО: адаптивная задержка на основе количества ошибок
+            if consecutive_errors > 0:
+                # Увеличиваем задержку при ошибках
+                delay = min(0.5 * (2 ** min(consecutive_errors, 5)), 10.0)
+                await asyncio.sleep(delay)
+            else:
+                # Нормальная задержка
+                await asyncio.sleep(0.5)

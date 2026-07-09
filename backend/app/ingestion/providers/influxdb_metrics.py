@@ -131,6 +131,11 @@ class InfluxDBMetricsProvider:
         self._consecutive_errors: int = 0
         self._error_log_interval = timedelta(minutes=1)
 
+        # ИСПРАВЛЕНО (v4.0 — проблема #38): Throttling для переподключений
+        self._reconnect_attempts = 0
+        self._max_reconnect_delay = 60.0  # Максимум 60 секунд
+        self._base_reconnect_delay = 2.0  # Начальная задержка 2 секунды
+
         # Статистика
         self._last_metrics_count: int = 0
         self._successful_queries: int = 0
@@ -231,8 +236,9 @@ class InfluxDBMetricsProvider:
     async def _try_reconnect(self):
         """
         Пытается переподключиться к InfluxDB.
-        ИСПРАВЛЕНО: Корректно закрывает старый клиент перед созданием нового,
-        предотвращая утечку aiohttp соединений.
+        ИСПРАВЛЕНО (v4.0 — проблема #38): добавлен exponential backoff.
+
+        Формула задержки: min(base_delay * 2^attempts + jitter, max_delay)
         """
         # === Шаг 1: Закрываем старый клиент, если он существует ===
         if self._client is not None:
@@ -244,16 +250,36 @@ class InfluxDBMetricsProvider:
             finally:
                 self._client = None
 
-        # === Шаг 2: Создаём новый клиент и проверяем подключение ===
+        # === Шаг 2: Вычисляем задержку с exponential backoff ===
+        import random
+
+        exponential_delay = self._base_reconnect_delay * (2**self._reconnect_attempts)
+        jitter = random.uniform(0, self._base_reconnect_delay * 0.5)
+        delay = min(exponential_delay + jitter, self._max_reconnect_delay)
+
+        logger.info(
+            f"🔄 Attempting to reconnect to InfluxDB in {delay:.1f}s... "
+            f"(attempt {self._reconnect_attempts + 1})"
+        )
+
+        # === Шаг 3: Ждём перед переподключением ===
+        await asyncio.sleep(delay)
+
+        # === Шаг 4: Создаём новый клиент и проверяем подключение ===
         try:
-            logger.info("🔄 Attempting to reconnect to InfluxDB...")
             new_client = InfluxDBClientAsync(
                 url=self.url, token=self.token, org=self.org
             )
             ready = await new_client.ping()
+
             if ready:
                 self._client = new_client
-                logger.info("✅ Reconnected to InfluxDB successfully")
+                logger.info(
+                    f"✅ Reconnected to InfluxDB successfully "
+                    f"(after {self._reconnect_attempts} attempts)"
+                )
+                # Сбрасываем счётчик попыток при успехе
+                self._reconnect_attempts = 0
             else:
                 # Ping не прошёл — закрываем только что созданный клиент
                 try:
@@ -262,9 +288,12 @@ class InfluxDBMetricsProvider:
                     pass
                 logger.warning("⚠️ InfluxDB ping returned False after reconnect")
                 self._client = None
+                self._reconnect_attempts += 1
+
         except Exception as e:
             logger.debug(f"Reconnect failed: {e}")
             self._client = None
+            self._reconnect_attempts += 1
 
     async def _fetch_current_metrics(self) -> Dict[str, Any]:
         """

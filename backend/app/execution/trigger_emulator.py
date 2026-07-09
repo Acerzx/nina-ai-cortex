@@ -381,7 +381,7 @@ class TriggerEmulator:
     def _build_registry_from_openapi(self):
         """
         Строит реестр триггеров из OpenAPI спецификации + patterns.
-        Извлекает parameter ranges (min/max) из схемы.
+        ИСПРАВЛЕНО (v4.0 — проблема #22): точное сравнение пути вместо подстроки.
         """
         if not self._openapi_client:
             self._build_registry_fallback()
@@ -391,13 +391,16 @@ class TriggerEmulator:
             method = pattern.get("method", "GET")
             path_pattern = pattern.get("path_pattern", "")
 
-            # Ищем эндпоинт в spec
-            matches = self._openapi_client.find_by_path_pattern(path_pattern)
-            endpoint = None
-            for ep in matches:
-                if ep.method == method.upper():
-                    endpoint = ep
-                    break
+            # ИСПРАВЛЕНО: Сначала ищем точное совпадение
+            endpoint = self._openapi_client.find_by_path(method, path_pattern)
+
+            # Если точное не найдено — пробуем fuzzy matching
+            if not endpoint:
+                matches = self._openapi_client.find_by_path_pattern(path_pattern)
+                for ep in matches:
+                    if ep.method == method.upper():
+                        endpoint = ep
+                        break
 
             if not endpoint:
                 logger.warning(
