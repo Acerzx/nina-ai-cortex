@@ -605,6 +605,93 @@ class RAGEngine:
     async def add_session_digest(self, session_data: Dict[str, Any]) -> int:
         """Добавляет Session_Digest в базу знаний."""
         digest_text = f"""
+
+
+    async def cleanup_old_documents(self, max_age_days: int = 365) -> int:
+        """
+        Удаляет старые документы из Qdrant.
+        
+        Args:
+            max_age_days: Максимальный возраст документов в днях
+        
+        Returns:
+            Количество удалённых документов
+        """
+        if not self._initialized:
+            logger.warning("RAG Engine not initialized")
+            return 0
+        
+        cutoff_date = datetime.now() - timedelta(days=max_age_days)
+        cutoff_str = cutoff_date.isoformat()
+        
+        deleted_count = 0
+        
+        try:
+            # Scroll through all points in the collection
+            offset = None
+            
+            while True:
+                # Получаем батч точек
+                response = await self._client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=None,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                
+                points = response[0]
+                next_offset = response[1]
+                
+                if not points:
+                    break
+                
+                # Фильтруем старые точки
+                old_point_ids = []
+                for point in points:
+                    payload = point.payload or {}
+                    added_at = payload.get("added_at")
+                    
+                    if added_at:
+                        try:
+                            point_date = datetime.fromisoformat(added_at)
+                            if point_date < cutoff_date:
+                                old_point_ids.append(point.id)
+                        except (ValueError, TypeError):
+                            # Не удалось распарсить дату — пропускаем
+                            pass
+                
+                # Удаляем старые точки
+                if old_point_ids:
+                    await self._client.delete(
+                        collection_name=self.collection_name,
+                        points_selector=old_point_ids,
+                        wait=True,
+                    )
+                    deleted_count += len(old_point_ids)
+                    logger.debug(
+                        f"Deleted {len(old_point_ids)} old documents from Qdrant"
+                    )
+                
+                # Переходим к следующему батчу
+                if next_offset is None:
+                    break
+                offset = next_offset
+            
+            logger.info(
+                f"✅ RAG cleanup complete: {deleted_count} documents older than "
+                f"{max_age_days} days deleted"
+            )
+            
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"❌ RAG cleanup failed: {e}")
+            return deleted_count
+
+
+
 Сессия {session_data.get("date")}: {session_data.get("target")}
 Параметры: Фильтр {session_data.get("filter")},
 Экспозиция {session_data.get("exposure_time")}s,

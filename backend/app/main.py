@@ -427,6 +427,25 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ Metrics Source Monitor disabled (feature flag off)")
 
+    # 11.7. RAG cleanup (v4.0 — issue #68)
+        rag_cleanup_enabled = True  # Включаем по умолчанию
+        
+        if rag_cleanup_enabled:
+            async def rag_cleanup_task():
+                """Периодическая очистка старых документов из RAG."""
+                deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
+                if deleted > 0:
+                    logger.info(f"🗑️ RAG cleanup: {deleted} old documents deleted")
+            
+            background_tasks.register(
+                name="rag_cleanup",
+                coro=rag_cleanup_task,
+                interval_seconds=7 * 24 * 3600,  # Раз в неделю
+                enabled=True,
+                description="Cleanup old documents from RAG (retention: 365 days)",
+            )
+            logger.info("   ✅ RAG cleanup registered (weekly)")
+
     # ========================================================================
     # SHUTDOWN (в обратном порядке)
     # ========================================================================
@@ -1327,7 +1346,27 @@ async def get_trigger_info(
 async def list_workflow_types(request: Request):
     """
     Возвращает список всех доступных типов LangGraph workflows.
-    Каждый тип описывает сценарий использования.
+    
+    LangGraph Orchestrator поддерживает три типа многошаговых workflow:
+    
+    - **diagnostic**: Поиск root cause через RAG + корреляции метрик
+      - Используется когда Watcher детектирует сложную аномалию
+      - Анализирует историю похожих кейсов
+      - Предлагает решения на основе RAG
+      - Ожидаемое время выполнения: 30-120 секунд
+    
+    - **post_mortem**: Анализ завершённой сессии
+      - Генерирует Session Digest с выводами и рекомендациями
+      - Индексирует результаты в RAG для будущего обучения
+      - Ожидаемое время выполнения: 10-60 секунд
+    
+    - **adaptive**: Адаптация к изменяющимся условиям
+      - Реагирует на резкое изменение погоды или сбой оборудования
+      - Предлагает корректирующие действия
+      - Ожидаемое время выполнения: 5-30 секунд
+    
+    Returns:
+        Список типов workflow с описаниями и ожидаемым временем выполнения
     """
     return {
         "workflow_types": [
@@ -1387,9 +1426,27 @@ async def list_active_workflows(request: Request):
 
 @app.get("/api/v1/langgraph/workflow/{workflow_id}", tags=["LangGraph"])
 async def get_workflow_status(request: Request, workflow_id: str):
-    """
     Возвращает детальный статус конкретного LangGraph workflow.
-    Включает все поля состояния: рекомендации, выполненные действия, ошибки.
+    
+    Включает:
+    - Общая информация: ID, тип, статус, время создания/обновления
+    - Trigger event: событие, которое инициировало workflow
+    - Рекомендации: список предложенных действий
+    - Executed actions: список выполненных действий с результатами
+    - Ошибки: список ошибок, возникших во время выполнения
+    - Типо-специфичные поля:
+      - **diagnostic**: symptoms, root_causes, confidence
+      - **post_mortem**: session_id, lessons_learned
+      - **adaptive**: current_conditions, adaptation_actions
+    
+    Args:
+        workflow_id: ID workflow (получен из POST /api/v1/langgraph/start)
+    
+    Returns:
+        Полный state workflow со всеми полями
+    
+    Raises:
+        HTTPException(404): Если workflow не найден
     """
     state = hybrid_orchestrator.get_workflow_status(workflow_id)
 
@@ -1453,18 +1510,33 @@ async def start_langgraph_workflow(
     ),
 ):
     """
-    Запускает новый LangGraph workflow.
-
-    Workflow работает асинхронно в фоне. Статус можно отслеживать через
-    GET /api/v1/langgraph/workflow/{workflow_id}.
-
-    Доступные типы workflow:
-    - **diagnostic**: поиск root cause через RAG + корреляции метрик
-    - **post_mortem**: анализ завершённой сессии
-    - **adaptive**: адаптация к изменяющимся условиям
-
+     Запускает новый LangGraph workflow асинхронно в фоне.
+    
+    Workflow работает независимо от основного event loop.
+    Статус можно отслеживать через GET /api/v1/langgraph/workflow/{workflow_id}
+    
+    Args:
+        workflow_type: Тип workflow (diagnostic, post_mortem, adaptive)
+        trigger_event: Событие-триггер для логирования
+        max_retries: Максимальное количество попыток retry при ошибках
+    
     Returns:
-        workflow_id — ID запущенного workflow для отслеживания
+        workflow_id: ID запущенного workflow для отслеживания
+        status_url: URL для проверки статуса
+    
+    Example:
+        ```bash
+        # Запустить diagnostic workflow
+        curl -X POST "http://localhost:8000/api/v1/langgraph/start?workflow_type=diagnostic&trigger_event=HFR_degradation"
+        
+        # Проверить статус
+        curl "http://localhost:8000/api/v1/langgraph/workflow/workflow_diagnostic_1234567890"
+        ```
+    
+    Raises:
+        HTTPException(400): Если указан невалидный тип workflow
+        HTTPException(500): Если не удалось запустить workflow
+    """
     """
     # Валидация типа workflow
     try:
@@ -1523,10 +1595,20 @@ async def start_langgraph_workflow(
 @app.post("/api/v1/langgraph/cancel/{workflow_id}", tags=["LangGraph"])
 async def cancel_langgraph_workflow(request: Request, workflow_id: str):
     """
-    Отменяет активный LangGraph workflow.
-
+     Отменяет активный LangGraph workflow.
+    
     Workflow будет помечен как CANCELLED и больше не будет выполнять действия.
-    Уже выполненные действия не откатываются.
+    Уже выполненные действия НЕ откатываются.
+    
+    Args:
+        workflow_id: ID workflow для отмены
+    
+    Returns:
+        Подтверждение отмены
+    
+    Raises:
+        HTTPException(404): Если workflow не найден
+        HTTPException(400): Если workflow уже завершён (COMPLETED/FAILED)
     """
     state = hybrid_orchestrator.get_workflow_status(workflow_id)
 

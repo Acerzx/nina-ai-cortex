@@ -34,7 +34,7 @@ class NinaWebSocketClient:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._ws = None
-        self._consecutive_failures = 0
+        self._consecutive_failures = 0  # Счётчик неудачных попыток
 
     async def start(self):
         self._running = True
@@ -63,11 +63,12 @@ class NinaWebSocketClient:
         Вычисляет задержку для exponential backoff с jitter.
         Формула: min(initial_delay * 2^failures + jitter, max_delay)
         """
+        import random
+
         exponential_delay = self.initial_reconnect_delay * (
             2**self._consecutive_failures
         )
-        # Jitter: случайное значение от 0 до initial_delay
-        jitter = random.uniform(0, self.initial_reconnect_delay)
+        jitter = random.uniform(0, self.initial_reconnect_delay * 0.5)
         return min(exponential_delay + jitter, self.max_reconnect_delay)
 
     async def _connect_loop(self):
