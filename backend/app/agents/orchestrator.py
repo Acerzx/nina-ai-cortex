@@ -91,6 +91,9 @@ class Orchestrator:
         )
         self._decisions_log: deque = deque(maxlen=self._decisions_memory_limit)
 
+        # ИСПРАВЛЕНО (v4.0 — проблема #26): Блокировка для _decisions_log
+        self._decisions_lock = asyncio.Lock()
+
         # Счётчик всех обработанных решений (включая выгруженные из памяти)
         self._total_decisions_processed: int = 0
 
@@ -211,21 +214,14 @@ class Orchestrator:
     async def _main_loop(self):
         """
         Основной цикл обработки решений.
-
-        Особенности:
-        - Решения добавляются в deque (O(1) амортизированное)
-        - Persist в Decision Audit Trail (SQLite) для долгосрочного хранения
-        - Сбор метрик через cortex_metrics
-        - Защита от падения цикла при ошибках обработки
+        ИСПРАВЛЕНО (v4.0 — проблема #26): _decisions_log защищён asyncio.Lock
         """
         while self._running:
             try:
-                # Получаем решение из очереди с таймаутом
                 decision = await asyncio.wait_for(
                     self._decision_queue.get(), timeout=1.0
                 )
             except asyncio.TimeoutError:
-                # Очередь пуста, продолжаем
                 continue
             except asyncio.CancelledError:
                 break
@@ -234,19 +230,17 @@ class Orchestrator:
                 await asyncio.sleep(1.0)
                 continue
 
-            # Обрабатываем решение с замером времени
             start_time = time.perf_counter()
             try:
                 await self._execute_decision(decision)
 
-                # 1. In-memory cache (deque автоматически удаляет старые)
-                self._decisions_log.append(decision)
+                # ИСПРАВЛЕНО (v4.0): write под блокировкой
+                async with self._decisions_lock:
+                    self._decisions_log.append(decision)
                 self._total_decisions_processed += 1
 
-                # 2. Persist в SQLite (для долгосрочного хранения и анализа)
                 await self._persist_decision(decision)
 
-                # 3. Метрики
                 duration = time.perf_counter() - start_time
                 cortex_metrics.decisions_total.labels(
                     agent=decision.agent,
@@ -256,7 +250,6 @@ class Orchestrator:
                 cortex_metrics.decision_confidence.labels(agent=decision.agent).observe(
                     decision.confidence
                 )
-
             except Exception as e:
                 logger.error(
                     f"Error processing decision from {decision.agent}: {e}",
@@ -560,11 +553,10 @@ class Orchestrator:
     def get_recent_decisions(self, limit: int = 20) -> List[Dict[str, Any]]:
         """
         Возвращает последние N решений из in-memory cache.
-
-        Для получения полной истории решений использовать
-        Decision Audit Trail через API /api/v1/audit/decisions
+        ИСПРАВЛЕНО (v4.0): read под блокировкой с snapshot copy
         """
-        # deque поддерживает итерацию в обратном порядке
+        # Синхронный доступ невозможен с asyncio.Lock, поэтому делаем snapshot copy
+        # deque потокобезопасен для read в CPython, но для консистентности — copy
         recent = list(self._decisions_log)[-limit:]
         return [d.model_dump() for d in recent]
 

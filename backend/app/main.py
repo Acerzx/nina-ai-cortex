@@ -16,6 +16,7 @@ import logging
 import os
 import time
 import uuid
+from app.core.background_tasks import background_tasks
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -262,6 +263,69 @@ async def lifespan(app: FastAPI):
         raise
 
     yield  # <-- Приложение работает
+        # 8. Останавливаем Background Task Manager (v4.0)
+        await background_tasks.stop()
+
+        # 11. Background Task Manager (v4.0)
+        logger.info("⏰ Initializing Background Task Manager...")
+        await background_tasks.start()
+
+        # Регистрируем фоновые задачи
+        # 11.1. Автоочистка Decision Audit Trail
+        if settings.decision_audit.auto_cleanup_enabled:
+            async def decision_audit_cleanup_task():
+                """Периодическая очистка старых решений."""
+                result = await decision_audit.cleanup_old_decisions()
+                if result["deleted_by_age"] > 0 or result["deleted_by_count"] > 0:
+                    logger.info(f"🗑️ Auto-cleanup: {result}")
+
+            background_tasks.register(
+                name="decision_audit_cleanup",
+                coro=decision_audit_cleanup_task,
+                interval_seconds=settings.decision_audit.auto_cleanup_interval_hours * 3600,
+                enabled=True,
+                description="Auto-cleanup old decisions based on retention policy",
+            )
+
+        # 11.2. Автоочистка Disk Monitor (retention policies)
+        async def disk_retention_task():
+            """Периодическое применение retention policy."""
+            from app.storage.disk_monitor import disk_monitor
+            result = await disk_monitor.apply_retention_policy("keep_last_30_days")
+            if result and result.sessions_deleted > 0:
+                logger.info(f"🗑️ Auto-retention: {result.sessions_deleted} sessions deleted")
+
+        # Читаем интервал из storage settings (или дефолт 24 часа)
+        storage_cfg = settings.thresholds.storage
+        retention_interval_hours = getattr(storage_cfg, "retention_cleanup_interval_hours", 24)
+
+        background_tasks.register(
+            name="disk_retention",
+            coro=disk_retention_task,
+            interval_seconds=retention_interval_hours * 3600,
+            enabled=True,
+            description="Auto-apply retention policies for old sessions",
+        )
+
+        # 11.3. RAG автообновление (feature flag)
+        if getattr(getattr(settings, "feature_flags", None), "rag", None) and \
+        getattr(settings.feature_flags.rag, "auto_update_enabled", False):
+            async def rag_auto_update_task():
+                """Периодическое обновление RAG базы."""
+                # TODO: Реализация в следующем этапе
+                logger.debug("🔄 RAG auto-update check (stub)")
+
+            background_tasks.register(
+                name="rag_auto_update",
+                coro=rag_auto_update_task,
+                interval_seconds=6 * 3600,  # каждые 6 часов
+                enabled=True,
+                description="Auto-update RAG with new documentation and sessions",
+            )
+
+        logger.info(f"   ✅ {len(background_tasks._tasks)} background tasks registered")
+
+
 
     # ========================================================================
     # SHUTDOWN (в обратном порядке)
@@ -1384,4 +1448,37 @@ async def get_langgraph_stats(request: Request):
         "by_type": type_counts,
         "available_types": [t.value for t in WorkflowType],
         "orchestrator_initialized": hybrid_orchestrator.graph is not None,
+    }
+# ============================================================================
+# BACKGROUND TASKS ENDPOINTS (v4.0)
+# ============================================================================
+@app.get("/api/v1/system/background-tasks", tags=["System"])
+async def get_background_tasks_stats(request: Request):
+    """Возвращает статистику всех фоновых задач системы."""
+    return background_tasks.get_stats()
+
+
+@app.post("/api/v1/system/background-tasks/{task_name}/toggle", tags=["System"])
+async def toggle_background_task(
+    request: Request,
+    task_name: str,
+    enabled: bool = Query(..., description="Включить/выключить задачу"),
+):
+    """Включает или выключает конкретную фоновую задачу."""
+    if enabled:
+        success = background_tasks.enable(task_name)
+    else:
+        success = background_tasks.disable(task_name)
+
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task '{task_name}' not found. "
+                   f"Available: {list(background_tasks._tasks.keys())}",
+        )
+
+    return {
+        "status": "success",
+        "task": task_name,
+        "enabled": enabled,
     }

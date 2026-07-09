@@ -1,15 +1,16 @@
 """
 Decision Audit Trail — хранение всех решений AI-агентов с hindsight verdict.
 Основан на архитектуре Atlas для полной объяснимости AI-решений.
-
 ИСПРАВЛЕНО (audit 14):
 - Добавлена политика хранения с автоматической очисткой старых записей
 - Добавлен экспорт решений в JSON-архив перед удалением
-- Настройка retention через settings
+ИСПРАВЛЕНО (v4.0 — проблема #10):
+- Переход с синхронного sqlite3 на aiosqlite
+- Все DB-операции теперь асинхронные, не блокируют event loop
 """
 
 import logging
-import sqlite3
+import aiosqlite
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -30,8 +31,8 @@ class DecisionRecord(BaseModel):
     outputs: Dict[str, Any] = Field(default_factory=dict)
     rationale: str
     confidence: float = Field(ge=0.0, le=1.0)
-    outcome: Optional[str] = None  # SUCCESS, FAILED, PARTIAL
-    hindsight_verdict: Optional[str] = None  # CORRECT, WRONG, SUBOPTIMAL
+    outcome: Optional[str] = None
+    hindsight_verdict: Optional[str] = None
     session_id: Optional[str] = None
     context: Dict[str, Any] = Field(default_factory=dict)
 
@@ -39,51 +40,36 @@ class DecisionRecord(BaseModel):
 class RetentionConfig(BaseModel):
     """Конфигурация политики хранения решений."""
 
-    # Хранить решения за последние N дней
     keep_last_days: int = 90
-    # Максимальное количество записей в БД
     max_records: int = 100000
-    # Экспортировать удаляемые записи в JSON перед удалением
     archive_before_delete: bool = True
-    # Путь для архивов
     archive_path: str = "./data/decision_archives"
-    # Автоматическая очистка (запускать periodically)
     auto_cleanup_enabled: bool = True
-    # Интервал автоматической очистки (часы)
     auto_cleanup_interval_hours: int = 24
 
 
 class DecisionAuditTrail:
     """
     Хранилище всех решений AI-агентов.
-
-    Features:
-    - SQLite для persistence
-    - Hindsight verdict (оценка решения постфактум)
-    - Поиск по агенту, типу решения, сессии
-    - Экспорт для анализа
-
-    ИСПРАВЛЕНО (audit 14):
-    - Добавлена политика хранения с автоматической очисткой
-    - Экспорт старых решений в JSON-архивы перед удалением
+    ИСПРАВЛЕНО (v4.0 — проблема #10): aiosqlite вместо sqlite3
     """
 
     def __init__(self, db_path: Path, config: Optional[RetentionConfig] = None):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Загружаем конфиг из settings или используем дефолтный
         self.config = config or self._load_config()
 
-        # Создаём директорию для архивов
         if self.config.archive_before_delete:
             Path(self.config.archive_path).mkdir(parents=True, exist_ok=True)
 
-        self._init_db()
+        # Флаг инициализации БД
+        self._db_initialized = False
+
         logger.info(
             f"📝 Decision Audit Trail initialized "
             f"(retention: {self.config.keep_last_days} days, "
-            f"max records: {self.config.max_records})"
+            f"max records: {self.config.max_records}, "
+            f"async: aiosqlite)"
         )
 
     def _load_config(self) -> RetentionConfig:
@@ -91,7 +77,6 @@ class DecisionAuditTrail:
         try:
             from app.core.config import settings
 
-            # Если есть секция decision_audit в settings
             if hasattr(settings, "decision_audit"):
                 da_config = settings.decision_audit
                 return RetentionConfig(
@@ -112,124 +97,110 @@ class DecisionAuditTrail:
                 )
         except Exception as e:
             logger.debug(f"Could not load decision_audit config: {e}")
-
         return RetentionConfig()
 
-    def _init_db(self):
-        """Инициализирует базу данных."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    async def _ensure_db_initialized(self) -> None:
+        """Гарантирует, что БД инициализирована (ленивая инициализация)."""
+        if self._db_initialized:
+            return
 
-        # Создаём таблицу решений
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS decisions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                decision_type TEXT NOT NULL,
-                inputs TEXT NOT NULL,
-                outputs TEXT NOT NULL,
-                rationale TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                outcome TEXT,
-                hindsight_verdict TEXT,
-                session_id TEXT,
-                context TEXT NOT NULL
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    agent TEXT NOT NULL,
+                    decision_type TEXT NOT NULL,
+                    inputs TEXT NOT NULL,
+                    outputs TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    outcome TEXT,
+                    hindsight_verdict TEXT,
+                    session_id TEXT,
+                    context TEXT NOT NULL
+                )
+            """)
+
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_agent ON decisions(agent)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_type ON decisions(decision_type)"
             )
-        """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_id ON decisions(session_id)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_timestamp ON decisions(timestamp)"
+            )
 
-        # Создаём индексы для быстрого поиска
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_agent ON decisions(agent)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_decision_type ON decisions(decision_type)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_session_id ON decisions(session_id)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_timestamp ON decisions(timestamp)
-        """)
+            await db.commit()
 
-        conn.commit()
-        conn.close()
+        self._db_initialized = True
+        logger.debug("✅ Decision Audit DB initialized")
 
     async def log_decision(self, record: DecisionRecord) -> int:
         """
-        Логирует решение в базу данных.
-        Returns:
-            ID записи
+        Логирует решение в базу данных (АСИНХРОННО).
+        Returns: ID записи
         """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        await self._ensure_db_initialized()
 
-        cursor.execute(
-            """
-            INSERT INTO decisions (
-                timestamp, agent, decision_type, inputs, outputs,
-                rationale, confidence, outcome, hindsight_verdict,
-                session_id, context
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record.timestamp,
-                record.agent,
-                record.decision_type,
-                json.dumps(record.inputs, ensure_ascii=False),
-                json.dumps(record.outputs, ensure_ascii=False),
-                record.rationale,
-                record.confidence,
-                record.outcome,
-                record.hindsight_verdict,
-                record.session_id,
-                json.dumps(record.context, ensure_ascii=False),
-            ),
-        )
-
-        decision_id = cursor.lastrowid
-        record.id = decision_id
-
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO decisions (
+                    timestamp, agent, decision_type, inputs, outputs,
+                    rationale, confidence, outcome, hindsight_verdict,
+                    session_id, context
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.timestamp,
+                    record.agent,
+                    record.decision_type,
+                    json.dumps(record.inputs, ensure_ascii=False),
+                    json.dumps(record.outputs, ensure_ascii=False),
+                    record.rationale,
+                    record.confidence,
+                    record.outcome,
+                    record.hindsight_verdict,
+                    record.session_id,
+                    json.dumps(record.context, ensure_ascii=False),
+                ),
+            )
+            decision_id = cursor.lastrowid
+            record.id = decision_id
+            await db.commit()
 
         logger.debug(
             f"Decision logged: [{record.agent}] {record.decision_type} "
             f"(ID: {decision_id}, confidence: {record.confidence:.2f})"
         )
-
         return decision_id
 
     async def update_outcome(
         self, decision_id: int, outcome: str, hindsight_verdict: str
     ) -> bool:
-        """
-        Обновляет outcome и hindsight verdict решения.
-        Вызывается после выполнения действия и оценки результата.
-        """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        """Обновляет outcome и hindsight verdict решения (АСИНХРОННО)."""
+        await self._ensure_db_initialized()
 
-        cursor.execute(
-            """
-            UPDATE decisions
-            SET outcome = ?, hindsight_verdict = ?
-            WHERE id = ?
-            """,
-            (outcome, hindsight_verdict, decision_id),
-        )
-
-        updated = cursor.rowcount > 0
-
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                UPDATE decisions
+                SET outcome = ?, hindsight_verdict = ?
+                WHERE id = ?
+                """,
+                (outcome, hindsight_verdict, decision_id),
+            )
+            updated = cursor.rowcount > 0
+            await db.commit()
 
         if updated:
             logger.info(
                 f"Decision {decision_id} updated: "
                 f"outcome={outcome}, verdict={hindsight_verdict}"
             )
-
         return updated
 
     async def get_decisions(
@@ -240,30 +211,29 @@ class DecisionAuditTrail:
         limit: int = 100,
         offset: int = 0,
     ) -> List[DecisionRecord]:
-        """Получает решения с фильтрацией."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        """Получает решения с фильтрацией (АСИНХРОННО)."""
+        await self._ensure_db_initialized()
 
-        query = "SELECT * FROM decisions WHERE 1=1"
-        params = []
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = "SELECT * FROM decisions WHERE 1=1"
+            params = []
 
-        if agent:
-            query += " AND agent = ?"
-            params.append(agent)
-        if decision_type:
-            query += " AND decision_type = ?"
-            params.append(decision_type)
-        if session_id:
-            query += " AND session_id = ?"
-            params.append(session_id)
+            if agent:
+                query += " AND agent = ?"
+                params.append(agent)
+            if decision_type:
+                query += " AND decision_type = ?"
+                params.append(decision_type)
+            if session_id:
+                query += " AND session_id = ?"
+                params.append(session_id)
 
-        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
+            query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        conn.close()
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
 
         records = []
         for row in rows:
@@ -282,18 +252,18 @@ class DecisionAuditTrail:
                 context=json.loads(row["context"]),
             )
             records.append(record)
-
         return records
 
     async def get_decision(self, decision_id: int) -> Optional[DecisionRecord]:
-        """Получает решение по ID."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        """Получает решение по ID (АСИНХРОННО)."""
+        await self._ensure_db_initialized()
 
-        cursor.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,))
-        row = cursor.fetchone()
-        conn.close()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+            )
+            row = await cursor.fetchone()
 
         if not row:
             return None
@@ -314,51 +284,51 @@ class DecisionAuditTrail:
         )
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Возвращает статистику решений."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        """Возвращает статистику решений (АСИНХРОННО)."""
+        await self._ensure_db_initialized()
 
-        # Общее количество решений
-        cursor.execute("SELECT COUNT(*) FROM decisions")
-        total = cursor.fetchone()[0]
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM decisions")
+            row = await cursor.fetchone()
+            total = row[0]
 
-        # Решения по агентам
-        cursor.execute("""
-            SELECT agent, COUNT(*) as count
-            FROM decisions
-            GROUP BY agent
-            ORDER BY count DESC
-        """)
-        by_agent = {row[0]: row[1] for row in cursor.fetchall()}
+            cursor = await db.execute("""
+                SELECT agent, COUNT(*) as count
+                FROM decisions
+                GROUP BY agent
+                ORDER BY count DESC
+            """)
+            rows = await cursor.fetchall()
+            by_agent = {row[0]: row[1] for row in rows}
 
-        # Решения по типам
-        cursor.execute("""
-            SELECT decision_type, COUNT(*) as count
-            FROM decisions
-            GROUP BY decision_type
-            ORDER BY count DESC
-            LIMIT 10
-        """)
-        by_type = {row[0]: row[1] for row in cursor.fetchall()}
+            cursor = await db.execute("""
+                SELECT decision_type, COUNT(*) as count
+                FROM decisions
+                GROUP BY decision_type
+                ORDER BY count DESC
+                LIMIT 10
+            """)
+            rows = await cursor.fetchall()
+            by_type = {row[0]: row[1] for row in rows}
 
-        # Hindsight verdicts
-        cursor.execute("""
-            SELECT hindsight_verdict, COUNT(*) as count
-            FROM decisions
-            WHERE hindsight_verdict IS NOT NULL
-            GROUP BY hindsight_verdict
-        """)
-        by_verdict = {row[0]: row[1] for row in cursor.fetchall()}
+            cursor = await db.execute("""
+                SELECT hindsight_verdict, COUNT(*) as count
+                FROM decisions
+                WHERE hindsight_verdict IS NOT NULL
+                GROUP BY hindsight_verdict
+            """)
+            rows = await cursor.fetchall()
+            by_verdict = {row[0]: row[1] for row in rows}
 
-        # Средняя уверенность
-        cursor.execute("SELECT AVG(confidence) FROM decisions")
-        avg_confidence = cursor.fetchone()[0] or 0.0
+            cursor = await db.execute("SELECT AVG(confidence) FROM decisions")
+            row = await cursor.fetchone()
+            avg_confidence = row[0] or 0.0
 
-        # Самая старая и самая новая запись
-        cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM decisions")
-        oldest, newest = cursor.fetchone()
-
-        conn.close()
+            cursor = await db.execute(
+                "SELECT MIN(timestamp), MAX(timestamp) FROM decisions"
+            )
+            row = await cursor.fetchone()
+            oldest, newest = row
 
         return {
             "total_decisions": total,
@@ -370,6 +340,7 @@ class DecisionAuditTrail:
             "newest_decision": newest,
             "db_path": str(self.db_path),
             "retention_config": self.config.model_dump(),
+            "async_engine": "aiosqlite",
         }
 
     async def export_for_session(self, session_id: str) -> List[Dict[str, Any]]:
@@ -377,27 +348,13 @@ class DecisionAuditTrail:
         records = await self.get_decisions(session_id=session_id, limit=10000)
         return [r.model_dump() for r in records]
 
-    # ========================================================================
-    # ИСПРАВЛЕНО (audit 14): Retention Policy
-    # ========================================================================
-
     async def cleanup_old_decisions(
         self,
         keep_last_days: Optional[int] = None,
         max_records: Optional[int] = None,
         archive: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО (audit 14): Очищает старые решения согласно политике хранения.
-
-        Args:
-            keep_last_days: Хранить решения за последние N дней (override config)
-            max_records: Максимальное количество записей (override config)
-            archive: Экспортировать перед удалением (override config)
-
-        Returns:
-            Статистика очистки
-        """
+        """Очищает старые решения согласно политике хранения (АСИНХРОННО)."""
         days = (
             keep_last_days if keep_last_days is not None else self.config.keep_last_days
         )
@@ -406,8 +363,7 @@ class DecisionAuditTrail:
             archive if archive is not None else self.config.archive_before_delete
         )
 
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        await self._ensure_db_initialized()
 
         result = {
             "deleted_by_age": 0,
@@ -416,64 +372,64 @@ class DecisionAuditTrail:
             "archive_file": None,
         }
 
-        # 1. Удаление по возрасту
-        cutoff_date = datetime.now() - timedelta(days=days)
-        cutoff_str = cutoff_date.isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. Удаление по возрасту
+            cutoff_date = datetime.now() - timedelta(days=days)
+            cutoff_str = cutoff_date.isoformat()
 
-        # Считаем, сколько будет удалено
-        cursor.execute(
-            "SELECT COUNT(*) FROM decisions WHERE timestamp < ?", (cutoff_str,)
-        )
-        to_delete_by_age = cursor.fetchone()[0]
-
-        if to_delete_by_age > 0:
-            # Экспортируем перед удалением
-            if do_archive:
-                archived = await self._archive_old_decisions(conn, cutoff_str, "age")
-                result["archived"] = archived
-                result["archive_file"] = self._get_last_archive_path()
-
-            # Удаляем
-            cursor.execute("DELETE FROM decisions WHERE timestamp < ?", (cutoff_str,))
-            result["deleted_by_age"] = cursor.rowcount
-            logger.info(
-                f"🗑️ Deleted {result['deleted_by_age']} decisions older than {days} days"
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM decisions WHERE timestamp < ?", (cutoff_str,)
             )
+            row = await cursor.fetchone()
+            to_delete_by_age = row[0]
 
-        # 2. Удаление по количеству (если превышен лимит)
-        cursor.execute("SELECT COUNT(*) FROM decisions")
-        total = cursor.fetchone()[0]
-
-        if total > max_rec:
-            excess = total - max_rec
-
-            # Находим ID самой старой записи, которую нужно оставить
-            cursor.execute(
-                """
-                SELECT id FROM decisions
-                ORDER BY timestamp DESC
-                LIMIT 1 OFFSET ?
-                """,
-                (max_rec,),
-            )
-            row = cursor.fetchone()
-
-            if row:
-                cutoff_id = row[0]
-
+            if to_delete_by_age > 0:
                 if do_archive:
-                    archived = await self._archive_old_decisions_by_id(conn, cutoff_id)
-                    result["archived"] += archived
+                    archived = await self._archive_old_decisions(db, cutoff_str, "age")
+                    result["archived"] = archived
+                    result["archive_file"] = self._get_last_archive_path()
 
-                cursor.execute("DELETE FROM decisions WHERE id < ?", (cutoff_id,))
-                result["deleted_by_count"] = cursor.rowcount
+                cursor = await db.execute(
+                    "DELETE FROM decisions WHERE timestamp < ?", (cutoff_str,)
+                )
+                result["deleted_by_age"] = cursor.rowcount
                 logger.info(
-                    f"🗑️ Deleted {result['deleted_by_count']} excess decisions "
-                    f"(limit: {max_rec})"
+                    f"🗑️ Deleted {result['deleted_by_age']} decisions older than {days} days"
                 )
 
-        conn.commit()
-        conn.close()
+            # 2. Удаление по количеству
+            cursor = await db.execute("SELECT COUNT(*) FROM decisions")
+            row = await cursor.fetchone()
+            total = row[0]
+
+            if total > max_rec:
+                cursor = await db.execute(
+                    """
+                    SELECT id FROM decisions
+                    ORDER BY timestamp DESC
+                    LIMIT 1 OFFSET ?
+                    """,
+                    (max_rec,),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    cutoff_id = row[0]
+                    if do_archive:
+                        archived = await self._archive_old_decisions_by_id(
+                            db, cutoff_id
+                        )
+                        result["archived"] += archived
+
+                    cursor = await db.execute(
+                        "DELETE FROM decisions WHERE id < ?", (cutoff_id,)
+                    )
+                    result["deleted_by_count"] = cursor.rowcount
+                    logger.info(
+                        f"🗑️ Deleted {result['deleted_by_count']} excess decisions "
+                        f"(limit: {max_rec})"
+                    )
+
+            await db.commit()
 
         total_deleted = result["deleted_by_age"] + result["deleted_by_count"]
         if total_deleted > 0:
@@ -485,11 +441,10 @@ class DecisionAuditTrail:
         return result
 
     async def _archive_old_decisions(
-        self, conn: sqlite3.Connection, cutoff_str: str, reason: str
+        self, db: aiosqlite.Connection, cutoff_str: str, reason: str
     ) -> int:
         """Экспортирует старые решения в JSON-архив."""
-        cursor = conn.cursor()
-        cursor.execute(
+        cursor = await db.execute(
             """
             SELECT id, timestamp, agent, decision_type, inputs, outputs,
                    rationale, confidence, outcome, hindsight_verdict,
@@ -500,12 +455,11 @@ class DecisionAuditTrail:
             """,
             (cutoff_str,),
         )
+        rows = await cursor.fetchall()
 
-        rows = cursor.fetchall()
         if not rows:
             return 0
 
-        # Формируем архив
         archive_data = {
             "archive_date": datetime.now().isoformat(),
             "reason": reason,
@@ -532,28 +486,25 @@ class DecisionAuditTrail:
                 }
             )
 
-        # Сохраняем в файл
         archive_path = Path(self.config.archive_path)
         archive_path.mkdir(parents=True, exist_ok=True)
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"decisions_archive_{reason}_{timestamp}.json"
         filepath = archive_path / filename
 
+        # Синхронная запись файла (редкая операция, допустимо)
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(archive_data, f, indent=2, ensure_ascii=False)
 
         self._last_archive_path = str(filepath)
         logger.info(f"📦 Archived {len(rows)} decisions to {filepath}")
-
         return len(rows)
 
     async def _archive_old_decisions_by_id(
-        self, conn: sqlite3.Connection, cutoff_id: int
+        self, db: aiosqlite.Connection, cutoff_id: int
     ) -> int:
         """Экспортирует старые решения в JSON-архив (по ID)."""
-        cursor = conn.cursor()
-        cursor.execute(
+        cursor = await db.execute(
             """
             SELECT id, timestamp, agent, decision_type, inputs, outputs,
                    rationale, confidence, outcome, hindsight_verdict,
@@ -564,8 +515,8 @@ class DecisionAuditTrail:
             """,
             (cutoff_id,),
         )
+        rows = await cursor.fetchall()
 
-        rows = cursor.fetchall()
         if not rows:
             return 0
 
@@ -597,7 +548,6 @@ class DecisionAuditTrail:
 
         archive_path = Path(self.config.archive_path)
         archive_path.mkdir(parents=True, exist_ok=True)
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"decisions_archive_count_{timestamp}.json"
         filepath = archive_path / filename
@@ -607,7 +557,6 @@ class DecisionAuditTrail:
 
         self._last_archive_path = str(filepath)
         logger.info(f"📦 Archived {len(rows)} decisions to {filepath}")
-
         return len(rows)
 
     def _get_last_archive_path(self) -> Optional[str]:
@@ -625,16 +574,16 @@ class DecisionAuditTrail:
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    archives.append(
-                        {
-                            "file": filepath.name,
-                            "path": str(filepath),
-                            "archive_date": data.get("archive_date"),
-                            "reason": data.get("reason"),
-                            "record_count": data.get("record_count", 0),
-                            "size_mb": filepath.stat().st_size / (1024 * 1024),
-                        }
-                    )
+                archives.append(
+                    {
+                        "file": filepath.name,
+                        "path": str(filepath),
+                        "archive_date": data.get("archive_date"),
+                        "reason": data.get("reason"),
+                        "record_count": data.get("record_count", 0),
+                        "size_mb": filepath.stat().st_size / (1024 * 1024),
+                    }
+                )
             except Exception as e:
                 logger.warning(f"Failed to read archive {filepath}: {e}")
 
