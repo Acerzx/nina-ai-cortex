@@ -46,18 +46,27 @@ class NinaAdvancedClient:
 
     async def start(self):
         """Запускает клиент, создаёт HTTP-соединение."""
+        # ИСПРАВЛЕНО (v4.0 — проблема #16): Закрываем старый клиент если есть
         async with self._client_lock:
-            if self._client is None or self._client.is_closed:
-                self._client = httpx.AsyncClient(
-                    base_url=self.base_url,
-                    timeout=httpx.Timeout(10.0),
-                    headers={"Content-Type": "application/json"},
-                    limits=httpx.Limits(
-                        max_connections=20,
-                        max_keepalive_connections=10,
-                        keepalive_expiry=30,
-                    ),
+            if self._client is not None and not self._client.is_closed:
+                logger.warning(
+                    "⚠️ NinaAdvancedClient already started, closing old client"
                 )
+                try:
+                    await self._client.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing old client: {e}")
+
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=httpx.Timeout(10.0),
+                headers={"Content-Type": "application/json"},
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                    keepalive_expiry=30,
+                ),
+            )
             self._is_started = True
             logger.info(f"✅ N.I.N.A. client started (base: {self.base_url})")
 
@@ -81,18 +90,18 @@ class NinaAdvancedClient:
     async def close(self):
         """
         Корректно закрывает HTTP-клиент.
-        Вызывается при shutdown приложения.
+        ИСПРАВЛЕНО (v4.0 — проблема #16): проверка перед закрытием.
         """
         async with self._client_lock:
-            if self._client and not self._client.is_closed:
-                try:
-                    await self._client.aclose()
-                    logger.info("✅ N.I.N.A. client closed")
-                except Exception as e:
-                    logger.debug(f"Error closing N.I.N.A. client: {e}")
-                finally:
-                    self._client = None
-                    self._is_started = False
+            if self._client is not None:
+                if not self._client.is_closed:
+                    try:
+                        await self._client.aclose()
+                        logger.info("✅ N.I.N.A. client closed")
+                    except Exception as e:
+                        logger.debug(f"Error closing N.I.N.A. client: {e}")
+                self._client = None
+                self._is_started = False
 
     async def health_check(self) -> bool:
         """

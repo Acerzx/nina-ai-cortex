@@ -5,6 +5,7 @@ Hocus Focus Watcher
 """
 
 import logging
+from app.core.executors import async_read_csv
 from pathlib import Path
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
 from app.ingestion.parsers.hocus_focus import parse_hocus_focus_csv, filter_anomalies
@@ -34,14 +35,40 @@ class HocusFocusWatcher(BaseFileWatcher):
         super().__init__(watch_path=hf_path, target_files=[".csv"], registry=registry)
 
     async def process_file(self, path: Path) -> None:
+        """
+        ИСПРАВЛЕНО (v4.0 — проблема #13): async_read_csv для CSV парсинга.
+        """
         if path.suffix.lower() != ".csv":
             return
 
         logger.info(f"Parsing Hocus Focus report: {path.name}")
-        stars = parse_hocus_focus_csv(path)
+
+        # ИСПРАВЛЕНО: Асинхронное чтение CSV
+        raw_rows = await async_read_csv(path, delimiter=None)  # auto-detect
+        if not raw_rows:
+            logger.warning(f"No data found in {path.name}")
+            return
+
+        # Конвертируем в StarData
+        from app.ingestion.parsers.hocus_focus import StarData, filter_anomalies
+
+        stars = []
+        for row in raw_rows:
+            try:
+                # Очистка данных: замена запятых на точки для float
+                cleaned_row = {
+                    k: float(str(v).replace(",", "."))
+                    if v and k not in ["X", "Y"]
+                    else float(v)
+                    for k, v in row.items()
+                    if v and v.strip()
+                }
+                stars.append(StarData(**cleaned_row))
+            except ValueError as e:
+                logger.debug(f"Skipping invalid star row: {e}")
 
         if not stars:
-            logger.warning(f"No stars found in {path.name}")
+            logger.warning(f"No valid stars found in {path.name}")
             return
 
         report = filter_anomalies(stars)

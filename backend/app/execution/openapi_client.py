@@ -340,12 +340,19 @@ class DynamicAPIClient:
     async def _get_client(self) -> httpx.AsyncClient:
         """Возвращает или создаёт HTTP клиент (thread-safe)."""
         async with self._client_lock:
-            if self._client is None or self._client.is_closed:
-                self._client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout),
-                    base_url=self.base_url,
-                    headers={"Content-Type": "application/json"},
-                )
+            # ИСПРАВЛЕНО (v4.0 — проблема #17): Закрываем старый если есть
+            if self._client is not None and not self._client.is_closed:
+                return self._client
+
+            if self._client is not None and self._client.is_closed:
+                logger.debug("Old OpenAPI client was closed, creating new one")
+                self._client = None
+
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                base_url=self.base_url,
+                headers={"Content-Type": "application/json"},
+            )
             return self._client
 
     async def close(self):

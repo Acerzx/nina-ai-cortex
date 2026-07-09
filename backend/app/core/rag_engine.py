@@ -328,10 +328,11 @@ class RAGEngine:
             finally:
                 self._http_client = None
 
-        # 3. Закрытие Qdrant клиента
+        # 3. ИСПРАВЛЕНО (v4.0 — проблема #18): Закрытие Qdrant клиента
         if self._client:
             try:
                 await self._client.close()
+                logger.info("✅ Qdrant client closed")
             except Exception as e:
                 logger.debug(f"Error closing Qdrant client: {e}")
             finally:

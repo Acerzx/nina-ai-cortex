@@ -164,6 +164,7 @@ class InfluxDBMetricsProvider:
     async def stop(self):
         """Останавливает provider и корректно закрывает клиент."""
         self._running = False
+
         if self._task:
             self._task.cancel()
             try:
@@ -171,7 +172,7 @@ class InfluxDBMetricsProvider:
             except asyncio.CancelledError:
                 pass
 
-        # ИСПРАВЛЕНО: Гарантированное закрытие клиента
+        # ИСПРАВЛЕНО (v4.0 — проблема #19): Проверка перед закрытием
         if self._client is not None:
             try:
                 await self._client.close()
