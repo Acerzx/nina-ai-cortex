@@ -19,8 +19,27 @@ import aiofiles.os
 
 from app.core.events import event_bus
 from app.core.config import settings
+from typing import TypedDict
 
 logger = logging.getLogger("FakeNina")
+
+
+class FakeNinaMetrics(TypedDict, total=False):
+    """Типизация метрик симулятора."""
+
+    hfr: float
+    fwhm: float
+    eccentricity: float
+    star_count: int
+    median_adu: int
+    rms_ra: float
+    rms_dec: float
+    rms_total: float
+    camera_temp: float
+    focuser_position: int
+    rotator_angle: float
+    mount_altitude: float
+    mount_azimuth: float
 
 
 class FakeNinaAPI:
@@ -64,7 +83,8 @@ class FakeNinaAPI:
         self.temperature_actual = -14.8
 
         # Метрики (с реалистичным шумом)
-        self.metrics = {
+        # В __init__ изменить типизацию:
+        self.metrics: FakeNinaMetrics = {
             "hfr": 2.5,
             "fwhm": 3.0,
             "eccentricity": 0.35,
@@ -136,6 +156,8 @@ class FakeNinaAPI:
 
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+        # ИСПРАВЛЕНО (v4.0 — проблема #52): Очищаем список задач
         self._tasks.clear()
 
         logger.info("🎭 Fake NINA API stopped")

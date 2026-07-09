@@ -680,8 +680,9 @@ async def websocket_endpoint(
     """WebSocket endpoint для real-time broadcasting событий на Frontend."""
     if not client_id:
         client_id = str(uuid.uuid4())[:8]
-
+    
     conn = await ws_broadcast_manager.connect(websocket, client_id)
+    
     try:
         while True:
             try:
@@ -689,11 +690,42 @@ async def websocket_endpoint(
                 await ws_broadcast_manager.handle_client_message(client_id, message)
             except WebSocketDisconnect:
                 break
+            except json.JSONDecodeError as e:
+                # ИСПРАВЛЕНО (v4.0 — проблема #54): детальная обработка ошибок
+                logger.warning(f"Invalid JSON from client {client_id}: {e}")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": "invalid_json",
+                        "message": f"Invalid JSON: {str(e)[:100]}",
+                    })
+                except Exception:
+                    pass
+            except KeyError as e:
+                logger.warning(f"Missing key in message from {client_id}: {e}")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": "missing_field",
+                        "message": f"Missing required field: {e}",
+                    })
+                except Exception:
+                    pass
             except Exception as e:
-                logger.debug(f"Error processing client message: {e}")
+                logger.error(f"Error processing message from {client_id}: {e}", exc_info=True)
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": "internal_error",
+                        "message": "Internal server error",
+                    })
+                except Exception:
+                    pass
                 break
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        logger.error(f"WebSocket connection error for {client_id}: {e}", exc_info=True)
     finally:
         await ws_broadcast_manager.disconnect(client_id)
 
@@ -1145,7 +1177,16 @@ async def get_audit_stats(request: Request):
     """Возвращает статистику Decision Audit Trail."""
     return await decision_audit.get_stats()
 
+# Добавить после существующих Decision Audit endpoints:
 
+@app.get("/api/v1/audit/archives", tags=["Decision Audit"])
+async def get_audit_archives(request: Request):
+    """Возвращает список всех архивов Decision Audit Trail."""
+    archives = await decision_audit.get_archives()
+    return {
+        "archives": archives,
+        "count": len(archives),
+    }
 # ============================================================================
 # SIMULATION MODE ENDPOINTS
 # ============================================================================

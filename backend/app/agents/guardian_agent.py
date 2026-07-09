@@ -43,7 +43,6 @@ class GuardianAgent(BaseAgent):
         }
 
         self._parked = False
-        self._paused = False
 
     async def initialize(self):
         """Инициализация агента безопасности."""

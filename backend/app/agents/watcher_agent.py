@@ -86,6 +86,8 @@ class WatcherAgent(BaseAgent):
     async def initialize(self):
         """Инициализация агента и подписка на события."""
         await super().initialize()
+
+        # ИСПРАВЛЕНО (v4.0 — проблема #47): проверка _subscribed
         if not self._subscribed:
             # Подписываемся на события для анализа
             event_bus.subscribe("NEW_FRAME", self._on_new_frame)
@@ -209,6 +211,10 @@ class WatcherAgent(BaseAgent):
 
     async def _check_frame_metrics(self, frame: Dict[str, Any]) -> None:
         """Проверяет метрики отдельного кадра."""
+        # ИСПРАВЛЕНО (v4.0 — проблема #61): явная проверка frame
+        if not frame:
+            logger.debug("Empty frame data, skipping check")
+            return
         hfr = frame.get("hfr")
         fwhm = frame.get("fwhm")
 

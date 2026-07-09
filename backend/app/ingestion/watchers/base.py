@@ -78,6 +78,11 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
             if path.name in self._pending:
                 del self._pending[path.name]
 
+            # ИСПРАВЛЕНО (v4.0 — проблема #51): удаляем задачу из active_tasks
+            current_task = asyncio.current_task()
+            if current_task:
+                self._active_tasks.discard(current_task)
+
     def cancel_all_pending(self):
         """Отменяет все pending и active задачи."""
         # Отменяем pending задачи

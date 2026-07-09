@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
+from app.core.config import settings
 
 logger = logging.getLogger("OpenAPIClient")
 
@@ -628,9 +629,6 @@ async def get_nina_api_client(
         # Double-check после захвата lock
         if _api_client is not None and not force_reload:
             return _api_client
-
-        # Lazy import для избежания циклических зависимостей
-        from app.core.config import settings
 
         # Base URL из аргумента или settings
         if base_url is None:

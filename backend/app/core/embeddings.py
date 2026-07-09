@@ -124,8 +124,6 @@ class OllamaEmbeddings:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        from app.core.config import settings
-
         ollama_host = settings.ai_settings.ollama_host
 
         # Пробуем оба эндпоинта Ollama

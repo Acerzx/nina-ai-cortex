@@ -32,7 +32,17 @@ class EventBus:
         asyncio.create_task(self._dispatcher())
 
     async def stop(self):
+        """Останавливает EventBus и очищает очередь."""
         self._running = False
+
+        # ИСПРАВЛЕНО (v4.0 — проблема #49): Очищаем очередь
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        logger.info("🛑 EventBus stopped (queue cleared)")
 
     async def _dispatcher(self):
         while self._running:

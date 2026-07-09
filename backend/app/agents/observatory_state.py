@@ -262,7 +262,12 @@ class ObservatoryState:
 
             # Filter
             if "filter_current" in data and data["filter_current"]:
-                self.current_metrics["filter"] = data["filter_current"]
+                filter_value = data["filter_current"]
+                # ИСПРАВЛЕНО (v4.0 — проблема #60): явная типизация
+                if isinstance(filter_value, str):
+                    self.current_metrics["filter"] = filter_value
+                else:
+                    self.current_metrics["filter"] = str(filter_value)
 
             # Image Quality
             if "image_hfr" in data and data["image_hfr"] is not None:
