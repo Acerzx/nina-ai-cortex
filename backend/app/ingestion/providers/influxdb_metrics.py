@@ -47,6 +47,55 @@ class InfluxDBMetricsProvider:
         |> last()
         |> group()
     """
+    """
+    # ИСПРАВЛЕНО (v4.0 — проблема #69): Разбито на группы для параллельного выполнения
+    # Каждая группа запрашивается параллельно, что ускоряет общий запрос
+
+    FLUX_QUERIES = {
+        "camera": \"\"\"
+    from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) => r._measurement == "nina_camera")
+    |> last()
+    |> group()
+    \"\"\",
+        "focuser": \"\"\"
+    from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) => r._measurement == "nina_focuser")
+    |> last()
+    |> group()
+    \"\"\",
+        "guider": \"\"\"
+    from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) => r._measurement == "nina_guider")
+    |> last()
+    |> group()
+    \"\"\",
+        "telescope": \"\"\"
+    from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) => r._measurement == "nina_telescope")
+    |> last()
+    |> group()
+    \"\"\",
+        "weather": \"\"\"
+    from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) => r._measurement == "nina_weather")
+    |> last()
+    |> group()
+    \"\"\",
+        "image": \"\"\"
+    from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) => r._measurement == "nina_image")
+    |> last()
+    |> group()
+    \"\"\",
+    }
+"""
 
     # Маппинг InfluxDB полей на внутренние имена метрик
     # Ключ: (measurement, field) → значение: внутреннее имя
@@ -298,8 +347,7 @@ class InfluxDBMetricsProvider:
     async def _fetch_current_metrics(self) -> Dict[str, Any]:
         """
         Запрашивает текущие метрики из InfluxDB.
-
-        ИСПРАВЛЕНО: НЕ использует async with для QueryApiAsync.
+        ИСПРАВЛЕНО (v4.0 — проблема #69): Параллельное выполнение запросов.
         """
         if not self._client:
             return {}
@@ -310,42 +358,48 @@ class InfluxDBMetricsProvider:
         query_api = self._client.query_api()
 
         try:
-            query = self.UNIFIED_FLUX_QUERY.format(bucket=self.bucket)
-            tables = await query_api.query(query)
+            # Параллельное выполнение всех запросов
+            tasks = []
+            for group_name, query_template in self.FLUX_QUERIES.items():
+                query = query_template.format(bucket=self.bucket)
+                tasks.append(self._execute_query(query_api, query))
 
-            if not tables:
-                return {}
+            # Ждём выполнения всех запросов
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Обрабатываем все таблицы в одном проходе
-            for table in tables:
-                for record in table.records:
-                    measurement = record.get_measurement()
-                    field = record.get_field()
-                    value = record.get_value()
+            # Обрабатываем результаты
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.debug(f"Query failed: {result}")
+                    continue
 
-                    if value is None:
-                        continue
+                tables = result
+                if not tables:
+                    continue
 
-                    # Ищем соответствие в маппинге
-                    internal_name = self.METRICS_MAPPING.get((measurement, field))
-                    if not internal_name:
-                        # Пробуем без measurement (если имена глобально уникальны)
-                        for (m, f), name in self.METRICS_MAPPING.items():
-                            if f == field:
-                                internal_name = name
-                                break
+                # Обрабатываем все таблицы
+                for table in tables:
+                    for record in table.records:
+                        measurement = record.get_measurement()
+                        field = record.get_field()
+                        value = record.get_value()
 
-                    if not internal_name:
-                        continue
+                        if value is None:
+                            continue
 
-                    # Конвертируем значение
-                    try:
-                        if isinstance(value, bool):
+                        # Ищем соответствие в маппинге
+                        internal_name = self.METRICS_MAPPING.get((measurement, field))
+                        if not internal_name:
+                            continue
+
+                        # Конвертируем значение
+                        try:
+                            if isinstance(value, bool):
+                                metrics[internal_name] = value
+                            else:
+                                metrics[internal_name] = float(value)
+                        except (ValueError, TypeError):
                             metrics[internal_name] = value
-                        else:
-                            metrics[internal_name] = float(value)
-                    except (ValueError, TypeError):
-                        metrics[internal_name] = value
 
         except Exception as e:
             # Логируем ошибку и пробрасываем выше
@@ -353,6 +407,10 @@ class InfluxDBMetricsProvider:
 
         self._last_metrics_count = len(metrics)
         return metrics
+
+    async def _execute_query(self, query_api, query: str):
+        """Выполняет один Flux запрос."""
+        return await query_api.query(query)
 
     async def _fetch_history_metrics(self):
         """

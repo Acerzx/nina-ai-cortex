@@ -34,13 +34,15 @@ logger = logging.getLogger("TriggerEmulator")
 
 class TriggerHistoryRecord(BaseModel):
     """Запись в истории триггеров."""
-
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     trigger: str
     actual_trigger: str = ""
     reason: str
     status: str  # SUCCESS, FAILED_*, BLOCKED_*
     details: Dict[str, Any] = Field(default_factory=dict)
+    # ИСПРАВЛЕНО (v4.0): добавляем rejected параметры
+    rejected_params: List[str] = Field(default_factory=list)
+
 
 
 # ============================================================================
@@ -318,6 +320,10 @@ class TriggerEmulator:
             f"trigger patterns: {len(self._trigger_patterns)}"
         )
 
+        # ИСПРАВЛЕНО (v4.0 — проблема #62): храним последние rejected params
+         self._last_rejected_params: Optional[List[str]] = None
+
+
     # ====================================================================
     # КОНФИГУРАЦИЯ
     # ====================================================================
@@ -564,6 +570,7 @@ class TriggerEmulator:
         reason: str,
         status: str,
         details: Optional[Dict[str, Any]] = None,
+        rejected: Optional[List[str]] = None,
     ) -> None:
         """Добавляет запись в историю триггеров."""
         record = TriggerHistoryRecord(
@@ -572,12 +579,11 @@ class TriggerEmulator:
             reason=reason,
             status=status,
             details=details or {},
+            rejected_params=rejected or [],
         )
         self._trigger_history.append(record)
-
         if len(self._trigger_history) > self._history_max_size:
             self._trigger_history = self._trigger_history[-self._history_max_size :]
-
     # ====================================================================
     # ГЛАВНЫЙ МЕТОД
     # ====================================================================
@@ -685,6 +691,9 @@ class TriggerEmulator:
             trigger_config, trigger_config.get("params", {}), extra_params
         )
 
+            # ИСПРАВЛЕНО (v4.0 — проблема #62): сохраняем rejected для API
+            self._last_rejected_params = rejected if rejected else None
+
         if rejected:
             logger.warning(
                 f"⚠️ Trigger '{trigger_name}' had {len(rejected)} parameters "
@@ -716,6 +725,18 @@ class TriggerEmulator:
             rejected,
             reason,
         )
+    
+    self._add_to_history(
+    trigger_name,
+    actual_trigger,
+    reason,
+    "SUCCESS",
+    {
+        "response": api_response,
+        "params": params,
+    },
+    rejected=rejected,  # ИСПРАВЛЕНО: передаём rejected
+)
 
     async def _fire_via_openapi(
         self,
@@ -1040,10 +1061,12 @@ class TriggerEmulator:
         return result
 
     def get_stats(self) -> Dict[str, Any]:
-        """Возвращает статистику TriggerEmulator."""
+        """
+        Возвращает статистику TriggerEmulator.
+        ИСПРАВЛЕНО (v4.0 — проблема #62): включает rejected параметры.
+        """
         total = max(self._stats["total_triggers_fired"], 1)
         success_rate = (self._stats["successful_triggers"] / total) * 100
-
         return {
             **self._stats,
             "success_rate_percent": round(success_rate, 2),
@@ -1054,6 +1077,8 @@ class TriggerEmulator:
             "history_size": len(self._trigger_history),
             "recent_triggers": [r.model_dump() for r in self._trigger_history[-10:]],
             "agent_aliases": self._agent_aliases,
+            # ИСПРАВЛЕНО (v4.0): добавляем rejected параметры
+            "last_rejected_params": self._last_rejected_params,
         }
 
     def get_trigger_history(self, limit: int = 50) -> List[Dict[str, Any]]:

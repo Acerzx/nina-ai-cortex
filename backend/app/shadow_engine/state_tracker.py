@@ -323,6 +323,38 @@ class StateTracker:
                         f"(item: {item_name}) [fallback mode]"
                     )
 
+        elif image_type is None:
+            # ИСПРАВЛЕНО (v4.0 — проблема #36):
+            # Проверяем наличие TakeExposure инструкций с ImageType=FLAT в контейнере
+            has_flat_exposure = await self._check_for_flat_exposures(item_id)
+
+            if has_flat_exposure and not self.state.is_flat_mode:
+                self.state.is_flat_mode = True
+                logger.info(
+                    f"🟦 FLAT_MODE activated via TakeExposure check (item: {item_name})"
+                )
+            elif not has_flat_exposure and self.state.is_flat_mode:
+                # Проверяем, вышли ли мы из FLAT контейнера
+                node_type = node.get("type", "")
+                if "Container" not in node_type:
+                    self.state.is_flat_mode = False
+                    logger.info(f"🟩 FLAT_MODE deactivated (exited FLAT container)")
+            else:
+                # Fallback на ключевые слова (только для контейнеров)
+                item_name_lower = item_name.lower() if item_name else ""
+                is_flat_container = any(
+                    kw in item_name_lower for kw in self._flat_keywords
+                )
+
+                if is_flat_container and not self.state.is_flat_mode:
+                    node_type = node.get("type", "")
+                    if "Container" in node_type or item_type == "":
+                        self.state.is_flat_mode = True
+                        logger.info(
+                            f"🟦 FLAT_MODE pre-activated via container name "
+                            f"(item: {item_name}) [fallback mode]"
+                        )
+
     async def _check_for_flat_exposures(self, container_id: str) -> bool:
         """
         Проверяет, есть ли в контейнере TakeExposure инструкции с ImageType=FLAT.

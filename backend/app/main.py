@@ -291,27 +291,59 @@ async def lifespan(app: FastAPI):
         # Регистрируем фоновые задачи
         # 11.1. Автоочистка Decision Audit Trail
         if settings.decision_audit.auto_cleanup_enabled:
+            
             async def decision_audit_cleanup_task():
-                """Периодическая очистка старых решений."""
-                result = await decision_audit.cleanup_old_decisions()
-                if result["deleted_by_age"] > 0 or result["deleted_by_count"] > 0:
-                    logger.info(f"🗑️ Auto-cleanup: {result}")
-
+                """Периодическая очистка старых записей Decision Audit."""
+                try:
+                    from app.storage.decision_audit import decision_audit
+                    result = await decision_audit.cleanup_old_decisions()
+                    if result.get("deleted_count", 0) > 0:
+                        logger.info(
+                            f"🗑️ Decision Audit cleanup: {result['deleted_count']} old records deleted"
+                        )
+                except Exception as e:
+                    logger.error(f"Decision Audit cleanup failed: {e}")
+            
             background_tasks.register(
                 name="decision_audit_cleanup",
                 coro=decision_audit_cleanup_task,
-                interval_seconds=settings.decision_audit.auto_cleanup_interval_hours * 3600,
+                interval_seconds=24 * 3600,  # Раз в сутки
                 enabled=True,
-                description="Auto-cleanup old decisions based on retention policy",
+                description="Cleanup old Decision Audit records (retention: 90 days)",
             )
+            logger.info("   ✅ Decision Audit cleanup registered (daily)")           
 
         # 11.2. Автоочистка Disk Monitor (retention policies)
+
         async def disk_retention_task():
-            """Периодическое применение retention policy."""
-            from app.storage.disk_monitor import disk_monitor
-            result = await disk_monitor.apply_retention_policy("keep_last_30_days")
-            if result and result.sessions_deleted > 0:
-                logger.info(f"🗑️ Auto-retention: {result.sessions_deleted} sessions deleted")
+            """Периодическое применение retention policies."""
+            try:
+                from app.storage.disk_monitor import disk_monitor
+                result = await disk_monitor.apply_retention_policy("keep_last_30_days")
+                if result and result.sessions_deleted > 0:
+                    logger.info(
+                        f"🗑️ Disk retention: {result.sessions_deleted} sessions deleted, "
+                        f"{result.space_freed_gb:.2f} GB freed"
+                    )
+            except Exception as e:
+                logger.error(f"Disk retention failed: {e}")
+        
+        # Читаем интервал из storage settings
+        storage_cfg = getattr(settings.thresholds, "storage", None)
+        retention_interval_hours = 24  # Default
+        if storage_cfg:
+            retention_interval_hours = getattr(
+                storage_cfg, "retention_cleanup_interval_hours", 24
+            )
+        
+        background_tasks.register(
+            name="disk_retention",
+            coro=disk_retention_task,
+            interval_seconds=retention_interval_hours * 3600,
+            enabled=True,
+            description="Apply disk retention policies (keep last 30 days)",
+        )
+        logger.info(f"   ✅ Disk retention registered (every {retention_interval_hours}h)")
 
         # Читаем интервал из storage settings (или дефолт 24 часа)
         storage_cfg = settings.thresholds.storage
@@ -433,9 +465,12 @@ async def lifespan(app: FastAPI):
         if rag_cleanup_enabled:
             async def rag_cleanup_task():
                 """Периодическая очистка старых документов из RAG."""
-                deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
-                if deleted > 0:
-                    logger.info(f"🗑️ RAG cleanup: {deleted} old documents deleted")
+                try:
+                    deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
+                    if deleted > 0:
+                        logger.info(f"🗑️ RAG cleanup: {deleted} old documents deleted")
+                except Exception as e:
+                    logger.error(f"RAG cleanup failed: {e}")
             
             background_tasks.register(
                 name="rag_cleanup",
@@ -1206,6 +1241,67 @@ async def get_audit_archives(request: Request):
         "archives": archives,
         "count": len(archives),
     }
+
+
+# Добавить после существующих Decision Audit endpoints (строки ~900-920):
+
+# ============================================================================
+# DECISION AUDIT ARCHIVES ENDPOINT (v4.0 — issue #53)
+# ============================================================================
+@app.get("/api/v1/audit/archives", tags=["Decision Audit"])
+async def get_audit_archives(request: Request):
+    """
+    Возвращает список всех архивов Decision Audit Trail.
+    Архивы создаются автоматически перед удалением старых записей
+    согласно политике хранения (retention policy).
+    
+    Каждый архив содержит:
+    - Дата создания
+    - Причина архивации (age/count_limit)
+    - Количество записей
+    - Размер файла в MB
+    - Путь к файлу
+    """
+    archives = await decision_audit.get_archives()
+    return {
+        "archives": archives,
+        "count": len(archives),
+        "total_size_mb": sum(a.get("size_mb", 0) for a in archives),
+        "archive_path": str(Path(decision_audit.config.archive_path).absolute()),
+    }
+
+
+@app.get("/api/v1/audit/archives/{filename}", tags=["Decision Audit"])
+async def download_audit_archive(request: Request, filename: str):
+    """
+    Скачивает конкретный архив Decision Audit Trail.
+    
+    Архив — это JSON-файл с решениями, которые были удалены из основной БД
+    согласно политике хранения. Используется для долгосрочного анализа
+    и обучения ML-моделей.
+    """
+    from fastapi.responses import FileResponse
+    
+    archive_path = Path(decision_audit.config.archive_path) / filename
+    
+    if not archive_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Archive '{filename}' not found. "
+                   f"Use GET /api/v1/audit/archives to see available archives.",
+        )
+    
+    # Проверка, что файл находится внутри archive_path (защита от path traversal)
+    try:
+        archive_path.relative_to(decision_audit.config.archive_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    return FileResponse(
+        path=str(archive_path),
+        filename=filename,
+        media_type="application/json",
+    )
 # ============================================================================
 # SIMULATION MODE ENDPOINTS
 # ============================================================================
