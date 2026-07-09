@@ -616,6 +616,7 @@ class RAGEngine:
         
         Returns:
             Количество удалённых документов
+        
         """
         if not self._initialized:
             logger.warning("RAG Engine not initialized")
@@ -691,7 +692,7 @@ class RAGEngine:
             return deleted_count
 
 
-
+"""
 Сессия {session_data.get("date")}: {session_data.get("target")}
 Параметры: Фильтр {session_data.get("filter")},
 Экспозиция {session_data.get("exposure_time")}s,
