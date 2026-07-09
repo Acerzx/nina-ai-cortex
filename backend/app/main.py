@@ -70,6 +70,12 @@ from app.agents.hybrid_langgraph_orchestrator import (
 from app.storage.disk_monitor import disk_monitor
 from app.storage.decision_audit import decision_audit
 
+# НОВОЕ (v4.0): RAG Updater для автообновления базы знаний
+from app.core.rag_updater import rag_updater
+
+# НОВОЕ (v4.0): Decision Analyzer для статистического анализа решений
+from app.analytics.decision_analyzer import decision_analyzer
+
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -306,6 +312,35 @@ async def lifespan(app: FastAPI):
             enabled=True,
             description="Auto-apply retention policies for old sessions",
         )
+    
+
+        # 11.4. RAG автообновление (v4.0 — идея 1.2)
+        rag_auto_enabled = False
+        try:
+            ff = getattr(settings, "feature_flags", None)
+            if ff:
+                rag_ff = getattr(ff, "rag", None)
+                if rag_ff:
+                    rag_auto_enabled = getattr(rag_ff, "auto_update_enabled", False)
+        except Exception:
+            pass
+        
+        if rag_auto_enabled:
+            background_tasks.register(
+                name="rag_auto_update",
+                coro=rag_updater.update,
+                interval_seconds=rag_updater._check_interval_hours * 3600,
+                enabled=True,
+                description="Auto-update RAG with new sessions and documentation",
+            )
+            logger.info(
+                f"   ✅ RAG auto-update registered "
+                f"(every {rag_updater._check_interval_hours}h)"
+            )
+        else:
+            logger.info("   ⏭️ RAG auto-update disabled (feature flag off)")
+
+
 
         # 11.3. RAG автообновление (feature flag)
         if getattr(getattr(settings, "feature_flags", None), "rag", None) and \
@@ -1482,3 +1517,104 @@ async def toggle_background_task(
         "task": task_name,
         "enabled": enabled,
     }
+
+# ============================================================================
+# RAG UPDATER ENDPOINTS (v4.0 — идея 1.2)
+# ============================================================================
+@app.get("/api/v1/rag/updater/stats", tags=["RAG Engine"])
+async def rag_updater_stats(request: Request):
+    """Возвращает статистику RAG Updater (автообновление базы знаний)."""
+    return rag_updater.get_stats()
+
+
+@app.post("/api/v1/rag/updater/force", tags=["RAG Engine"])
+async def force_rag_update(request: Request):
+    """
+    Принудительно запускает обновление RAG.
+    Индексирует новые Session Digest и изменённую документацию.
+    """
+    logger.info("API Request: Force RAG update")
+    result = await rag_updater.force_update()
+    
+    observatory_state.log_ai_action(
+        agent="API",
+        action="Force RAG Update",
+        reason="Manual API call",
+        result=f"Sessions: {result.get('sessions_indexed', 0)}, "
+               f"Docs: {result.get('docs_indexed', 0)}",
+    )
+    
+    return result
+
+
+# ============================================================================
+# DECISION ANALYZER ENDPOINTS (v4.0 — идея 2, RL foundation)
+# ============================================================================
+@app.get("/api/v1/analytics/agent/{agent_name}", tags=["Analytics"])
+async def get_agent_performance(
+    request: Request,
+    agent_name: str,
+    days: int = Query(30, ge=1, le=365, description="Период анализа (дни)"),
+):
+    """
+    Возвращает статистику производительности конкретного AI-агента.
+    Включает: success rate, количество решений по типам, среднюю уверенность.
+    """
+    perf = await decision_analyzer.analyze_agent_performance(
+        agent=agent_name,
+        days=days,
+    )
+    return perf.to_dict()
+
+
+@app.get("/api/v1/analytics/agents", tags=["Analytics"])
+async def get_all_agents_performance(
+    request: Request,
+    days: int = Query(30, ge=1, le=365, description="Период анализа (дни)"),
+):
+    """Возвращает производительность всех AI-агентов."""
+    all_perf = await decision_analyzer.analyze_all_agents(days=days)
+    return {
+        agent: perf.to_dict()
+        for agent, perf in all_perf.items()
+        if perf.total_decisions > 0
+    }
+
+
+@app.get("/api/v1/analytics/recommendations", tags=["Analytics"])
+async def get_recommendations(
+    request: Request,
+    agent: Optional[str] = Query(None, description="Фильтр по агенту"),
+    days: int = Query(30, ge=1, le=365),
+):
+    """
+    Возвращает рекомендации по улучшению производительности агентов.
+    Генерируются на основе анализа success rate и паттернов ошибок.
+    """
+    recs = await decision_analyzer.generate_recommendations(
+        agent=agent,
+        days=days,
+    )
+    return {
+        "recommendations": [r.to_dict() for r in recs],
+        "count": len(recs),
+    }
+
+
+@app.get("/api/v1/analytics/report", tags=["Analytics"])
+async def get_analytics_report(
+    request: Request,
+    days: int = Query(30, ge=1, le=365),
+):
+    """
+    Генерирует полный аналитический отчёт по всем агентам.
+    Включает: общую статистику, лучшего/худшего агента, рекомендации.
+    """
+    report = await decision_analyzer.generate_full_report(days=days)
+    return report
+
+
+@app.get("/api/v1/analytics/stats", tags=["Analytics"])
+async def get_analyzer_stats(request: Request):
+    """Возвращает статистику самого Decision Analyzer."""
+    return decision_analyzer.get_stats()
