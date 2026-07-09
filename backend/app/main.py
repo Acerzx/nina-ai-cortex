@@ -79,6 +79,15 @@ from app.analytics.decision_analyzer import decision_analyzer
 # НОВОЕ (v4.0): Sessions Metadata для хранения всех данных сессий
 from app.storage.sessions_metadata import sessions_metadata
 
+# НОВОЕ (v4.0): Predictive HAL для предсказательной безопасности
+from app.execution.predictive_hal import predictive_hal
+
+# НОВОЕ (v4.0): Shadow Visualizer для Mermaid экспорта
+from app.shadow_engine.shadow_visualizer import shadow_visualizer
+
+# НОВОЕ (v4.0): Metrics Source Monitor
+from app.core.metrics_source_monitor import metrics_source_monitor
+
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -363,7 +372,60 @@ async def lifespan(app: FastAPI):
 
         logger.info(f"   ✅ {len(background_tasks._tasks)} background tasks registered")
 
+        # 11.5. Predictive HAL (v4.0 — идея 3)
+        predictive_enabled = False
+        try:
+            ff = getattr(settings, "feature_flags", None)
+            if ff:
+                hal_ff = getattr(ff, "hal", None)
+                if hal_ff:
+                    predictive_enabled = getattr(hal_ff, "predictive_enabled", False)
+        except Exception:
+            pass
+        
+        if predictive_enabled:
+            async def predictive_hal_check_task():
+                """Периодическая проверка Predictive HAL."""
+                await predictive_hal.check_all()
+            
+            background_tasks.register(
+                name="predictive_hal_check",
+                coro=predictive_hal_check_task,
+                interval_seconds=30.0,  # каждые 30 секунд
+                enabled=True,
+                description="Predictive HAL: analyze trends for proactive safety",
+            )
+            logger.info("   ✅ Predictive HAL registered (every 30s)")
+        else:
+            logger.info("   ⏭️ Predictive HAL disabled (feature flag off)")
 
+
+        # 11.6. Metrics Source Monitor (v4.0 — идея 6)
+        metrics_auto_enabled = False
+        try:
+            ff = getattr(settings, "feature_flags", None)
+            if ff:
+                metrics_ff = getattr(ff, "metrics", None)
+                if metrics_ff:
+                    metrics_auto_enabled = getattr(metrics_ff, "auto_source_selection", True)
+        except Exception:
+            pass
+        
+        if metrics_auto_enabled:
+            async def metrics_source_check_task():
+                """Периодическая проверка качества источников."""
+                await metrics_source_monitor.check_and_switch()
+            
+            background_tasks.register(
+                name="metrics_source_monitor",
+                coro=metrics_source_check_task,
+                interval_seconds=60.0,  # каждую минуту
+                enabled=True,
+                description="Monitor metrics sources quality and auto-switch",
+            )
+            logger.info("   ✅ Metrics Source Monitor registered (every 60s)")
+        else:
+            logger.info("   ⏭️ Metrics Source Monitor disabled (feature flag off)")
 
     # ========================================================================
     # SHUTDOWN (в обратном порядке)
@@ -1720,3 +1782,112 @@ async def export_session(
 async def get_sessions_metadata_stats(request: Request):
     """Возвращает общую статистику хранилища сессий."""
     return await sessions_metadata.get_stats()
+
+# ============================================================================
+# PREDICTIVE HAL ENDPOINTS (v4.0 — идея 3)
+# ============================================================================
+@app.get("/api/v1/safety/predictive", tags=["Safety"])
+async def get_predictive_hal_stats(request: Request):
+    """Возвращает статистику Predictive HAL."""
+    return predictive_hal.get_stats()
+
+
+@app.post("/api/v1/safety/predictive/check", tags=["Safety"])
+async def force_predictive_check(request: Request):
+    """Принудительно запускает проверку всех предсказаний."""
+    predictions = await predictive_hal.force_check()
+    return {
+        "predictions_count": len(predictions),
+        "predictions": predictions,
+    }
+
+
+@app.get("/api/v1/sequence/shadow/mermaid", tags=["Shadow Engine"])
+async def get_shadow_mermaid(
+    request: Request,
+    include_details: bool = Query(True, description="Включать детали узлов"),
+    max_depth: int = Query(10, ge=1, le=50, description="Максимальная глубина"),
+    show_triggers: bool = Query(True, description="Показывать триггеры"),
+    show_conditions: bool = Query(True, description="Показывать условия"),
+):
+    """
+    Возвращает теневой граф в формате Mermaid для документации.
+    
+    Mermaid можно вставить в:
+    - GitHub README (авто-рендеринг)
+    - Markdown документы
+    - Notion/Obsidian
+    """
+    mermaid_code = shadow_visualizer.generate_mermaid(
+        include_details=include_details,
+        max_depth=max_depth,
+        show_triggers=show_triggers,
+        show_conditions=show_conditions,
+    )
+    
+    return {
+        "format": "mermaid",
+        "code": mermaid_code,
+        "markdown": f"```mermaid\n{mermaid_code}\n```",
+        "stats": state_tracker.get_stats(),
+    }
+
+
+@app.get("/api/v1/sequence/shadow/html", tags=["Shadow Engine"])
+async def get_shadow_html_report(request: Request):
+    """
+    Возвращает полный HTML-отчёт с интерактивной диаграммой теневого графа.
+    Откройте в браузере для просмотра.
+    """
+    html = shadow_visualizer.generate_full_html_report()
+    return Response(content=html, media_type="text/html")
+
+
+@app.get("/api/v1/sequence/shadow/visualizer/stats", tags=["Shadow Engine"])
+async def get_shadow_visualizer_stats(request: Request):
+    """Возвращает статистику Shadow Visualizer."""
+    return shadow_visualizer.get_stats()
+
+# ============================================================================
+# METRICS SOURCE MONITOR ENDPOINTS (v4.0 — идея 6)
+# ============================================================================
+@app.get("/api/v1/metrics/sources", tags=["Metrics"])
+async def get_metrics_sources_status(request: Request):
+    """Возвращает статус всех источников метрик и текущий активный."""
+    return metrics_source_monitor.get_stats()
+
+
+@app.post("/api/v1/metrics/sources/override", tags=["Metrics"])
+async def set_metrics_source_override(
+    request: Request,
+    source: str = Query(..., description="Имя источника: influxdb или prometheus"),
+    reason: str = Query("manual", description="Причина override"),
+):
+    """
+    Устанавливает ручной override источника метрик.
+    Отключает автоматическое переключение до снятия override.
+    """
+    if source not in ["influxdb", "prometheus"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid source: {source}. Valid: influxdb, prometheus"
+        )
+    
+    metrics_source_monitor.set_manual_override(source, reason)
+    return {
+        "status": "success",
+        "active_source": source,
+        "manual_override": True,
+        "reason": reason,
+    }
+
+
+@app.delete("/api/v1/metrics/sources/override", tags=["Metrics"])
+async def clear_metrics_source_override(request: Request):
+    """Снимает ручной override и включает автопереключение."""
+    metrics_source_monitor.clear_manual_override()
+    return {
+        "status": "success",
+        "active_source": metrics_source_monitor.get_active_source(),
+        "manual_override": False,
+    }

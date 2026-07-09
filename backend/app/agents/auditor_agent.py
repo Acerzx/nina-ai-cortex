@@ -13,6 +13,7 @@ from app.agents.base_agent import BaseAgent, AgentDecision, AgentContext
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
+from app.storage.sessions_metadata import sessions_metadata
 
 logger = logging.getLogger("AuditorAgent")
 
@@ -136,7 +137,15 @@ class AuditorAgent(BaseAgent):
         """Обработка события завершения сессии."""
         logger.info("📊 Sequence stopped, generating Session Digest...")
 
-        # Запускаем генерацию Session Digest
+        # === НОВОЕ (v4.0): Финализация сессии в sessions_metadata ===
+        session_id = data.get("session_id") or data.get("target", "unknown")
+        try:
+            finalize_result = await sessions_metadata.finalize_session(session_id)
+            logger.info(f"📊 Session finalized in metadata: {finalize_result}")
+        except Exception as e:
+            logger.warning(f"Could not finalize session in metadata: {e}")
+
+        # Запускаем генерацию Session Digest (существующая логика)
         await self.analyze(
             AgentContext(
                 current_metrics=observatory_state.current_metrics,
