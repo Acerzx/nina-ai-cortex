@@ -21,6 +21,7 @@ from app.core.capability_registry import CapabilityRegistry
 
 from app.storage.sessions_metadata import sessions_metadata, SessionRecord
 
+
 logger = logging.getLogger("SessionWatcher")
 
 

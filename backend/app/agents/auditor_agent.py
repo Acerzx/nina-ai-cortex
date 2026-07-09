@@ -15,6 +15,7 @@ from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
 from app.storage.sessions_metadata import sessions_metadata
 
+
 logger = logging.getLogger("AuditorAgent")
 
 
