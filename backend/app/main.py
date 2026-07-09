@@ -1,18 +1,13 @@
 """
 N.I.N.A. AI Cortex - Main Application Entry Point
 FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
-ИСПРАВЛЕНО (рефакторинг v3):
-- Удалены: JWT-аутентификация, rate limiting (slowapi), избыточная безопасность
-- Удален Credential Vault (локальное использование не требует шифрования)
-- Удален MemoryManagerAgent (не используется)
-- Добавлена интеграция с Hybrid LangGraph Orchestrator
-- Все endpoints открытые (локальная сеть)
-- Метрики используют inc_sync/observe_sync вместо .labels().inc()
-ИСПРАВЛЕНО (v4.1):
-- Исправлена структура lifespan: startup до yield, shutdown после yield
-- Раскомментирован shutdown блок
-- Убраны дубли регистраций background tasks
-- _event_handlers доступен в shutdown области
+
+ИСПРАВЛЕНО (v4.2 — критическое):
+- Структура lifespan полностью перестроена
+- Весь startup код ПЕРЕД yield
+- Весь shutdown код ПОСЛЕ yield
+- Убраны дублирующиеся регистрации background tasks
+- DiskMonitor: только мониторинг, без удаления файлов
 """
 
 import asyncio
@@ -115,7 +110,7 @@ _event_handlers: Dict[str, Callable] = {}
 
 
 # ============================================================================
-# EVENT BUS METRICS SUBSCRIBERS (audit 11.2)
+# EVENT BUS METRICS SUBSCRIBERS
 # ============================================================================
 async def _on_event_bus_event(data: Dict[str, Any], event_type: str = "unknown"):
     """Автоматический сбор метрик из EventBus."""
@@ -161,22 +156,30 @@ async def _on_llm_response(data: Dict[str, Any]):
 
 
 # ============================================================================
-# LIFESPAN (Startup / Shutdown)
+# LIFESPAN (Startup / Shutdown) — ИСПРАВЛЕНО v4.2
 # ============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Управление жизненным циклом приложения."""
+    """
+    Управление жизненным циклом приложения.
+
+    ИСПРАВЛЕНО (v4.2): Правильная структура:
+    - Весь STARTUP код ПЕРЕД yield
+    - yield — приложение работает
+    - Весь SHUTDOWN код ПОСЛЕ yield
+    """
     global calibrator_agent
 
     logger.info("=" * 70)
-    logger.info("🚀 N.I.N.A. AI Cortex v4.1 Starting Up...")
+    logger.info("🚀 N.I.N.A. AI Cortex v4.2 Starting Up...")
     logger.info("=" * 70)
 
+    # ====================================================================
+    # ████████████████████████████████████████████████████████████████████
+    # ███  STARTUP PHASE — ВСЁ ДО yield                                ███
+    # ████████████████████████████████████████████████████████████████████
+    # ====================================================================
     try:
-        # ================================================================
-        # STARTUP PHASE
-        # ================================================================
-
         # 1. Запуск Ingestion, Shadow Engine и Execution
         await watcher_manager.start()
 
@@ -228,7 +231,6 @@ async def lifespan(app: FastAPI):
         # 10. Подписка на события для сбора метрик
         logger.info("📊 Subscribing to EventBus for metrics collection...")
 
-        # Общие события для счётчика
         general_events = [
             "SEQUENCE_STARTED",
             "SEQUENCE_STOPPED",
@@ -256,7 +258,6 @@ async def lifespan(app: FastAPI):
             _event_handlers[event_type] = _handler
             event_bus.subscribe(event_type, _handler)
 
-        # Специальные обработчики для детальных метрик
         _event_handlers["DECISION_MADE_detail"] = _on_decision_made
         _event_handlers["TRIGGER_FIRED_detail"] = _on_trigger_fired
         _event_handlers["LLM_RESPONSE_detail"] = _on_llm_response
@@ -273,7 +274,6 @@ async def lifespan(app: FastAPI):
         if settings.decision_audit.auto_cleanup_enabled:
 
             async def decision_audit_cleanup_task():
-                """Периодическая очистка старых записей Decision Audit."""
                 try:
                     result = await decision_audit.cleanup_old_decisions()
                     deleted = result.get("deleted_by_age", 0) + result.get(
@@ -295,36 +295,38 @@ async def lifespan(app: FastAPI):
             )
             logger.info("   ✅ Decision Audit cleanup registered (daily)")
 
-        # 11.2. Disk Retention
-        storage_cfg = getattr(settings.thresholds, "storage", None)
-        retention_interval_hours = 24
-        if storage_cfg:
-            retention_interval_hours = getattr(
-                storage_cfg, "retention_cleanup_interval_hours", 24
-            )
-
-        async def disk_retention_task():
-            """Периодическое применение retention policies."""
+        # 11.2. Disk Monitor — ТОЛЬКО рекомендации, БЕЗ удаления
+        async def disk_monitor_task():
+            """
+            Периодическая генерация рекомендаций по управлению дисковым пространством.
+            ИСПРАВЛЕНО (v4.2): НЕ удаляет файлы, только генерирует рекомендации.
+            """
             try:
-                result = await disk_monitor.apply_retention_policy("keep_last_30_days")
-                if result and result.sessions_deleted > 0:
+                result = await disk_monitor.generate_recommendations(
+                    "keep_last_30_days"
+                )
+                if result.recommendations:
                     logger.info(
-                        f"🗑️ Disk retention: {result.sessions_deleted} sessions "
-                        f"deleted, {result.space_freed_gb:.2f} GB freed"
+                        f"💾 Disk recommendations: {len(result.recommendations)} "
+                        f"sessions can be cleaned "
+                        f"({result.total_space_at_risk_gb:.2f} GB at risk)"
                     )
             except Exception as e:
-                logger.error(f"Disk retention failed: {e}")
+                logger.error(f"Disk monitoring failed: {e}")
+
+        disk_monitor_cfg = getattr(settings, "disk_monitor", None)
+        check_interval = 3600
+        if disk_monitor_cfg:
+            check_interval = getattr(disk_monitor_cfg, "check_interval_seconds", 3600)
 
         background_tasks.register(
-            name="disk_retention",
-            coro=disk_retention_task,
-            interval_seconds=retention_interval_hours * 3600,
+            name="disk_monitor",
+            coro=disk_monitor_task,
+            interval_seconds=check_interval,
             enabled=True,
-            description=f"Apply disk retention policies (every {retention_interval_hours}h)",
+            description="Generate disk space recommendations (NO automatic deletion)",
         )
-        logger.info(
-            f"   ✅ Disk retention registered (every {retention_interval_hours}h)"
-        )
+        logger.info(f"   ✅ Disk monitor registered (every {check_interval}s)")
 
         # 11.3. RAG автообновление (feature flag)
         rag_auto_enabled = False
@@ -366,7 +368,6 @@ async def lifespan(app: FastAPI):
         if predictive_enabled:
 
             async def predictive_hal_check_task():
-                """Периодическая проверка Predictive HAL."""
                 await predictive_hal.check_all()
 
             background_tasks.register(
@@ -396,7 +397,6 @@ async def lifespan(app: FastAPI):
         if metrics_auto_enabled:
 
             async def metrics_source_check_task():
-                """Периодическая проверка качества источников."""
                 await metrics_source_monitor.check_and_switch()
 
             background_tasks.register(
@@ -412,7 +412,6 @@ async def lifespan(app: FastAPI):
 
         # 11.6. RAG cleanup (weekly)
         async def rag_cleanup_task():
-            """Периодическая очистка старых документов из RAG."""
             try:
                 deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
                 if deleted > 0:
@@ -445,14 +444,18 @@ async def lifespan(app: FastAPI):
         logger.critical(f"❌ FATAL: Failed to start Cortex: {e}", exc_info=True)
         raise
 
-    # ================================================================
-    # Приложение работает
-    # ================================================================
+    # ====================================================================
+    # ████████████████████████████████████████████████████████████████████
+    # ███  ПРИЛОЖЕНИЕ РАБОТАЕТ                                         ███
+    # ████████████████████████████████████████████████████████████████████
+    # ====================================================================
     yield
 
-    # ================================================================
-    # SHUTDOWN PHASE (в обратном порядке)
-    # ================================================================
+    # ====================================================================
+    # ████████████████████████████████████████████████████████████████████
+    # ███  SHUTDOWN PHASE — ВСЁ ПОСЛЕ yield (в обратном порядке)       ███
+    # ████████████████████████████████████████████████████████████████████
+    # ====================================================================
     logger.info("=" * 70)
     logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
@@ -465,7 +468,6 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.debug(f"Failed to unsubscribe from {event_type}: {e}")
 
-        # Специальные обработчики
         try:
             event_bus.unsubscribe("DECISION_MADE", _on_decision_made)
             event_bus.unsubscribe("TRIGGER_FIRED", _on_trigger_fired)
@@ -523,7 +525,7 @@ app = FastAPI(
         "9 AI-агентов, LangGraph координация, RAG-система, Pre-flight Checklist, "
         "Simulation Mode. Локальное использование без аутентификации."
     ),
-    version="4.1.0",
+    version="4.2.0",
     lifespan=lifespan,
 )
 
@@ -547,7 +549,7 @@ else:
 
 
 # ============================================================================
-# METRICS MIDDLEWARE (audit 11.2)
+# METRICS MIDDLEWARE
 # ============================================================================
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
@@ -586,7 +588,7 @@ class RAGSearchRequest(BaseModel):
 
 
 # ============================================================================
-# SYSTEM ENDPOINTS (public)
+# SYSTEM ENDPOINTS
 # ============================================================================
 @app.get("/health", tags=["System"])
 async def health_check(request: Request):
@@ -596,7 +598,7 @@ async def health_check(request: Request):
     metrics_summary = cortex_metrics.get_summary()
     return {
         "status": "healthy",
-        "version": "4.1.0",
+        "version": "4.2.0",
         "timestamp": datetime.now().isoformat(),
         "components": {
             "event_bus": event_bus._running,
@@ -625,7 +627,7 @@ async def api_root():
     """Корневой API эндпоинт."""
     return {
         "name": "N.I.N.A. AI Cortex API",
-        "version": "4.1.0",
+        "version": "4.2.0",
         "documentation": "/docs",
         "health": "/health",
         "metrics": "/metrics",
@@ -1119,23 +1121,27 @@ async def get_disk_usage(request: Request):
     return await disk_monitor.get_stats()
 
 
-@app.post("/api/v1/storage/cleanup", tags=["Storage"])
-async def apply_retention_policy(
+@app.get("/api/v1/storage/recommendations", tags=["Storage"])
+async def get_disk_recommendations(request: Request):
+    """
+    Генерирует рекомендации по управлению дисковым пространством.
+    ИСПРАВЛЕНО (v4.2): НЕ удаляет файлы, только рекомендует.
+    """
+    result = await disk_monitor.generate_recommendations("keep_last_30_days")
+    return result.model_dump()
+
+
+@app.get("/api/v1/storage/recommendations/{policy_name}", tags=["Storage"])
+async def get_disk_recommendations_by_policy(
     request: Request,
-    policy_name: str = Query(..., description="Имя политики"),
+    policy_name: str,
 ):
-    """Применяет политику удаления старых данных."""
-    result = await disk_monitor.apply_retention_policy(policy_name)
-    if result:
-        return result
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unknown policy: {policy_name}. "
-                f"Available: {list(disk_monitor.policies.keys())}"
-            ),
-        )
+    """
+    Генерирует рекомендации по конкретной политике.
+    ИСПРАВЛЕНО (v4.2): НЕ удаляет файлы, только рекомендует.
+    """
+    result = await disk_monitor.generate_recommendations(policy_name)
+    return result.model_dump()
 
 
 # ============================================================================
@@ -1682,7 +1688,7 @@ async def list_sessions(
     min_quality: Optional[float] = Query(None, ge=0, le=10),
     limit: int = Query(50, ge=1, le=500),
 ):
-    """Спис сессий с фильтрацией."""
+    """Список сессий с фильтрацией."""
     sessions = await sessions_metadata.get_sessions(
         target_name=target,
         date_from=date_from,

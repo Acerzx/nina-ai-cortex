@@ -1,10 +1,12 @@
 # ============================================================================
-# N.I.N.A. AI Cortex — Конфигурация (v4.0)
+# N.I.N.A. AI Cortex — Конфигурация (v4.2)
 # ============================================================================
-# v4.0 изменения:
-#   - Добавлена секция session_metadata (исправление проблемы #7)
-#   - Добавлены feature flags для новых идей (RAG, Predictive HAL, ML, etc.)
-#   - Добавлена секция security для sensitive patterns
+# v4.2 изменения:
+#   - ВСЕ настраиваемые параметры вынесены в этот файл
+#   - DiskMonitor: только мониторинг, без удаления файлов
+#   - Добавлены секции: predictive_hal, rag, rag_updater, metrics_monitor
+#   - Добавлены секции: python_bridge, global_var_injector, decision_analyzer
+#   - Добавлена секция: shadow_visualizer, embeddings
 # ============================================================================
 
 # 1. ПУТИ N.I.N.A.
@@ -60,7 +62,6 @@ watchers:
   dither_statistics_path: null
   guiding_analyzer_path: null
   dynamic_sequencer_path: null
-  # ИСПРАВЛЕНО (проблема #7): Добавлена секция session_metadata
   session_metadata:
     files:
       - "ImageMetaData.json"
@@ -99,18 +100,21 @@ thresholds:
     z_score_threshold: 3.0
     min_history_points: 5
     anomaly_cooldown_seconds: 300
+
   calibrator:
     bias_freshness_days: 90
     dark_freshness_days: 30
     flat_freshness_days: 7
     temperature_tolerance: 2.0
     alert_cooldown_seconds: 600
+
   preflight:
     cloud_cover_max: 80.0
     wind_speed_max: 20.0
     humidity_max: 90.0
     min_free_disk_space_gb: 50.0
     camera_cooled_threshold: -10.0
+
   strategist:
     snr_target: 20.0
     hfr_target: 2.5
@@ -122,12 +126,15 @@ thresholds:
     hfr_degradation_threshold: 0.05
     min_proposal_interval_seconds: 600
     wind_load_warning: 10.0
+
   guardian:
     wind_speed_park: 20.0
     cloud_cover_pause: 80.0
     humidity_warning: 90.0
     rms_recalibration: 3.0
     temperature_alarm: 5.0
+
+  # ИСПРАВЛЕНО (v4.2): DiskMonitor только мониторит, НЕ удаляет
   storage:
     warning_threshold_gb: 50.0
     critical_threshold_gb: 20.0
@@ -178,46 +185,33 @@ execution:
     emergency_park: mount_park
 
 # ============================================================================
-# НОВОЕ v4.0: FEATURE FLAGS (поведенческие флаги)
+# FEATURE FLAGS (поведенческие флаги)
 # ============================================================================
 feature_flags:
-  # RAG расширения
   rag:
     auto_update_enabled: false
     multimodal_enabled: false
     sqlite_integration_enabled: true
-
-  # Predictive HAL
   hal:
     predictive_enabled: false
     confidence_threshold_critical: 0.95
     confidence_threshold_medium: 0.85
     confidence_threshold_low: 0.70
-
-  # ML и аналитика
   analytics:
     decision_analyzer_enabled: true
     ml_parameter_optimizer: false
-
-  # Shadow Engine
   shadow:
     mermaid_export_enabled: true
     d3_visualization_enabled: false
-
-  # Метрики
   metrics:
     auto_source_selection: true
-
-  # Интеграции
   integrations:
     siril_enabled: false
-
-  # Reinforcement Learning (заглушка)
   ml:
     rl_pipeline_enabled: false
 
 # ============================================================================
-# НОВОЕ v4.0: SECURITY (паттерны чувствительных данных)
+# SECURITY (паттерны чувствительных данных)
 # ============================================================================
 security:
   sensitive_patterns:
@@ -237,3 +231,132 @@ security:
     - accesskey
     - secret_key
     - secretkey
+
+# ============================================================================
+# НОВОЕ v4.2: DISK MONITOR (только мониторинг, без удаления)
+# ============================================================================
+disk_monitor:
+  check_interval_seconds: 3600
+  auto_recommendations_enabled: true
+  min_session_size_gb: 0.1
+  max_recommendations_per_check: 50
+
+# ============================================================================
+# НОВОЕ v4.2: PREDICTIVE HAL CONFIGURATION
+# ============================================================================
+predictive_hal:
+  window_short: 10
+  window_medium: 20
+  window_long: 40
+  prediction_horizon_minutes: 5.0
+  min_points_for_prediction: 8
+  prediction_cooldown_seconds: 300
+  points_per_minute: 20.0
+  warning_temperature_celsius: -5.0
+
+# ============================================================================
+# НОВОЕ v4.2: RAG ENGINE CONFIGURATION
+# ============================================================================
+rag:
+  chunk_sizes:
+    documentation: 1000
+    session: 500
+    error_log: 300
+  embedding_cache_max_size: 10000
+
+# ============================================================================
+# НОВОЕ v4.2: RAG UPDATER CONFIGURATION
+# ============================================================================
+rag_updater:
+  docs_dir: "./docs"
+  doc_extensions:
+    - ".md"
+    - ".txt"
+    - ".rst"
+  max_docs_per_run: 50
+
+# ============================================================================
+# НОВОЕ v4.2: METRICS SOURCE MONITOR CONFIGURATION
+# ============================================================================
+metrics_monitor:
+  expected_metrics_count: 25
+  history_size: 20
+
+# ============================================================================
+# НОВОЕ v4.2: PYTHON BRIDGE (Safety) CONFIGURATION
+# ============================================================================
+python_bridge:
+  forbidden_substrings:
+    - "import os"
+    - "import sys"
+    - "import subprocess"
+    - "os.system"
+    - "os.popen"
+    - "subprocess."
+    - "eval("
+    - "exec("
+    - "__import__"
+    - "open("
+    - "System.IO.File"
+    - "System.Diagnostics.Process"
+    - "System.Net.WebClient"
+    - "System.Net.Http"
+
+# ============================================================================
+# НОВОЕ v4.2: GLOBAL VAR INJECTOR (Security) CONFIGURATION
+# ============================================================================
+global_var_injector:
+  sensitive_patterns:
+    - token
+    - password
+    - passwd
+    - secret
+    - api_key
+    - apikey
+    - api-key
+    - private_key
+    - privatekey
+    - credentials
+    - auth
+    - bearer
+    - access_key
+    - accesskey
+    - secret_key
+    - secretkey
+
+# ============================================================================
+# НОВОЕ v4.2: DECISION ANALYZER CONFIGURATION
+# ============================================================================
+decision_analyzer:
+  low_success_rate_threshold: 0.6
+  low_sample_size: 10
+  high_confidence_wrong_threshold: 0.7
+  known_agents:
+    - Watcher
+    - Guardian
+    - Diagnostician
+    - Strategist
+    - Auditor
+    - Calibrator
+    - Scheduler
+    - Copilot
+    - Orchestrator
+    - HybridLangGraphOrchestrator
+
+# ============================================================================
+# НОВОЕ v4.2: SHADOW VISUALIZER CONFIGURATION
+# ============================================================================
+shadow_visualizer:
+  critical_keywords:
+    - shutdown
+    - park
+    - meridian
+    - flip
+
+# ============================================================================
+# НОВОЕ v4.2: EMBEDDINGS CONFIGURATION
+# ============================================================================
+embeddings:
+  model: "nomic-embed-text"
+  cache_file: "./data/embeddings_cache.pkl"
+  dimension: 768

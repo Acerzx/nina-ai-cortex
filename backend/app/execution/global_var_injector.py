@@ -88,18 +88,17 @@ class GlobalVarInjector:
         if extra_patterns:
             self._sensitive_patterns.update(extra_patterns)
 
-        # Загружаем дополнительные паттерны из settings (если есть)
+        # Загружаем дополнительные паттерны из settings.global_var_injector
         try:
             from app.core.config import settings
 
-            security_config = getattr(settings, "security", None)
-            if security_config:
-                config_patterns = getattr(security_config, "sensitive_patterns", None)
+            gvi_config = getattr(settings, "global_var_injector", None)
+            if gvi_config:
+                config_patterns = getattr(gvi_config, "sensitive_patterns", None)
                 if config_patterns and isinstance(config_patterns, (list, set)):
                     self._sensitive_patterns.update(config_patterns)
         except Exception as e:
-            logger.debug(f"Could not load security config: {e}")
-
+            logger.debug(f"Could not load global_var_injector config: {e}")
         # Статистика
         self._stats = {
             "total_variables_set": 0,

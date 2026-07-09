@@ -1,3 +1,12 @@
+"""
+Dynamic Sequencer Editor — редактирование JSON-проектов Dynamic Sequencer.
+Устраняет Упрощение #25.
+
+ИСПРАВЛЕНО (v4.0 — проблема #55): async JSON через aiofiles + run_in_executor.
+ИСПРАВЛЕНО (v4.2): Удалены дубликаты методов get_project() и list_projects().
+Безопасно: создает backup и проверяет состояние секвенсора.
+"""
+
 import json
 import shutil
 import logging
@@ -7,8 +16,6 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from app.core.executors import run_io
 import aiofiles
-import json
-
 from app.core.config import settings
 from app.shadow_engine.state_tracker import state_tracker
 
@@ -32,44 +39,59 @@ class DynamicSequencerEditor:
         self._lock = asyncio.Lock()
 
     async def list_projects(self) -> List[Dict[str, Any]]:
-        """Возвращает список всех доступных проектов."""
+        """
+        Возвращает список всех доступных проектов.
+        ИСПРАВЛЕНО (v4.0 — проблема #55): async JSON через run_in_executor.
+        ИСПРАВЛЕНО (v4.2): Единственная версия метода (дубль удалён).
+        """
         if not self.projects_root.exists():
             logger.warning(
                 f"Dynamic Sequencer projects dir not found: {self.projects_root}"
             )
             return []
 
-        projects = []
-        for json_file in self.projects_root.glob("*.json"):
+        # Читаем все файлы параллельно
+        async def read_project(json_file: Path) -> Optional[Dict]:
             try:
-                with open(json_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                projects.append(
-                    {
-                        "file": json_file.name,
-                        "path": str(json_file),
-                        "name": data.get("Name", json_file.stem),
-                        "targets_count": len(data.get("Targets", [])),
-                        "modified": datetime.fromtimestamp(
-                            json_file.stat().st_mtime
-                        ).isoformat(),
-                    }
-                )
+                async with aiofiles.open(json_file, "r", encoding="utf-8") as f:
+                    content = await f.read()
+                data = json.loads(content)
+                return {
+                    "file": json_file.name,
+                    "path": str(json_file),
+                    "name": data.get("Name", json_file.stem),
+                    "targets_count": len(data.get("Targets", [])),
+                    "modified": datetime.fromtimestamp(
+                        json_file.stat().st_mtime
+                    ).isoformat(),
+                }
             except Exception as e:
                 logger.error(f"Failed to read project {json_file.name}: {e}")
+                return None
 
+        # Получаем список файлов (через run_in_executor)
+        json_files = await run_io(list, self.projects_root.glob("*.json"))
+
+        # Параллельное чтение всех проектов
+        tasks = [read_project(f) for f in json_files]
+        results = await asyncio.gather(*tasks)
+        projects = [r for r in results if r is not None]
         return projects
 
     async def get_project(self, project_name: str) -> Optional[Dict[str, Any]]:
-        """Загружает проект по имени."""
+        """
+        Загружает проект по имени.
+        ИСПРАВЛЕНО (v4.0 — проблема #55): async JSON через aiofiles.
+        ИСПРАВЛЕНО (v4.2): Единственная версия метода (дубль удалён).
+        """
         project_file = self.projects_root / f"{project_name}.json"
         if not project_file.exists():
             logger.error(f"Project not found: {project_name}")
             return None
-
         try:
-            with open(project_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            async with aiofiles.open(project_file, "r", encoding="utf-8") as f:
+                content = await f.read()
+            return json.loads(content)
         except Exception as e:
             logger.error(f"Failed to load project {project_name}: {e}")
             return None
@@ -89,7 +111,8 @@ class DynamicSequencerEditor:
         # КРИТИЧНО: Проверка состояния секвенсора
         if state_tracker.state.is_running:
             logger.warning(
-                f"🛑 BLOCKED: Cannot edit project '{project_name}' - sequence is running"
+                f"🛑 BLOCKED: Cannot edit project '{project_name}' "
+                f"- sequence is running"
             )
             return False
 
@@ -111,12 +134,11 @@ class DynamicSequencerEditor:
                 # 2. Загрузка JSON (async через aiofiles)
                 async with aiofiles.open(project_file, "r", encoding="utf-8") as f:
                     content = await f.read()
-                    data = json.loads(content)
+                data = json.loads(content)
 
                 # 3. Поиск и обновление цели
                 targets = data.get("Targets", [])
                 target_found = False
-
                 for target in targets:
                     if (
                         target.get("Name") == target_name
@@ -135,7 +157,8 @@ class DynamicSequencerEditor:
                                 old_value = target.get(key)
                                 target[key] = value
                                 logger.info(
-                                    f"✏️ Updated {target_name}.{key}: {old_value} -> {value}"
+                                    f"✏️ Updated {target_name}.{key}: "
+                                    f"{old_value} -> {value}"
                                 )
                         target_found = True
                         break
@@ -150,7 +173,6 @@ class DynamicSequencerEditor:
                 self._validate_project(data)
                 async with aiofiles.open(project_file, "w", encoding="utf-8") as f:
                     await f.write(json.dumps(data, indent=2, ensure_ascii=False))
-
                 logger.info(f"✅ Project '{project_name}' updated. Reason: {reason}")
                 return True
 
@@ -160,66 +182,6 @@ class DynamicSequencerEditor:
             except Exception as e:
                 logger.error(f"❌ Failed to update project: {e}")
                 return False
-
-    async def get_project(self, project_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Загружает проект по имени.
-        ИСПРАВЛЕНО (v4.0 — проблема #55): async JSON через aiofiles.
-        """
-        project_file = self.projects_root / f"{project_name}.json"
-        if not project_file.exists():
-            logger.error(f"Project not found: {project_name}")
-            return None
-
-        try:
-            async with aiofiles.open(project_file, "r", encoding="utf-8") as f:
-                content = await f.read()
-                return json.loads(content)
-        except Exception as e:
-            logger.error(f"Failed to load project {project_name}: {e}")
-            return None
-
-    async def list_projects(self) -> List[Dict[str, Any]]:
-        """
-        Возвращает список всех доступных проектов.
-        ИСПРАВЛЕНО (v4.0 — проблема #55): async JSON через run_in_executor.
-        """
-        if not self.projects_root.exists():
-            logger.warning(
-                f"Dynamic Sequencer projects dir not found: {self.projects_root}"
-            )
-            return []
-
-        projects = []
-
-        # Читаем все файлы параллельно
-        async def read_project(json_file: Path) -> Optional[Dict]:
-            try:
-                async with aiofiles.open(json_file, "r", encoding="utf-8") as f:
-                    content = await f.read()
-                    data = json.loads(content)
-                    return {
-                        "file": json_file.name,
-                        "path": str(json_file),
-                        "name": data.get("Name", json_file.stem),
-                        "targets_count": len(data.get("Targets", [])),
-                        "modified": datetime.fromtimestamp(
-                            json_file.stat().st_mtime
-                        ).isoformat(),
-                    }
-            except Exception as e:
-                logger.error(f"Failed to read project {json_file.name}: {e}")
-                return None
-
-        # Получаем список файлов (через run_in_executor)
-        json_files = await run_io(list, self.projects_root.glob("*.json"))
-
-        # Параллельное чтение всех проектов
-        tasks = [read_project(f) for f in json_files]
-        results = await asyncio.gather(*tasks)
-
-        projects = [r for r in results if r is not None]
-        return projects
 
     async def disable_target(
         self, project_name: str, target_name: str, reason: str

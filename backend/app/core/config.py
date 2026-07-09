@@ -8,6 +8,14 @@
 - Добавлены: OpenAPIConfig, StorageThresholds, MetricsConfig, SimulationConfig, ExecutionConfig
 - Удален model_name из AISettings (deprecated)
 - Упрощен CORSConfig для локального использования
+
+ИСПРАВЛЕНО (v4.2 — полная централизация):
+- Добавлены ВСЕ секции из settings.yaml:
+  DiskMonitorConfig, PredictiveHALConfig, RAGConfig, RAGUpdaterConfig,
+  MetricsMonitorConfig, PythonBridgeConfig, GlobalVarInjectorConfig,
+  DecisionAnalyzerConfig, ShadowVisualizerConfig, EmbeddingsConfig,
+  TriggersConfig, ExtendedHALConfig
+- Все настраиваемые параметры вынесены в единый конфиг
 """
 
 import os
@@ -97,6 +105,18 @@ class WatchersConfig(BaseModel):
     dynamic_sequencer_path: Optional[str] = None
 
 
+class SessionMetadataConfig(BaseModel):
+    """Настройки Session Metadata файлов."""
+
+    files: List[str] = Field(
+        default_factory=lambda: [
+            "ImageMetaData.json",
+            "AcquisitionDetails.json",
+            "WeatherData.json",
+        ]
+    )
+
+
 class LoggingConfig(BaseModel):
     """Настройки логирования."""
 
@@ -110,10 +130,7 @@ class LoggingConfig(BaseModel):
 
 
 class CORSConfig(BaseModel):
-    """
-    Настройки CORS (Cross-Origin Resource Sharing).
-    Упрощено для локального использования.
-    """
+    """Настройки CORS (Cross-Origin Resource Sharing)."""
 
     enabled: bool = True
     allowed_origins: List[str] = Field(
@@ -141,10 +158,7 @@ class CORSConfig(BaseModel):
 
 
 class OpenAPIConfig(BaseModel):
-    """
-    Настройки OpenAPI спецификации N.I.N.A. Advanced API.
-    Используется для динамической генерации триггеров и валидации.
-    """
+    """Настройки OpenAPI спецификации N.I.N.A. Advanced API."""
 
     spec_path: str = "config/nina_api_spec.json"
     auto_load: bool = True
@@ -158,6 +172,7 @@ class StorageThresholds(BaseModel):
     critical_threshold_gb: float = 20.0
     retention_keep_last_days: int = 30
     retention_max_records: int = 100000
+    retention_cleanup_interval_hours: int = 24
 
 
 class MetricsConfig(BaseModel):
@@ -178,10 +193,7 @@ class SimulationConfig(BaseModel):
 
 
 class ExecutionConfig(BaseModel):
-    """
-    Конфигурация Execution Layer.
-    Содержит маппинги для trigger_emulator и agent_aliases.
-    """
+    """Конфигурация Execution Layer."""
 
     agent_aliases: Dict[str, str] = Field(
         default_factory=lambda: {
@@ -291,6 +303,280 @@ class DataSourcesConfig(BaseModel):
 
 
 # ============================================================================
+# FEATURE FLAGS
+# ============================================================================
+
+
+class RAGFeatureFlags(BaseModel):
+    """Feature flags для RAG."""
+
+    auto_update_enabled: bool = False
+    multimodal_enabled: bool = False
+    sqlite_integration_enabled: bool = True
+
+
+class HALFeatureFlags(BaseModel):
+    """Feature flags для HAL (Predictive)."""
+
+    predictive_enabled: bool = False
+    confidence_threshold_critical: float = 0.95
+    confidence_threshold_medium: float = 0.85
+    confidence_threshold_low: float = 0.70
+
+
+class AnalyticsFeatureFlags(BaseModel):
+    """Feature flags для аналитики."""
+
+    decision_analyzer_enabled: bool = True
+    ml_parameter_optimizer: bool = False
+
+
+class ShadowFeatureFlags(BaseModel):
+    """Feature flags для Shadow Engine."""
+
+    mermaid_export_enabled: bool = True
+    d3_visualization_enabled: bool = False
+
+
+class MetricsFeatureFlags(BaseModel):
+    """Feature flags для метрик."""
+
+    auto_source_selection: bool = True
+
+
+class IntegrationsFeatureFlags(BaseModel):
+    """Feature flags для интеграций."""
+
+    siril_enabled: bool = False
+
+
+class MLFeatureFlags(BaseModel):
+    """Feature flags для ML."""
+
+    rl_pipeline_enabled: bool = False
+
+
+class FeatureFlagsConfig(BaseModel):
+    """Полная конфигурация feature flags."""
+
+    rag: RAGFeatureFlags = Field(default_factory=RAGFeatureFlags)
+    hal: HALFeatureFlags = Field(default_factory=HALFeatureFlags)
+    analytics: AnalyticsFeatureFlags = Field(default_factory=AnalyticsFeatureFlags)
+    shadow: ShadowFeatureFlags = Field(default_factory=ShadowFeatureFlags)
+    metrics: MetricsFeatureFlags = Field(default_factory=MetricsFeatureFlags)
+    integrations: IntegrationsFeatureFlags = Field(
+        default_factory=IntegrationsFeatureFlags
+    )
+    ml: MLFeatureFlags = Field(default_factory=MLFeatureFlags)
+
+
+# ============================================================================
+# SECURITY
+# ============================================================================
+
+
+class SecurityConfig(BaseModel):
+    """Конфигурация безопасности (паттерны чувствительных данных)."""
+
+    sensitive_patterns: List[str] = Field(
+        default_factory=lambda: [
+            "token",
+            "password",
+            "passwd",
+            "secret",
+            "api_key",
+            "apikey",
+            "api-key",
+            "private_key",
+            "privatekey",
+            "credentials",
+            "auth",
+            "bearer",
+            "access_key",
+            "accesskey",
+            "secret_key",
+            "secretkey",
+        ]
+    )
+
+
+# ============================================================================
+# НОВОЕ v4.2: ДОПОЛНИТЕЛЬНЫЕ СЕКЦИИ КОНФИГУРАЦИИ
+# ============================================================================
+
+
+class DiskMonitorConfig(BaseModel):
+    """Конфигурация Disk Monitor (только мониторинг, без удаления)."""
+
+    check_interval_seconds: int = 3600
+    auto_recommendations_enabled: bool = True
+    min_session_size_gb: float = 0.1
+    max_recommendations_per_check: int = 50
+
+
+class PredictiveHALConfig(BaseModel):
+    """Конфигурация Predictive HAL."""
+
+    window_short: int = 10
+    window_medium: int = 20
+    window_long: int = 40
+    prediction_horizon_minutes: float = 5.0
+    min_points_for_prediction: int = 8
+    prediction_cooldown_seconds: int = 300
+    points_per_minute: float = 20.0
+    warning_temperature_celsius: float = -5.0
+
+
+class ChunkSizesConfig(BaseModel):
+    """Размеры чанков для RAG."""
+
+    documentation: int = 1000
+    session: int = 500
+    error_log: int = 300
+
+
+class RAGConfig(BaseModel):
+    """Конфигурация RAG Engine."""
+
+    chunk_sizes: ChunkSizesConfig = Field(default_factory=ChunkSizesConfig)
+    embedding_cache_max_size: int = 10000
+
+
+class RAGUpdaterConfig(BaseModel):
+    """Конфигурация RAG Updater."""
+
+    docs_dir: str = "./docs"
+    doc_extensions: List[str] = Field(default_factory=lambda: [".md", ".txt", ".rst"])
+    max_docs_per_run: int = 50
+
+
+class MetricsMonitorConfig(BaseModel):
+    """Конфигурация Metrics Source Monitor."""
+
+    expected_metrics_count: int = 25
+    history_size: int = 20
+
+
+class PythonBridgeConfig(BaseModel):
+    """Конфигурация Python Bridge (Safety)."""
+
+    forbidden_substrings: List[str] = Field(
+        default_factory=lambda: [
+            "import os",
+            "import sys",
+            "import subprocess",
+            "os.system",
+            "os.popen",
+            "subprocess.",
+            "eval(",
+            "exec(",
+            "__import__",
+            "open(",
+            "System.IO.File",
+            "System.Diagnostics.Process",
+            "System.Net.WebClient",
+            "System.Net.Http",
+        ]
+    )
+
+
+class GlobalVarInjectorConfig(BaseModel):
+    """Конфигурация Global Var Injector."""
+
+    sensitive_patterns: List[str] = Field(
+        default_factory=lambda: [
+            "token",
+            "password",
+            "passwd",
+            "secret",
+            "api_key",
+            "apikey",
+            "api-key",
+            "private_key",
+            "privatekey",
+            "credentials",
+            "auth",
+            "bearer",
+            "access_key",
+            "accesskey",
+            "secret_key",
+            "secretkey",
+        ]
+    )
+
+
+class DecisionAnalyzerConfig(BaseModel):
+    """Конфигурация Decision Analyzer."""
+
+    low_success_rate_threshold: float = 0.6
+    low_sample_size: int = 10
+    high_confidence_wrong_threshold: float = 0.7
+    known_agents: List[str] = Field(
+        default_factory=lambda: [
+            "Watcher",
+            "Guardian",
+            "Diagnostician",
+            "Strategist",
+            "Auditor",
+            "Calibrator",
+            "Scheduler",
+            "Copilot",
+            "Orchestrator",
+            "HybridLangGraphOrchestrator",
+        ]
+    )
+
+
+class ShadowVisualizerConfig(BaseModel):
+    """Конфигурация Shadow Visualizer."""
+
+    critical_keywords: List[str] = Field(
+        default_factory=lambda: ["shutdown", "park", "meridian", "flip"]
+    )
+
+
+class EmbeddingsConfig(BaseModel):
+    """Конфигурация Embeddings."""
+
+    model: str = "nomic-embed-text"
+    cache_file: str = "./data/embeddings_cache.pkl"
+    dimension: int = 768
+
+
+class TriggersConfig(BaseModel):
+    """Конфигурация Trigger Emulator."""
+
+    protected_params: List[str] = Field(
+        default_factory=lambda: ["cancel", "skipValidation"]
+    )
+    patterns: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+class ExtendedHALConfig(BaseModel):
+    """Расширенная конфигурация HAL."""
+
+    critical_instruction_types: List[str] = Field(
+        default_factory=lambda: [
+            "ShutdownPcInstruction",
+            "ShutdownNina",
+            "MeridianFlipInstruction",
+            "ParkScopeInstruction",
+            "TwoPointPolarAlignmentSequenceItem",
+            "CenterAfterDriftInstruction",
+            "CenterInstruction",
+            "SlewScopeInstruction",
+            "SlewScopeToAltAzInstruction",
+        ]
+    )
+    safe_during_critical: List[str] = Field(
+        default_factory=lambda: [
+            "InterruptWhenRMSAbove",
+            "RestartWhenSaturated",
+        ]
+    )
+
+
+# ============================================================================
 # КОРНЕВАЯ МОДЕЛЬ SETTINGS
 # ============================================================================
 
@@ -307,6 +593,9 @@ class Settings(BaseSettings):
     ai_settings: AISettings
     hal: HALConfig = Field(default_factory=HALConfig)
     watchers: WatchersConfig = Field(default_factory=WatchersConfig)
+    session_metadata: SessionMetadataConfig = Field(
+        default_factory=SessionMetadataConfig
+    )
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     # Упрощенные секции
@@ -322,6 +611,34 @@ class Settings(BaseSettings):
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     decision_audit: DecisionAuditConfig = Field(default_factory=DecisionAuditConfig)
+
+    # Feature flags
+    feature_flags: FeatureFlagsConfig = Field(default_factory=FeatureFlagsConfig)
+
+    # Security
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+
+    # ========================================================================
+    # НОВОЕ v4.2: Дополнительные секции
+    # ========================================================================
+    disk_monitor: DiskMonitorConfig = Field(default_factory=DiskMonitorConfig)
+    predictive_hal: PredictiveHALConfig = Field(default_factory=PredictiveHALConfig)
+    rag: RAGConfig = Field(default_factory=RAGConfig)
+    rag_updater: RAGUpdaterConfig = Field(default_factory=RAGUpdaterConfig)
+    metrics_monitor: MetricsMonitorConfig = Field(default_factory=MetricsMonitorConfig)
+    python_bridge: PythonBridgeConfig = Field(default_factory=PythonBridgeConfig)
+    global_var_injector: GlobalVarInjectorConfig = Field(
+        default_factory=GlobalVarInjectorConfig
+    )
+    decision_analyzer: DecisionAnalyzerConfig = Field(
+        default_factory=DecisionAnalyzerConfig
+    )
+    shadow_visualizer: ShadowVisualizerConfig = Field(
+        default_factory=ShadowVisualizerConfig
+    )
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+    triggers: TriggersConfig = Field(default_factory=TriggersConfig)
+    hal_config: ExtendedHALConfig = Field(default_factory=ExtendedHALConfig)
 
     @field_validator("influxdb", mode="before")
     def resolve_env_vars(cls, value):
@@ -349,13 +666,7 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    """
-    Загружает settings.yaml и накладывает переменные окружения.
-    Возвращает валидированный Settings объект.
-    ИСПРАВЛЕНО (audit 8.1): добавлена валидация критических путей.
-    ИСПРАВЛЕНО: явная загрузка .env через python-dotenv ДО создания Settings,
-    чтобы os.getenv() работал в field_validator.
-    """
+    """Загружает settings.yaml и накладывает переменные окружения."""
     config_path = (
         Path(__file__).resolve().parent.parent.parent.parent
         / "config"
@@ -366,17 +677,13 @@ def load_settings() -> Settings:
         logger.error(f"❌ Configuration file not found: {config_path}")
         raise FileNotFoundError(f"Configuration file not found at {config_path}")
 
-    # ИСПРАВЛЕНО: Загружаем .env в os.environ ДО создания Settings.
-    # pydantic-settings читает .env только для полей модели,
-    # но field_validator использует os.getenv(), который не знает о .env.
-    # Ищем .env в backend/ директории
+    # Загружаем .env в os.environ ДО создания Settings
     backend_dir = Path(__file__).resolve().parent.parent.parent
     env_path = backend_dir / ".env"
     if env_path.exists():
         load_dotenv(env_path, override=False)
         logger.info(f"✅ Loaded environment from {env_path}")
     else:
-        # Пробуем корень проекта
         root_env = backend_dir.parent / ".env"
         if root_env.exists():
             load_dotenv(root_env, override=False)
@@ -394,12 +701,11 @@ def load_settings() -> Settings:
 
         settings_obj = Settings(**yaml_data)
 
-        # ИСПРАВЛЕНО (audit 8.1): Валидация критических путей
+        # Валидация критических путей
         _validate_critical_paths(settings_obj)
 
         logger.info(f"✅ Configuration loaded from {config_path}")
         return settings_obj
-
     except Exception as e:
         logger.error(f"❌ Failed to load configuration: {e}")
         raise
@@ -410,24 +716,20 @@ def _validate_critical_paths(settings_obj: Settings) -> None:
     env = settings_obj.nina_environment
     warnings = []
 
-    # Критические пути (без них система не работает)
     critical_paths = {
         "appdata_root": env.appdata_root,
         "sessions_root": env.sessions_root,
     }
-
     for name, path in critical_paths.items():
         if not path.exists():
             warnings.append(f"⚠️ Critical path does not exist: {name} = {path}")
 
-    # Опциональные пути (только warning)
     optional_paths = {
         "masters_root": env.masters_root,
         "profiles_dir": env.profiles_dir,
         "logs_dir": env.logs_dir,
         "plugins_dir": env.plugins_dir,
     }
-
     for name, path in optional_paths.items():
         if not path.exists():
             logger.debug(f"Optional path does not exist: {name} = {path}")
@@ -435,7 +737,6 @@ def _validate_critical_paths(settings_obj: Settings) -> None:
     for warning in warnings:
         logger.warning(warning)
 
-    # В production требуем наличия всех критических путей
     if warnings and os.getenv("ENVIRONMENT") == "production":
         raise RuntimeError(f"Critical paths missing in production: {warnings}")
 

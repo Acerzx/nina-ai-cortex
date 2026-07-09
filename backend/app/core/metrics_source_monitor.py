@@ -113,6 +113,13 @@ class MetricsSourceMonitor:
             "last_switch_reason": None,
         }
 
+        # Время старта для grace period
+        self._start_time = datetime.now()
+
+        # Grace period: не переключаемся первые N секунд после старта
+        # чтобы дать всем источникам время прислать первые данные
+        self.GRACE_PERIOD_SECONDS = 30
+
         logger.info(
             f"📊 Metrics Source Monitor initialized "
             f"(auto: {self._auto_selection_enabled}, "
@@ -144,16 +151,25 @@ class MetricsSourceMonitor:
     async def check_and_switch(self) -> str:
         """
         Проверяет качество всех источников и переключается при необходимости.
-        Вызывается из BackgroundTaskManager.
-
-        Returns:
-            Текущий активный источник
+        ИСПРАВЛЕНО (v4.2): Добавлен grace period после старта — первые 30 секунд
+        автопереключение не выполняется, чтобы дать всем источникам время
+        прислать первые данные.
         """
         if not self._auto_selection_enabled:
             return self._active_source
 
         if self._manual_override:
             return self._active_source
+
+        # Grace period: первые 30 секунд после старта не переключаемся
+        if self._start_time:
+            elapsed = (datetime.now() - self._start_time).total_seconds()
+            if elapsed < self.GRACE_PERIOD_SECONDS:
+                logger.debug(
+                    f"Metrics Source Monitor: grace period active "
+                    f"({elapsed:.0f}/{self.GRACE_PERIOD_SECONDS}s), skipping check"
+                )
+                return self._active_source
 
         # Измеряем качество каждого источника
         for source_name in self.sources.keys():
@@ -274,7 +290,6 @@ class MetricsSourceMonitor:
         """Переключается на новый источник."""
         old_source = self._active_source
         self._active_source = new_source
-
         self._stats["total_switches"] += 1
         self._stats["last_switch_time"] = datetime.now().isoformat()
         self._stats["last_switch_reason"] = reason
@@ -298,8 +313,8 @@ class MetricsSourceMonitor:
             },
         )
 
-        # Логируем
-        observatory_state.log_ai_action(
+        # ИСПРАВЛЕНО (v4.2): log_ai_action — это async метод, используем await
+        await observatory_state.log_ai_action(
             agent="MetricsSourceMonitor",
             action=f"Switch source: {old_source} → {new_source}",
             reason=reason,

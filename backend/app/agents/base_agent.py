@@ -8,6 +8,7 @@ Base Agent — базовый класс для всех AI-агентов в Mu
 - Template Method pattern сохранён
 """
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
