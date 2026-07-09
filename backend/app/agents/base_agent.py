@@ -182,18 +182,30 @@ class BaseAgent(ABC):
             return "Контекст недоступен"
 
     def log_decision(self, decision: AgentDecision):
-        """Логирует решение в Decision Audit Trail."""
+        """
+        Логирует решение в Decision Audit Trail.
+        ИСПРАВЛЕНО (v4.2): observatory_state.log_ai_action() — async метод,
+        вызываем через asyncio.create_task() для fire-and-forget.
+        """
         self._decision_log.append(decision)
-
         if len(self._decision_log) > 1000:
             self._decision_log = self._decision_log[-1000:]
 
-        observatory_state.log_ai_action(
-            agent=self.name,
-            action=decision.decision_type,
-            reason=decision.rationale,
-            result=f"Confidence: {decision.confidence:.2f}",
-        )
+        # ИСПРАВЛЕНО (v4.2): log_ai_action — это async метод
+        # Вызываем через create_task для fire-and-forget
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                observatory_state.log_ai_action(
+                    agent=self.name,
+                    action=decision.decision_type,
+                    reason=decision.rationale,
+                    result=f"Confidence: {decision.confidence:.2f}",
+                )
+            )
+        except RuntimeError:
+            # Нет запущенного event loop — пропускаем логирование
+            pass
 
         logger.info(
             f"📝 [{self.name}] Decision: {decision.decision_type} "

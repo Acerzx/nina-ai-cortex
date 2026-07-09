@@ -1,7 +1,6 @@
 """
 Trigger Emulator v3 (OpenAPI-Driven Edition)
 Эмулирует срабатывание триггеров через N.I.N.A. Advanced API.
-
 КЛЮЧЕВЫЕ УЛУЧШЕНИЯ (рефакторинг v3):
 - Динамическое построение реестра триггеров из OpenAPI спецификации
 - AGENT_ALIASES читаются из settings.execution.agent_aliases (если есть)
@@ -11,6 +10,9 @@ Trigger Emulator v3 (OpenAPI-Driven Edition)
 - Полная статистика и история всех операций
 - Детальная обработка всех HTTP-ответов (200, 409, 404, errors)
 - Fallback: можно вызвать любой эндпоинт N.I.N.A. API напрямую
+ИСПРАВЛЕНО (v4.1):
+- Исправлены отступы в __init__
+- Удалён недостижимый код с неопределённой переменной api_response
 """
 
 import logging
@@ -18,7 +20,6 @@ from typing import Optional, Dict, Any, List, Set, Tuple
 from datetime import datetime
 from pydantic import BaseModel, Field
 import httpx
-
 from app.core.config import settings
 from app.shadow_engine.state_tracker import state_tracker
 from app.core.events import event_bus
@@ -30,35 +31,28 @@ logger = logging.getLogger("TriggerEmulator")
 # ============================================================================
 # МОДЕЛИ ДАННЫХ
 # ============================================================================
-
-
 class TriggerHistoryRecord(BaseModel):
     """Запись в истории триггеров."""
+
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     trigger: str
     actual_trigger: str = ""
     reason: str
     status: str  # SUCCESS, FAILED_*, BLOCKED_*
     details: Dict[str, Any] = Field(default_factory=dict)
-    # ИСПРАВЛЕНО (v4.0): добавляем rejected параметры
     rejected_params: List[str] = Field(default_factory=list)
-
 
 
 # ============================================================================
 # КОНФИГУРАЦИЯ
 # ============================================================================
-
 # Защищённые параметры (нельзя перезаписывать через extra_params).
-# Это критично для безопасности оборудования.
 PROTECTED_PARAMS: Set[str] = {
     "cancel",  # Отмена операций
     "skipValidation",  # Пропуск валидации секвенсора
 }
 
 # Минимальный маппинг внутренних имён Cortex на паттерны в OpenAPI.
-# Это БИЗНЕС-ЛОГИКА — связь между абстрактным именем агента и реальным путём.
-# Может быть переопределён через settings.execution.trigger_patterns
 DEFAULT_TRIGGER_PATTERNS: Dict[str, Dict[str, Any]] = {
     # Autofocus
     "autofocus": {
@@ -257,19 +251,9 @@ DEFAULT_TRIGGER_PATTERNS: Dict[str, Dict[str, Any]] = {
 # ============================================================================
 # TRIGGER EMULATOR
 # ============================================================================
-
-
 class TriggerEmulator:
     """
     Эмулятор триггеров N.I.N.A. Advanced API (OpenAPI-Driven Edition).
-
-    Архитектура:
-    1. При старте загружает OpenAPI spec через openapi_client
-    2. Строит dynamic registry триггеров на основе spec + TRIGGER_PATTERNS
-    3. При fire_trigger резолвит путь из registry, валидирует параметры,
-       вызывает OpenAPI клиент
-    4. Все операции логируются в историю и EventBus
-    5. Поддерживает прямой вызов любого OpenAPI эндпоинта (fallback)
     """
 
     def __init__(self):
@@ -320,14 +304,12 @@ class TriggerEmulator:
             f"trigger patterns: {len(self._trigger_patterns)}"
         )
 
-        # ИСПРАВЛЕНО (v4.0 — проблема #62): храним последние rejected params
-         self._last_rejected_params: Optional[List[str]] = None
-
+        # ИСПРАВЛЕНО (v4.1): храним последние rejected params
+        self._last_rejected_params: Optional[List[str]] = None
 
     # ====================================================================
     # КОНФИГУРАЦИЯ
     # ====================================================================
-
     def _load_agent_aliases(self) -> Dict[str, str]:
         """Загружает AGENT_ALIASES из settings или возвращает default."""
         try:
@@ -340,7 +322,6 @@ class TriggerEmulator:
         except Exception as e:
             logger.debug(f"Could not load execution config: {e}")
 
-        # Default aliases (бизнес-логика)
         return {
             "autofocus": "autofocus",
             "dither": "guider_start",
@@ -359,7 +340,6 @@ class TriggerEmulator:
                     logger.info(
                         f"✅ Loaded {len(patterns)} trigger patterns from settings"
                     )
-                    # Мержим с default (settings имеют приоритет)
                     merged = dict(DEFAULT_TRIGGER_PATTERNS)
                     merged.update(patterns)
                     return merged
@@ -375,20 +355,15 @@ class TriggerEmulator:
 
         try:
             self._openapi_client = await get_nina_api_client()
-            # Строим registry при первой инициализации
             self._build_registry_from_openapi()
             return self._openapi_client
         except Exception as e:
             logger.warning(f"⚠️ OpenAPI client not available: {e}")
-            # Fallback: строим registry из patterns (без валидации)
             self._build_registry_fallback()
             return None
 
     def _build_registry_from_openapi(self):
-        """
-        Строит реестр триггеров из OpenAPI спецификации + patterns.
-        ИСПРАВЛЕНО (v4.0 — проблема #22): точное сравнение пути вместо подстроки.
-        """
+        """Строит реестр триггеров из OpenAPI спецификации + patterns."""
         if not self._openapi_client:
             self._build_registry_fallback()
             return
@@ -397,7 +372,7 @@ class TriggerEmulator:
             method = pattern.get("method", "GET")
             path_pattern = pattern.get("path_pattern", "")
 
-            # ИСПРАВЛЕНО: Сначала ищем точное совпадение
+            # Сначала ищем точное совпадение
             endpoint = self._openapi_client.find_by_path(method, path_pattern)
 
             # Если точное не найдено — пробуем fuzzy matching
@@ -413,7 +388,6 @@ class TriggerEmulator:
                     f"⚠️ Trigger '{trigger_name}' not found in OpenAPI spec "
                     f"(path: {path_pattern}, method: {method})"
                 )
-                # Всё равно регистрируем с минимальной информацией
                 self._registry[trigger_name] = {
                     "method": method,
                     "path": path_pattern,
@@ -479,7 +453,6 @@ class TriggerEmulator:
     # ====================================================================
     # ВАЛИДАЦИЯ ПАРАМЕТРОВ
     # ====================================================================
-
     def _validate_parameter_value(
         self,
         trigger_config: Dict[str, Any],
@@ -488,9 +461,8 @@ class TriggerEmulator:
     ) -> Tuple[bool, Optional[str]]:
         """Валидирует значение параметра против OpenAPI схемы."""
         parameter_ranges = trigger_config.get("parameter_ranges", {})
-
         if param_name not in parameter_ranges:
-            return True, None  # Нет ограничений в spec
+            return True, None
 
         range_spec = parameter_ranges[param_name]
         min_val = range_spec.get("min")
@@ -521,10 +493,7 @@ class TriggerEmulator:
         base_params: Dict[str, Any],
         extra_params: Optional[Dict[str, Any]],
     ) -> Tuple[Dict[str, Any], List[str]]:
-        """
-        Безопасно объединяет базовые и дополнительные параметры.
-        Защищённые параметры не могут быть перезаписаны.
-        """
+        """Безопасно объединяет базовые и дополнительные параметры."""
         if not extra_params:
             return dict(base_params), []
 
@@ -562,7 +531,6 @@ class TriggerEmulator:
     # ====================================================================
     # ИСТОРИЯ
     # ====================================================================
-
     def _add_to_history(
         self,
         trigger_name: str,
@@ -582,21 +550,20 @@ class TriggerEmulator:
             rejected_params=rejected or [],
         )
         self._trigger_history.append(record)
+
         if len(self._trigger_history) > self._history_max_size:
             self._trigger_history = self._trigger_history[-self._history_max_size :]
+
     # ====================================================================
     # ГЛАВНЫЙ МЕТОД
     # ====================================================================
-
     async def fire_trigger(
         self,
         trigger_name: str,
         reason: str = "AI Agent Decision",
         extra_params: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """
-        Эмулирует срабатывание триггера через Advanced API.
-        """
+        """Эмулирует срабатывание триггера через Advanced API."""
         self._stats["total_triggers_fired"] += 1
 
         # Разрешаем алиасы
@@ -645,7 +612,10 @@ class TriggerEmulator:
                 )
                 self._stats["blocked_by_critical_phase"] += 1
                 self._add_to_history(
-                    trigger_name, actual_trigger, reason, "BLOCKED_CRITICAL_PHASE"
+                    trigger_name,
+                    actual_trigger,
+                    reason,
+                    "BLOCKED_CRITICAL_PHASE",
                 )
                 return False
 
@@ -671,7 +641,6 @@ class TriggerEmulator:
             logger.debug("HAL not available, skipping HAL validation")
 
         # === ПРОВЕРКА 4: Получение конфигурации триггера ===
-        # Lazy init OpenAPI клиента
         if not self._registry:
             await self._ensure_openapi_client()
 
@@ -691,8 +660,7 @@ class TriggerEmulator:
             trigger_config, trigger_config.get("params", {}), extra_params
         )
 
-            # ИСПРАВЛЕНО (v4.0 — проблема #62): сохраняем rejected для API
-            self._last_rejected_params = rejected if rejected else None
+        self._last_rejected_params = rejected if rejected else None
 
         if rejected:
             logger.warning(
@@ -701,7 +669,6 @@ class TriggerEmulator:
             )
 
         # === ВЫПОЛНЕНИЕ ЗАПРОСА ===
-        url = f"{self.base_url}{trigger_config['path']}"
         method = trigger_config["method"]
 
         # Используем OpenAPI клиент если доступен
@@ -720,23 +687,11 @@ class TriggerEmulator:
             trigger_name,
             actual_trigger,
             method,
-            url,
+            f"{self.base_url}{trigger_config['path']}",
             params,
             rejected,
             reason,
         )
-    
-    self._add_to_history(
-    trigger_name,
-    actual_trigger,
-    reason,
-    "SUCCESS",
-    {
-        "response": api_response,
-        "params": params,
-    },
-    rejected=rejected,  # ИСПРАВЛЕНО: передаём rejected
-)
 
     async def _fire_via_openapi(
         self,
@@ -847,11 +802,13 @@ class TriggerEmulator:
                 trigger_name, actual_trigger, reason, "FAILED_CONNECTION_ERROR"
             )
             return False
+
         except httpx.TimeoutException:
             logger.error(f"❌ Timeout firing trigger '{trigger_name}'")
             self._stats["failed_triggers"] += 1
             self._add_to_history(trigger_name, actual_trigger, reason, "FAILED_TIMEOUT")
             return False
+
         except Exception as e:
             logger.error(f"❌ Unexpected error firing trigger '{trigger_name}': {e}")
             self._stats["failed_triggers"] += 1
@@ -884,6 +841,7 @@ class TriggerEmulator:
                 f"✅ Trigger '{trigger_name}' fired successfully: {api_response}"
             )
             self._stats["successful_triggers"] += 1
+
             self._add_to_history(
                 trigger_name,
                 actual_trigger,
@@ -895,10 +853,10 @@ class TriggerEmulator:
                     "rejected_params": rejected,
                 },
             )
-            # Публикуем событие
 
+            # Публикуем событие
             try:
-                await event_bus.publish(
+                event_bus.publish(
                     "TRIGGER_FIRED",
                     {
                         "trigger": trigger_name,
@@ -916,6 +874,7 @@ class TriggerEmulator:
                 )
             except Exception as e:
                 logger.debug(f"Failed to publish TRIGGER_FIRED event: {e}")
+
             return True
 
         # Валидационная ошибка
@@ -990,17 +949,13 @@ class TriggerEmulator:
     # ====================================================================
     # ПРЯМОЙ ВЫЗОВ ЛЮБОГО OPENAPI ЭНДПОИНТА (FALLBACK)
     # ====================================================================
-
     async def call_openapi_endpoint(
         self,
         operation_id: str,
         params: Optional[Dict[str, Any]] = None,
         body: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """
-        Прямой вызов любого OpenAPI эндпоинта по operationId.
-        Полезно для вызовов, не покрытых trigger patterns.
-        """
+        """Прямой вызов любого OpenAPI эндпоинта по operationId."""
         client = await self._ensure_openapi_client()
         if not client:
             return {
@@ -1028,14 +983,10 @@ class TriggerEmulator:
     # ====================================================================
     # ПУБЛИЧНЫЕ МЕТОДЫ
     # ====================================================================
-
     def list_available_triggers(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Возвращает список всех доступных триггеров с детальной информацией.
-        """
+        """Возвращает список всех доступных триггеров с детальной информацией."""
         result = {}
         for name, config in self._registry.items():
-            # Детализация параметров
             param_details = {}
             for param_name, default_value in config.get("params", {}).items():
                 param_info = {
@@ -1061,12 +1012,10 @@ class TriggerEmulator:
         return result
 
     def get_stats(self) -> Dict[str, Any]:
-        """
-        Возвращает статистику TriggerEmulator.
-        ИСПРАВЛЕНО (v4.0 — проблема #62): включает rejected параметры.
-        """
+        """Возвращает статистику TriggerEmulator."""
         total = max(self._stats["total_triggers_fired"], 1)
         success_rate = (self._stats["successful_triggers"] / total) * 100
+
         return {
             **self._stats,
             "success_rate_percent": round(success_rate, 2),
@@ -1077,7 +1026,6 @@ class TriggerEmulator:
             "history_size": len(self._trigger_history),
             "recent_triggers": [r.model_dump() for r in self._trigger_history[-10:]],
             "agent_aliases": self._agent_aliases,
-            # ИСПРАВЛЕНО (v4.0): добавляем rejected параметры
             "last_rejected_params": self._last_rejected_params,
         }
 

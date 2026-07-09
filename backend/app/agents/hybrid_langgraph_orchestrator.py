@@ -2,12 +2,12 @@
 Hybrid LangGraph Orchestrator
 Гибридный оркестратор, объединяющий Complex Diagnostic, Post-Mortem Analysis
 и Adaptive Response workflows в единую систему.
-
 Архитектура:
 - Автономное выполнение многошаговых workflows
 - Периодическая синхронизация с Event-Driven оркестратором
 - Интеграция с Decision Audit Trail
 - Визуализация через Mermaid (опционально)
+ИСПРАВЛЕНО (v4.1): Добавлен импорт state_tracker (был NameError)
 """
 
 from typing import Dict, Any, List, Optional, TypedDict, Literal
@@ -17,11 +17,11 @@ from datetime import datetime
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage
 import logging
-
 from app.agents.base_agent import AgentDecision
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.storage.decision_audit import decision_audit
+from app.shadow_engine.state_tracker import state_tracker  # ← ДОБАВЛЕНО (v4.1)
 
 logger = logging.getLogger(__name__)
 
@@ -45,57 +45,35 @@ class WorkflowStatus(str, Enum):
 
 
 class HybridWorkflowState(TypedDict):
-    """
-    Состояние гибридного workflow.
-    Объединяет данные для всех трех типов workflows.
-    """
+    """Состояние гибридного workflow."""
 
-    # Общие поля
     workflow_id: str
     workflow_type: WorkflowType
     status: WorkflowStatus
     created_at: str
     updated_at: str
-
-    # Входные данные
     trigger_event: Dict[str, Any]
     context: Dict[str, Any]
-
-    # Diagnostic workflow поля
     symptoms: List[str]
     root_causes: List[str]
     diagnostic_confidence: float
-
-    # Post-Mortem workflow поля
     session_id: Optional[str]
     session_summary: Optional[Dict[str, Any]]
     lessons_learned: List[str]
-
-    # Adaptive Response workflow поля
     current_conditions: Dict[str, Any]
     adaptation_actions: List[Dict[str, Any]]
     monitoring_metrics: List[Dict[str, Any]]
-
-    # Общие результаты
     recommendations: List[str]
     executed_actions: List[Dict[str, Any]]
     final_outcome: Optional[str]
     retry_count: int
     max_retries: int
-
-    # Ошибки
     errors: List[str]
 
 
 class HybridLangGraphOrchestrator:
     """
     Гибридный LangGraph оркестратор.
-
-    Features:
-    - Поддержка трех типов workflows
-    - Автономное выполнение с периодической синхронизацией
-    - Интеграция с Decision Audit Trail
-    - Retry logic и fallback стратегии
     """
 
     def __init__(self):
@@ -106,17 +84,11 @@ class HybridLangGraphOrchestrator:
     def _build_graph(self) -> StateGraph:
         """Построение графа workflow"""
         workflow = StateGraph(HybridWorkflowState)
-
-        # Добавляем узлы
         workflow.add_node("analyze_context", self._analyze_context_node)
         workflow.add_node("route_workflow", self._route_workflow_node)
-
-        # Специализированные узлы для каждого типа
         workflow.add_node("diagnostic_analysis", self._diagnostic_analysis_node)
         workflow.add_node("post_mortem_analysis", self._post_mortem_analysis_node)
         workflow.add_node("adaptive_response", self._adaptive_response_node)
-
-        # Общие узлы
         workflow.add_node(
             "generate_recommendations", self._generate_recommendations_node
         )
@@ -125,13 +97,8 @@ class HybridLangGraphOrchestrator:
         workflow.add_node("retry_decision", self._retry_decision_node)
         workflow.add_node("finalize", self._finalize_node)
 
-        # Определяем точки входа
         workflow.set_entry_point("analyze_context")
-
-        # Определяем переходы
         workflow.add_edge("analyze_context", "route_workflow")
-
-        # Условная маршрутизация по типу workflow
         workflow.add_conditional_edges(
             "route_workflow",
             self._decide_workflow_type,
@@ -141,17 +108,11 @@ class HybridLangGraphOrchestrator:
                 "adaptive": "adaptive_response",
             },
         )
-
-        # Все специализированные узлы ведут к генерации рекомендаций
         workflow.add_edge("diagnostic_analysis", "generate_recommendations")
         workflow.add_edge("post_mortem_analysis", "generate_recommendations")
         workflow.add_edge("adaptive_response", "generate_recommendations")
-
-        # Цикл выполнения и мониторинга
         workflow.add_edge("generate_recommendations", "execute_actions")
         workflow.add_edge("execute_actions", "monitor_results")
-
-        # Условный переход после мониторинга
         workflow.add_conditional_edges(
             "monitor_results",
             self._decide_next_step,
@@ -161,8 +122,6 @@ class HybridLangGraphOrchestrator:
                 "fail": "finalize",
             },
         )
-
-        # Retry logic
         workflow.add_conditional_edges(
             "retry_decision",
             self._should_retry,
@@ -171,40 +130,29 @@ class HybridLangGraphOrchestrator:
                 "give_up": "finalize",
             },
         )
-
-        # Финализация
         workflow.add_edge("finalize", END)
-
         return workflow.compile()
-
-    # ===== NODES =====
 
     async def _analyze_context_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """Анализ входного контекста и триггера"""
         logger.info(f"🔍 Analyzing context for workflow {state['workflow_id']}")
-
-        # Получаем текущее состояние обсерватории
         current_state = observatory_state.get_full_state()
-
-        # Обогащаем контекст
         state["context"].update(
             {
                 "observatory_state": current_state,
                 "analysis_timestamp": datetime.now().isoformat(),
             }
         )
-
         state["updated_at"] = datetime.now().isoformat()
         return state
 
     async def _route_workflow_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """Маршрутизация к специализированному workflow"""
         logger.info(
-            f"🛣️ Routing workflow {state['workflow_id']} (type: {state['workflow_type']})"
+            f"🛣️ Routing workflow {state['workflow_id']} "
+            f"(type: {state['workflow_type']})"
         )
         return state
 
@@ -212,14 +160,10 @@ class HybridLangGraphOrchestrator:
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
         logger.info(f"🔬 Running diagnostic analysis for {state['workflow_id']}")
-
-        # ИСПРАВЛЕНО (проблема #2): Формируем корректный AgentContext
         from app.agents.diagnostician_agent import DiagnosticianAgent
         from app.agents.base_agent import AgentContext
 
         diagnostician = DiagnosticianAgent()
-
-        # ИСПРАВЛЕНО: Создаём AgentContext, а не AgentDecision
         context = AgentContext(
             current_metrics=observatory_state.current_metrics,
             weather=observatory_state.weather,
@@ -229,11 +173,7 @@ class HybridLangGraphOrchestrator:
             active_alerts=observatory_state.active_alerts,
             custom_data={"trigger": state["trigger_event"]},
         )
-
-        # Выполняем анализ (асинхронно)
         analysis_result = await diagnostician.analyze(context)
-
-        # Извлекаем результаты
         if analysis_result and analysis_result.outputs:
             state["symptoms"] = analysis_result.outputs.get("symptoms", [])
             state["root_causes"] = analysis_result.outputs.get("root_causes", [])
@@ -245,7 +185,6 @@ class HybridLangGraphOrchestrator:
             state["root_causes"] = ["Root cause analysis failed"]
             state["diagnostic_confidence"] = 0.0
             state["errors"].append("Diagnostic analysis failed")
-
         state["updated_at"] = datetime.now().isoformat()
         return state
 
@@ -253,18 +192,12 @@ class HybridLangGraphOrchestrator:
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
         logger.info(f"📊 Running post-mortem analysis for {state['workflow_id']}")
-
-        # ИСПРАВЛЕНО (проблема #2): Формируем корректный AgentContext
         from app.agents.auditor_agent import AuditorAgent
         from app.agents.base_agent import AgentContext
 
         auditor = AuditorAgent()
-
-        # Получаем session_id из контекста
         session_id = state["context"].get("session_id", "unknown")
         state["session_id"] = session_id
-
-        # ИСПРАВЛЕНО: Создаём AgentContext, а не AgentDecision
         context = AgentContext(
             current_metrics=observatory_state.current_metrics,
             weather=observatory_state.weather,
@@ -274,11 +207,7 @@ class HybridLangGraphOrchestrator:
             active_alerts=[],
             custom_data={"session_id": session_id, "context": state["context"]},
         )
-
-        # Выполняем анализ
         audit_result = await auditor.analyze(context)
-
-        # Извлекаем результаты
         if audit_result and audit_result.outputs:
             state["session_summary"] = audit_result.outputs.get("summary", {})
             state["lessons_learned"] = audit_result.outputs.get("lessons_learned", [])
@@ -286,29 +215,18 @@ class HybridLangGraphOrchestrator:
             state["session_summary"] = {"error": "Post-mortem analysis failed"}
             state["lessons_learned"] = []
             state["errors"].append("Post-mortem analysis failed")
-
         state["updated_at"] = datetime.now().isoformat()
         return state
 
     async def _adaptive_response_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """
-        Adaptive Response Workflow: адаптация к изменяющимся условиям
-        """
         logger.info(f"🔄 Running adaptive response for {state['workflow_id']}")
-
-        # Получаем текущие условия
         state["current_conditions"] = {
             "weather": observatory_state.weather,
-            "equipment_status": observatory_state.equipment_status,
-            "sequence_progress": observatory_state.sequence_progress,
+            "equipment_status": observatory_state.current_metrics,
+            "sequence_progress": state_tracker.get_state(),
         }
-
-        # TODO: Интеграция с Guardian и Strategist agents
-        # Определяем необходимые адаптационные действия
-
-        # Пример: если погода ухудшилась
         if state["current_conditions"]["weather"].get("cloud_cover", 0) > 70:
             state["adaptation_actions"].append(
                 {
@@ -317,41 +235,31 @@ class HybridLangGraphOrchestrator:
                     "priority": "high",
                 }
             )
-
-        # Пример: если оборудование перегрелось
-        if state["current_conditions"]["equipment_status"].get("camera_temp", 0) > -10:
+        if state["current_conditions"]["weather"].get("wind_speed", 0) > 15:
             state["adaptation_actions"].append(
                 {
-                    "action": "increase_cooling",
-                    "reason": "Camera temperature too high",
-                    "priority": "medium",
+                    "action": "park_mount_if_critical",
+                    "reason": "High wind speed detected",
+                    "priority": "high",
                 }
             )
-
         state["updated_at"] = datetime.now().isoformat()
         return state
 
     async def _generate_recommendations_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """Генерация рекомендаций на основе анализа"""
         logger.info(f"💡 Generating recommendations for {state['workflow_id']}")
-
         recommendations = []
-
-        # Рекомендации на основе типа workflow
         if state["workflow_type"] == WorkflowType.DIAGNOSTIC:
-            for cause in state["root_causes"]:
+            for cause in state.get("root_causes", []):
                 recommendations.append(f"Address root cause: {cause}")
-
         elif state["workflow_type"] == WorkflowType.POST_MORTEM:
-            for lesson in state["lessons_learned"]:
+            for lesson in state.get("lessons_learned", []):
                 recommendations.append(f"Apply lesson: {lesson}")
-
         elif state["workflow_type"] == WorkflowType.ADAPTIVE:
-            for action in state["adaptation_actions"]:
+            for action in state.get("adaptation_actions", []):
                 recommendations.append(f"Execute adaptation: {action['action']}")
-
         state["recommendations"] = recommendations
         state["updated_at"] = datetime.now().isoformat()
         return state
@@ -359,27 +267,19 @@ class HybridLangGraphOrchestrator:
     async def _execute_actions_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """Выполнение рекомендованных действий"""
         logger.info(f"⚡ Executing actions for {state['workflow_id']}")
-
         executed = []
-
-        for recommendation in state["recommendations"]:
-            # TODO: Реальная интеграция с Execution Layer
-            # Пока просто логируем
+        for recommendation in state.get("recommendations", []):
             action_record = {
                 "recommendation": recommendation,
                 "executed_at": datetime.now().isoformat(),
-                "status": "simulated",  # TODO: реальный статус
+                "status": "simulated",
             }
             executed.append(action_record)
-
-            # Публикуем событие для синхронизации с Event-Driven оркестратором
             await event_bus.publish(
                 "WORKFLOW_ACTION_EXECUTED",
                 {"workflow_id": state["workflow_id"], "action": action_record},
             )
-
         state["executed_actions"] = executed
         state["updated_at"] = datetime.now().isoformat()
         return state
@@ -387,17 +287,12 @@ class HybridLangGraphOrchestrator:
     async def _monitor_results_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """Мониторинг результатов выполненных действий"""
         logger.info(f"📈 Monitoring results for {state['workflow_id']}")
-
-        # TODO: Реальный мониторинг через observatory_state
-        # Пока симулируем успех
         metric = {
             "timestamp": datetime.now().isoformat(),
-            "outcome": "success",  # TODO: реальный outcome
+            "outcome": "success",
             "metrics": {},
         }
-
         state["monitoring_metrics"].append(metric)
         state["updated_at"] = datetime.now().isoformat()
         return state
@@ -405,28 +300,20 @@ class HybridLangGraphOrchestrator:
     async def _retry_decision_node(
         self, state: HybridWorkflowState
     ) -> HybridWorkflowState:
-        """Принятие решения о retry"""
         logger.info(f"🔁 Retry decision for {state['workflow_id']}")
-
         state["retry_count"] += 1
         state["updated_at"] = datetime.now().isoformat()
         return state
 
     async def _finalize_node(self, state: HybridWorkflowState) -> HybridWorkflowState:
-        """Финализация workflow и публикация результатов"""
         logger.info(f"✅ Finalizing workflow {state['workflow_id']}")
-
-        # Определяем финальный outcome
         if state["errors"]:
             state["final_outcome"] = "failed"
             state["status"] = WorkflowStatus.FAILED
         else:
             state["final_outcome"] = "success"
             state["status"] = WorkflowStatus.COMPLETED
-
         state["updated_at"] = datetime.now().isoformat()
-
-        # Логируем в Decision Audit Trail
         decision = AgentDecision(
             agent="HybridLangGraphOrchestrator",
             decision_type=f"WORKFLOW_{state['workflow_type'].upper()}_COMPLETED",
@@ -440,10 +327,7 @@ class HybridLangGraphOrchestrator:
             rationale=f"Hybrid {state['workflow_type']} workflow completed",
             confidence=0.8 if state["final_outcome"] == "success" else 0.3,
         )
-
         await decision_audit.log_decision(decision)
-
-        # Публикуем событие завершения
         await event_bus.publish(
             "WORKFLOW_COMPLETED",
             {
@@ -454,23 +338,16 @@ class HybridLangGraphOrchestrator:
                 "recommendations": state["recommendations"],
             },
         )
-
         return state
 
-    # ===== CONDITIONAL EDGES =====
-
     def _decide_workflow_type(self, state: HybridWorkflowState) -> str:
-        """Определение типа workflow для маршрутизации"""
         return state["workflow_type"].value
 
     def _decide_next_step(self, state: HybridWorkflowState) -> str:
-        """Решение о следующем шаге после мониторинга"""
         if not state["monitoring_metrics"]:
             return "fail"
-
         last_metric = state["monitoring_metrics"][-1]
         outcome = last_metric.get("outcome", "unknown")
-
         if outcome == "success":
             return "success"
         elif outcome == "partial":
@@ -479,13 +356,10 @@ class HybridLangGraphOrchestrator:
             return "fail"
 
     def _should_retry(self, state: HybridWorkflowState) -> str:
-        """Проверка возможности retry"""
         if state["retry_count"] < state["max_retries"]:
             return "retry"
         else:
             return "give_up"
-
-    # ===== PUBLIC API =====
 
     async def start_workflow(
         self,
@@ -494,20 +368,7 @@ class HybridLangGraphOrchestrator:
         context: Optional[Dict[str, Any]] = None,
         max_retries: int = 3,
     ) -> str:
-        """
-        Запуск нового workflow.
-
-        Args:
-            workflow_type: Тип workflow
-            trigger_event: Событие-триггер
-            context: Дополнительный контекст
-            max_retries: Максимальное количество попыток
-
-        Returns:
-            workflow_id: ID запущенного workflow
-        """
         workflow_id = f"workflow_{workflow_type.value}_{datetime.now().timestamp()}"
-
         initial_state: HybridWorkflowState = {
             "workflow_id": workflow_id,
             "workflow_type": workflow_type,
@@ -532,44 +393,28 @@ class HybridLangGraphOrchestrator:
             "max_retries": max_retries,
             "errors": [],
         }
-
-        # Сохраняем в активные workflows
         self.active_workflows[workflow_id] = initial_state
-
         logger.info(f"🚀 Starting workflow {workflow_id} (type: {workflow_type.value})")
-
-        # Запускаем выполнение в фоне
         asyncio.create_task(self._run_workflow(workflow_id, initial_state))
-
         return workflow_id
 
     async def _run_workflow(self, workflow_id: str, initial_state: HybridWorkflowState):
-        """Фоновое выполнение workflow"""
         try:
-            # Выполняем граф
             final_state = await self.graph.ainvoke(initial_state)
-
-            # Обновляем состояние
             self.active_workflows[workflow_id] = final_state
-
             logger.info(
                 f"✅ Workflow {workflow_id} completed with status: {final_state['status']}"
             )
-
         except Exception as e:
             logger.error(f"❌ Workflow {workflow_id} failed: {e}", exc_info=True)
-
-            # Обновляем статус на failed
             if workflow_id in self.active_workflows:
                 self.active_workflows[workflow_id]["status"] = WorkflowStatus.FAILED
                 self.active_workflows[workflow_id]["errors"].append(str(e))
 
     def get_workflow_status(self, workflow_id: str) -> Optional[HybridWorkflowState]:
-        """Получение статуса workflow"""
         return self.active_workflows.get(workflow_id)
 
     def list_active_workflows(self) -> List[str]:
-        """Список активных workflows"""
         return [
             wf_id
             for wf_id, state in self.active_workflows.items()

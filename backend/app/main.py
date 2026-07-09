@@ -1,7 +1,6 @@
 """
 N.I.N.A. AI Cortex - Main Application Entry Point
 FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
-
 ИСПРАВЛЕНО (рефакторинг v3):
 - Удалены: JWT-аутентификация, rate limiting (slowapi), избыточная безопасность
 - Удален Credential Vault (локальное использование не требует шифрования)
@@ -9,18 +8,24 @@ FastAPI сервер, управляющий жизненным циклом в�
 - Добавлена интеграция с Hybrid LangGraph Orchestrator
 - Все endpoints открытые (локальная сеть)
 - Метрики используют inc_sync/observe_sync вместо .labels().inc()
+ИСПРАВЛЕНО (v4.1):
+- Исправлена структура lifespan: startup до yield, shutdown после yield
+- Раскомментирован shutdown блок
+- Убраны дубли регистраций background tasks
+- _event_handlers доступен в shutdown области
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
 import uuid
-from app.core.background_tasks import background_tasks
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -31,7 +36,7 @@ from fastapi import (
     Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, FileResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -39,6 +44,7 @@ from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
 from app.core.ws_broadcast import ws_broadcast_manager
 from app.core.metrics import cortex_metrics
+from app.core.background_tasks import background_tasks
 from app.ingestion.watchers.manager import WatcherManager
 from app.shadow_engine.state_tracker import state_tracker
 from app.agents.observatory_state import observatory_state
@@ -59,7 +65,7 @@ from app.core.mode_manager import mode_manager
 from app.safety.preflight import preflight_checker
 from app.agents.llm_client import llm_client
 
-# НОВОЕ: Hybrid LangGraph Orchestrator
+# Hybrid LangGraph Orchestrator
 from app.agents.hybrid_langgraph_orchestrator import (
     hybrid_orchestrator,
     WorkflowType,
@@ -70,23 +76,14 @@ from app.agents.hybrid_langgraph_orchestrator import (
 from app.storage.disk_monitor import disk_monitor
 from app.storage.decision_audit import decision_audit
 
-# НОВОЕ (v4.0): RAG Updater для автообновления базы знаний
+# v4.0 modules
 from app.core.rag_updater import rag_updater
-
-# НОВОЕ (v4.0): Decision Analyzer для статистического анализа решений
 from app.analytics.decision_analyzer import decision_analyzer
-
-# НОВОЕ (v4.0): Sessions Metadata для хранения всех данных сессий
 from app.storage.sessions_metadata import sessions_metadata
-
-# НОВОЕ (v4.0): Predictive HAL для предсказательной безопасности
 from app.execution.predictive_hal import predictive_hal
-
-# НОВОЕ (v4.0): Shadow Visualizer для Mermaid экспорта
 from app.shadow_engine.shadow_visualizer import shadow_visualizer
-
-# НОВОЕ (v4.0): Metrics Source Monitor
 from app.core.metrics_source_monitor import metrics_source_monitor
+
 
 # ============================================================================
 # LOGGING SETUP
@@ -104,7 +101,6 @@ logger = logging.getLogger("CortexMain")
 # ============================================================================
 watcher_manager = WatcherManager()
 
-# 9 AI-агентов (убран MemoryManager)
 watcher_agent = WatcherAgent()
 guardian_agent = GuardianAgent()
 diagnostician_agent = DiagnosticianAgent()
@@ -114,15 +110,15 @@ calibrator_agent: Optional[CalibratorAgent] = None
 scheduler_agent = SchedulerAgent()
 copilot_agent = CopilotAgent()
 
+# Хранилище ссылок на обработчики событий (для корректной отписки при shutdown)
+_event_handlers: Dict[str, Callable] = {}
+
 
 # ============================================================================
 # EVENT BUS METRICS SUBSCRIBERS (audit 11.2)
 # ============================================================================
-async def _on_event_bus_event(event_type: str, data: Dict[str, Any]):
-    """
-    Автоматический сбор метрик из EventBus.
-    ИСПРАВЛЕНО: метрики вызываются через inc_sync/observe_sync вместо .labels().inc()
-    """
+async def _on_event_bus_event(data: Dict[str, Any], event_type: str = "unknown"):
+    """Автоматический сбор метрик из EventBus."""
     cortex_metrics.events_total.inc_sync(event_type=event_type)
 
 
@@ -171,11 +167,16 @@ async def _on_llm_response(data: Dict[str, Any]):
 async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения."""
     global calibrator_agent
+
     logger.info("=" * 70)
-    logger.info("🚀 N.I.N.A. AI Cortex v3.0 Starting Up...")
+    logger.info("🚀 N.I.N.A. AI Cortex v4.1 Starting Up...")
     logger.info("=" * 70)
 
     try:
+        # ================================================================
+        # STARTUP PHASE
+        # ================================================================
+
         # 1. Запуск Ingestion, Shadow Engine и Execution
         await watcher_manager.start()
 
@@ -224,15 +225,11 @@ async def lifespan(app: FastAPI):
         # 9. Запуск Orchestrator
         await orchestrator.start()
 
-        # 10. ИСПРАВЛЕНО (audit 11.2): Подписка на события для сбора метрик
-
+        # 10. Подписка на события для сбора метрик
         logger.info("📊 Subscribing to EventBus for metrics collection...")
 
-        # ИСПРАВЛЕНО: Храним ссылки на все обработчики
-        _event_handlers: Dict[str, Callable] = {}
-
-        # Подписываемся на все события для общего счётчика
-        for event_type in [
+        # Общие события для счётчика
+        general_events = [
             "SEQUENCE_STARTED",
             "SEQUENCE_STOPPED",
             "SEQUENCE_ITEM_STARTED",
@@ -249,116 +246,87 @@ async def lifespan(app: FastAPI):
             "LLM_RESPONSE",
             "RAG_SEARCH",
             "MASTERS_INDEXED",
-        ]:
-            # ИСПРАВЛЕНО: Сохраняем ссылку на обработчик
+        ]
+
+        for event_type in general_events:
+
             async def _handler(data: Dict[str, Any], et: str = event_type) -> None:
-                await _on_event_bus_event(et, data)
+                await _on_event_bus_event(data, et)
 
             _event_handlers[event_type] = _handler
             event_bus.subscribe(event_type, _handler)
 
-        # Специальные подписки для детальных метрик
-        _event_handlers["DECISION_MADE"] = _on_decision_made
-        _event_handlers["TRIGGER_FIRED"] = _on_trigger_fired
-        _event_handlers["LLM_RESPONSE"] = _on_llm_response
+        # Специальные обработчики для детальных метрик
+        _event_handlers["DECISION_MADE_detail"] = _on_decision_made
+        _event_handlers["TRIGGER_FIRED_detail"] = _on_trigger_fired
+        _event_handlers["LLM_RESPONSE_detail"] = _on_llm_response
 
         event_bus.subscribe("DECISION_MADE", _on_decision_made)
         event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
         event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
 
-        logger.info("=" * 70)
-        logger.info("✅ All AI Agents initialized and registered")
-        logger.info("✅ Cortex is fully operational and ready to accept connections.")
-        logger.info(f"🌐 API Docs available at: http://localhost:8000/docs")
-        logger.info(f"📊 Metrics endpoint: http://localhost:8000/metrics")
-        logger.info(
-            f"🔌 WebSocket endpoint: ws://localhost:8000{settings.ws_broadcast.path}"
-        )
-        logger.info("=" * 70)
-
-    except Exception as e:
-        logger.critical(f"❌ FATAL: Failed to start Cortex: {e}", exc_info=True)
-        raise
-
-    yield  # <-- Приложение работает
-        # 8. Останавливаем Background Task Manager (v4.0)
-        await background_tasks.stop()
-
-        # 11. Background Task Manager (v4.0)
+        # 11. Background Task Manager
         logger.info("⏰ Initializing Background Task Manager...")
         await background_tasks.start()
 
-        # Регистрируем фоновые задачи
         # 11.1. Автоочистка Decision Audit Trail
         if settings.decision_audit.auto_cleanup_enabled:
-            
+
             async def decision_audit_cleanup_task():
                 """Периодическая очистка старых записей Decision Audit."""
                 try:
-                    from app.storage.decision_audit import decision_audit
                     result = await decision_audit.cleanup_old_decisions()
-                    if result.get("deleted_count", 0) > 0:
+                    deleted = result.get("deleted_by_age", 0) + result.get(
+                        "deleted_by_count", 0
+                    )
+                    if deleted > 0:
                         logger.info(
-                            f"🗑️ Decision Audit cleanup: {result['deleted_count']} old records deleted"
+                            f"🗑️ Decision Audit cleanup: {deleted} old records deleted"
                         )
                 except Exception as e:
                     logger.error(f"Decision Audit cleanup failed: {e}")
-            
+
             background_tasks.register(
                 name="decision_audit_cleanup",
                 coro=decision_audit_cleanup_task,
-                interval_seconds=24 * 3600,  # Раз в сутки
+                interval_seconds=24 * 3600,
                 enabled=True,
                 description="Cleanup old Decision Audit records (retention: 90 days)",
             )
-            logger.info("   ✅ Decision Audit cleanup registered (daily)")           
+            logger.info("   ✅ Decision Audit cleanup registered (daily)")
 
-        # 11.2. Автоочистка Disk Monitor (retention policies)
-
-        async def disk_retention_task():
-            """Периодическое применение retention policies."""
-            try:
-                from app.storage.disk_monitor import disk_monitor
-                result = await disk_monitor.apply_retention_policy("keep_last_30_days")
-                if result and result.sessions_deleted > 0:
-                    logger.info(
-                        f"🗑️ Disk retention: {result.sessions_deleted} sessions deleted, "
-                        f"{result.space_freed_gb:.2f} GB freed"
-                    )
-            except Exception as e:
-                logger.error(f"Disk retention failed: {e}")
-        
-        # Читаем интервал из storage settings
+        # 11.2. Disk Retention
         storage_cfg = getattr(settings.thresholds, "storage", None)
-        retention_interval_hours = 24  # Default
+        retention_interval_hours = 24
         if storage_cfg:
             retention_interval_hours = getattr(
                 storage_cfg, "retention_cleanup_interval_hours", 24
             )
-        
+
+        async def disk_retention_task():
+            """Периодическое применение retention policies."""
+            try:
+                result = await disk_monitor.apply_retention_policy("keep_last_30_days")
+                if result and result.sessions_deleted > 0:
+                    logger.info(
+                        f"🗑️ Disk retention: {result.sessions_deleted} sessions "
+                        f"deleted, {result.space_freed_gb:.2f} GB freed"
+                    )
+            except Exception as e:
+                logger.error(f"Disk retention failed: {e}")
+
         background_tasks.register(
             name="disk_retention",
             coro=disk_retention_task,
             interval_seconds=retention_interval_hours * 3600,
             enabled=True,
-            description="Apply disk retention policies (keep last 30 days)",
+            description=f"Apply disk retention policies (every {retention_interval_hours}h)",
         )
-        logger.info(f"   ✅ Disk retention registered (every {retention_interval_hours}h)")
-
-        # Читаем интервал из storage settings (или дефолт 24 часа)
-        storage_cfg = settings.thresholds.storage
-        retention_interval_hours = getattr(storage_cfg, "retention_cleanup_interval_hours", 24)
-
-        background_tasks.register(
-            name="disk_retention",
-            coro=disk_retention_task,
-            interval_seconds=retention_interval_hours * 3600,
-            enabled=True,
-            description="Auto-apply retention policies for old sessions",
+        logger.info(
+            f"   ✅ Disk retention registered (every {retention_interval_hours}h)"
         )
-    
 
-        # 11.4. RAG автообновление (v4.0 — идея 1.2)
+        # 11.3. RAG автообновление (feature flag)
         rag_auto_enabled = False
         try:
             ff = getattr(settings, "feature_flags", None)
@@ -368,7 +336,7 @@ async def lifespan(app: FastAPI):
                     rag_auto_enabled = getattr(rag_ff, "auto_update_enabled", False)
         except Exception:
             pass
-        
+
         if rag_auto_enabled:
             background_tasks.register(
                 name="rag_auto_update",
@@ -384,27 +352,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ RAG auto-update disabled (feature flag off)")
 
-
-
-        # 11.3. RAG автообновление (feature flag)
-        if getattr(getattr(settings, "feature_flags", None), "rag", None) and \
-        getattr(settings.feature_flags.rag, "auto_update_enabled", False):
-            async def rag_auto_update_task():
-                """Периодическое обновление RAG базы."""
-                # TODO: Реализация в следующем этапе
-                logger.debug("🔄 RAG auto-update check (stub)")
-
-            background_tasks.register(
-                name="rag_auto_update",
-                coro=rag_auto_update_task,
-                interval_seconds=6 * 3600,  # каждые 6 часов
-                enabled=True,
-                description="Auto-update RAG with new documentation and sessions",
-            )
-
-        logger.info(f"   ✅ {len(background_tasks._tasks)} background tasks registered")
-
-        # 11.5. Predictive HAL (v4.0 — идея 3)
+        # 11.4. Predictive HAL (feature flag)
         predictive_enabled = False
         try:
             ff = getattr(settings, "feature_flags", None)
@@ -414,16 +362,17 @@ async def lifespan(app: FastAPI):
                     predictive_enabled = getattr(hal_ff, "predictive_enabled", False)
         except Exception:
             pass
-        
+
         if predictive_enabled:
+
             async def predictive_hal_check_task():
                 """Периодическая проверка Predictive HAL."""
                 await predictive_hal.check_all()
-            
+
             background_tasks.register(
                 name="predictive_hal_check",
                 coro=predictive_hal_check_task,
-                interval_seconds=30.0,  # каждые 30 секунд
+                interval_seconds=30.0,
                 enabled=True,
                 description="Predictive HAL: analyze trends for proactive safety",
             )
@@ -431,27 +380,29 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ Predictive HAL disabled (feature flag off)")
 
-
-        # 11.6. Metrics Source Monitor (v4.0 — идея 6)
+        # 11.5. Metrics Source Monitor (feature flag)
         metrics_auto_enabled = False
         try:
             ff = getattr(settings, "feature_flags", None)
             if ff:
                 metrics_ff = getattr(ff, "metrics", None)
                 if metrics_ff:
-                    metrics_auto_enabled = getattr(metrics_ff, "auto_source_selection", True)
+                    metrics_auto_enabled = getattr(
+                        metrics_ff, "auto_source_selection", True
+                    )
         except Exception:
             pass
-        
+
         if metrics_auto_enabled:
+
             async def metrics_source_check_task():
                 """Периодическая проверка качества источников."""
                 await metrics_source_monitor.check_and_switch()
-            
+
             background_tasks.register(
                 name="metrics_source_monitor",
                 coro=metrics_source_check_task,
-                interval_seconds=60.0,  # каждую минуту
+                interval_seconds=60.0,
                 enabled=True,
                 description="Monitor metrics sources quality and auto-switch",
             )
@@ -459,52 +410,73 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ Metrics Source Monitor disabled (feature flag off)")
 
-    # 11.7. RAG cleanup (v4.0 — issue #68)
-        rag_cleanup_enabled = True  # Включаем по умолчанию
-        
-        if rag_cleanup_enabled:
-            async def rag_cleanup_task():
-                """Периодическая очистка старых документов из RAG."""
-                try:
-                    deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
-                    if deleted > 0:
-                        logger.info(f"🗑️ RAG cleanup: {deleted} old documents deleted")
-                except Exception as e:
-                    logger.error(f"RAG cleanup failed: {e}")
-            
-            background_tasks.register(
-                name="rag_cleanup",
-                coro=rag_cleanup_task,
-                interval_seconds=7 * 24 * 3600,  # Раз в неделю
-                enabled=True,
-                description="Cleanup old documents from RAG (retention: 365 days)",
-            )
-            logger.info("   ✅ RAG cleanup registered (weekly)")
+        # 11.6. RAG cleanup (weekly)
+        async def rag_cleanup_task():
+            """Периодическая очистка старых документов из RAG."""
+            try:
+                deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
+                if deleted > 0:
+                    logger.info(f"🗑️ RAG cleanup: {deleted} old documents deleted")
+            except Exception as e:
+                logger.error(f"RAG cleanup failed: {e}")
 
-    # ========================================================================
-    # SHUTDOWN (в обратном порядке)
-    # ========================================================================
+        background_tasks.register(
+            name="rag_cleanup",
+            coro=rag_cleanup_task,
+            interval_seconds=7 * 24 * 3600,
+            enabled=True,
+            description="Cleanup old documents from RAG (retention: 365 days)",
+        )
+        logger.info("   ✅ RAG cleanup registered (weekly)")
+
+        logger.info(f"   ✅ {len(background_tasks._tasks)} background tasks registered")
+
+        logger.info("=" * 70)
+        logger.info("✅ All AI Agents initialized and registered")
+        logger.info("✅ Cortex is fully operational and ready to accept connections.")
+        logger.info(f"🌐 API Docs available at: http://localhost:8000/docs")
+        logger.info(f"📊 Metrics endpoint: http://localhost:8000/metrics")
+        logger.info(
+            f"🔌 WebSocket endpoint: ws://localhost:8000{settings.ws_broadcast.path}"
+        )
+        logger.info("=" * 70)
+
+    except Exception as e:
+        logger.critical(f"❌ FATAL: Failed to start Cortex: {e}", exc_info=True)
+        raise
+
+    # ================================================================
+    # Приложение работает
+    # ================================================================
+    yield
+
+    # ================================================================
+    # SHUTDOWN PHASE (в обратном порядке)
+    # ================================================================
     logger.info("=" * 70)
     logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
 
     try:
-
-
-
-        # 1. ИСПРАВЛЕНО (проблема #1): Корректная отписка с использованием сохранённых ссылок
+        # 1. Отписка от EventBus
         for event_type, handler in _event_handlers.items():
             try:
                 event_bus.unsubscribe(event_type, handler)
             except Exception as e:
                 logger.debug(f"Failed to unsubscribe from {event_type}: {e}")
-"""
 
+        # Специальные обработчики
+        try:
+            event_bus.unsubscribe("DECISION_MADE", _on_decision_made)
+            event_bus.unsubscribe("TRIGGER_FIRED", _on_trigger_fired)
+            event_bus.unsubscribe("LLM_RESPONSE", _on_llm_response)
+        except Exception as e:
+            logger.debug(f"Failed to unsubscribe detail handlers: {e}")
 
+        # 2. Останавливаем Background Task Manager
+        await background_tasks.stop()
 
-
-
-        # 2. Останавливаем агентов
+        # 3. Останавливаем агентов
         await orchestrator.stop()
         await copilot_agent.shutdown()
         await scheduler_agent.shutdown()
@@ -516,20 +488,23 @@ async def lifespan(app: FastAPI):
         await guardian_agent.shutdown()
         await watcher_agent.shutdown()
 
-        # 3. Останавливаем менеджеры
+        # 4. Останавливаем менеджеры
         await mode_manager.stop()
 
-        # 4. Закрываем broadcast и RAG
+        # 5. Закрываем broadcast и RAG
         await ws_broadcast_manager.stop()
         await rag_engine.close()
 
-        # 5. Останавливаем watchers
+        # 6. Останавливаем watchers
         await watcher_manager.stop()
 
-        # 6. Закрываем LLM клиент
+        # 7. Закрываем LLM клиент
         await llm_client.close()
 
-        # 7. Даем время на закрытие всех соединений
+        # 8. Закрываем trigger emulator
+        await trigger_emulator.close()
+
+        # 9. Даем время на закрытие всех соединений
         await asyncio.sleep(0.5)
 
         logger.info("✅ Cortex stopped gracefully.")
@@ -548,12 +523,12 @@ app = FastAPI(
         "9 AI-агентов, LangGraph координация, RAG-система, Pre-flight Checklist, "
         "Simulation Mode. Локальное использование без аутентификации."
     ),
-    version="3.0.0",
+    version="4.1.0",
     lifespan=lifespan,
 )
 
 # ============================================================================
-# CORS MIDDLEWARE — ИСПРАВЛЕНО (audit F2)
+# CORS MIDDLEWARE
 # ============================================================================
 if settings.cors.enabled:
     app.add_middleware(
@@ -576,27 +551,17 @@ else:
 # ============================================================================
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
-    """
-    Middleware для сбора метрик API запросов.
-    ИСПРАВЛЕНО: используем inc_sync/observe_sync вместо .labels().inc()
-    """
+    """Middleware для сбора метрик API запросов."""
     start_time = time.time()
-
-    # Выполняем запрос
     response = await call_next(request)
-
-    # Считаем метрики
     duration = time.time() - start_time
     method = request.method
     path = request.url.path
     status_code = response.status_code
-
-    # Обновляем метрики
     cortex_metrics.api_requests_total.inc_sync(
         method=method, path=path, status_code=str(status_code)
     )
     cortex_metrics.api_request_duration.observe_sync(duration, method=method, path=path)
-
     return response
 
 
@@ -625,18 +590,13 @@ class RAGSearchRequest(BaseModel):
 # ============================================================================
 @app.get("/health", tags=["System"])
 async def health_check(request: Request):
-    """
-    Health Check эндпоинт (public).
-    Проверяет статус всех критических компонентов ядра.
-    ИСПРАВЛЕНО (audit 11.2): Добавлены метрики компонентов.
-    """
+    """Health Check эндпоинт."""
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
     metrics_summary = cortex_metrics.get_summary()
-
     return {
         "status": "healthy",
-        "version": "3.0.0",
+        "version": "4.1.0",
         "timestamp": datetime.now().isoformat(),
         "components": {
             "event_bus": event_bus._running,
@@ -662,10 +622,10 @@ async def root():
 @app.get("/api", tags=["System"], include_in_schema=False)
 @app.get("/api/v1", tags=["System"], include_in_schema=False)
 async def api_root():
-    """Корневой API эндпоинт — список всех доступных endpoints."""
+    """Корневой API эндпоинт."""
     return {
         "name": "N.I.N.A. AI Cortex API",
-        "version": "3.0.0",
+        "version": "4.1.0",
         "documentation": "/docs",
         "health": "/health",
         "metrics": "/metrics",
@@ -673,21 +633,14 @@ async def api_root():
 
 
 # ============================================================================
-# PROMETHEUS /metrics ENDPOINT — ИСПРАВЛЕНО (audit 11.2)
+# PROMETHEUS /metrics ENDPOINT
 # ============================================================================
 @app.get("/metrics", tags=["Observability"], include_in_schema=False)
 async def prometheus_metrics(request: Request):
-    """
-    Prometheus exposition format endpoint.
-    Экспортирует метрики самого Cortex для мониторинга.
-    ИСПРАВЛЕНО (audit 11.2): Использует cortex_metrics.expose() для
-    генерации полного набора метрик в Prometheus формате.
-    """
-    # Обновляем динамические метрики перед экспортом
+    """Prometheus exposition format endpoint."""
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
 
-    # Обновляем gauge метрики
     cortex_metrics.active_ws_connections.set_sync(ws_stats.get("total_connections", 0))
     cortex_metrics.sequence_running.set_sync(1 if state_tracker.state.is_running else 0)
     cortex_metrics.flat_mode_active.set_sync(
@@ -697,46 +650,37 @@ async def prometheus_metrics(request: Request):
         1 if llm_client.is_available() else 0, model="primary"
     )
 
-    # Обновляем RAG метрики
     if "points_count" in rag_stats:
         cortex_metrics.rag_documents_total.set_sync(rag_stats["points_count"])
 
-    # Обновляем operation_mode
     mode_value = {"manual": 0, "safe": 1, "full_ai": 2, "simulation": 3}.get(
         mode_manager.current_mode.value, -1
     )
     cortex_metrics.operation_mode.set_sync(mode_value)
 
-    # Обновляем safety_status
     safety_value = {"SAFE": 0, "UNSAFE": 1, "UNKNOWN": -1}.get(
         observatory_state.safety_status, -1
     )
     cortex_metrics.safety_status.set_sync(safety_value)
 
-    # Обновляем количество активных watchers
     cortex_metrics.watchers_active.set_sync(len(watcher_manager.watchers))
-
-    # Обновляем количество активных агентов
     cortex_metrics.agents_active.set_sync(len(orchestrator.agents))
 
-    # Генерируем Prometheus exposition
     output = cortex_metrics.expose()
     return Response(content=output, media_type="text/plain; version=0.0.4")
 
 
 # ============================================================================
-# WEBSOCKET BROADCAST ENDPOINT (public, auth handled inside)
+# WEBSOCKET BROADCAST ENDPOINT
 # ============================================================================
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket, client_id: Optional[str] = Query(None)
 ):
-    """WebSocket endpoint для real-time broadcasting событий на Frontend."""
+    """WebSocket endpoint для real-time broadcasting."""
     if not client_id:
         client_id = str(uuid.uuid4())[:8]
-    
     conn = await ws_broadcast_manager.connect(websocket, client_id)
-    
     try:
         while True:
             try:
@@ -745,41 +689,52 @@ async def websocket_endpoint(
             except WebSocketDisconnect:
                 break
             except json.JSONDecodeError as e:
-                # ИСПРАВЛЕНО (v4.0 — проблема #54): детальная обработка ошибок
                 logger.warning(f"Invalid JSON from client {client_id}: {e}")
                 try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "invalid_json",
-                        "message": f"Invalid JSON: {str(e)[:100]}",
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "error": "invalid_json",
+                            "message": f"Invalid JSON: {str(e)[:100]}",
+                        }
+                    )
                 except Exception:
                     pass
             except KeyError as e:
                 logger.warning(f"Missing key in message from {client_id}: {e}")
                 try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "missing_field",
-                        "message": f"Missing required field: {e}",
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "error": "missing_field",
+                            "message": f"Missing required field: {e}",
+                        }
+                    )
                 except Exception:
                     pass
             except Exception as e:
-                logger.error(f"Error processing message from {client_id}: {e}", exc_info=True)
+                logger.error(
+                    f"Error processing message from {client_id}: {e}",
+                    exc_info=True,
+                )
                 try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "internal_error",
-                        "message": "Internal server error",
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "error": "internal_error",
+                            "message": "Internal server error",
+                        }
+                    )
                 except Exception:
                     pass
                 break
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.error(f"WebSocket connection error for {client_id}: {e}", exc_info=True)
+        logger.error(
+            f"WebSocket connection error for {client_id}: {e}",
+            exc_info=True,
+        )
     finally:
         await ws_broadcast_manager.disconnect(client_id)
 
@@ -795,7 +750,7 @@ async def ws_stats(request: Request):
 # ============================================================================
 @app.get("/api/v1/sequence/shadow", tags=["Shadow Engine"])
 async def get_sequence_shadow(request: Request):
-    """Возвращает полный теневой граф секвенсора (DAG)."""
+    """Возвращает полный теневой граф секвенсора."""
     if not state_tracker._shadow_graph:
         raise HTTPException(status_code=404, detail="Sequence shadow graph not loaded")
     return state_tracker._shadow_graph
@@ -812,17 +767,14 @@ async def get_sequence_state(request: Request):
 # ============================================================================
 @app.get("/api/v1/observatory/state", tags=["AI Agents"])
 async def get_observatory_full_state(request: Request):
-    """Возвращает единое состояние обсерватории (ObservatoryState)."""
+    """Возвращает единое состояние обсерватории."""
     return observatory_state.get_full_state()
 
 
 @app.get("/api/v1/observatory/session-summary", tags=["AI Agents"])
 async def get_session_summary(request: Request):
-    \"\"\"Возвращает краткую сводку текущей сессии для LLM контекста.\"\"\"
-    # ИСПРАВЛЕНО (проблема #4): get_session_summary удалён, используем get_full_state
+    """Возвращает краткую сводку текущей сессии."""
     full_state = observatory_state.get_full_state()
-    
-    # Формируем краткую сводку из полного состояния
     summary = {
         "metrics": full_state.get("metrics", {}),
         "weather": full_state.get("weather", {}),
@@ -832,7 +784,6 @@ async def get_session_summary(request: Request):
         "active_alerts_count": len(full_state.get("active_alerts", [])),
         "targets_count": len(full_state.get("targets", [])),
     }
-    
     return summary
 
 
@@ -848,7 +799,7 @@ async def get_agents_status(request: Request):
             "Diagnostician": diagnostician_agent.get_stats(),
             "Strategist": strategist_agent.get_stats(),
             "Auditor": auditor_agent.get_stats(),
-            "Calibrator": calibrator_agent.get_stats() if calibrator_agent else {},
+            "Calibrator": (calibrator_agent.get_stats() if calibrator_agent else {}),
             "Scheduler": scheduler_agent.get_stats(),
             "Copilot": copilot_agent.get_stats(),
         },
@@ -856,10 +807,7 @@ async def get_agents_status(request: Request):
 
 
 @app.post("/api/v1/agents/mode", tags=["AI Agents"])
-async def set_operation_mode(
-    request: Request,
-    mode: str,
-):
+async def set_operation_mode(request: Request, mode: str):
     """Устанавливает режим работы системы."""
     try:
         operation_mode = OperationMode(mode)
@@ -869,7 +817,9 @@ async def set_operation_mode(
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid mode: {mode}. Valid modes: {[m.value for m in OperationMode]}",
+            detail=(
+                f"Invalid mode: {mode}. Valid modes: {[m.value for m in OperationMode]}"
+            ),
         )
 
 
@@ -878,7 +828,7 @@ async def get_recent_decisions(
     request: Request,
     limit: int = Query(20, ge=1, le=100),
 ):
-    """Возвращает последние решения агентов из Decision Audit Trail."""
+    """Возвращает последние решения агентов."""
     return {
         "decisions": orchestrator.get_recent_decisions(limit=limit),
         "total": len(orchestrator._decisions_log),
@@ -887,7 +837,7 @@ async def get_recent_decisions(
 
 @app.get("/api/v1/agents/llm-status", tags=["AI Agents"])
 async def get_llm_status(request: Request):
-    """Проверяет доступность локального LLM (Ollama)."""
+    """Проверяет доступность локального LLM."""
     return {
         "available": llm_client.is_available(),
         "model": settings.ai_settings.primary_model,
@@ -904,7 +854,6 @@ async def test_llm_generation(
     """Тестовый эндпоинт для проверки генерации LLM."""
     if not llm_client.is_available():
         raise HTTPException(status_code=503, detail="LLM (Ollama) is not available")
-
     response = await llm_client.generate(
         agent_name=agent, prompt=prompt, max_tokens=500
     )
@@ -920,13 +869,11 @@ async def get_metrics(request: Request):
     metrics = observatory_state.current_metrics
     weather = observatory_state.weather
     astronomy = observatory_state.astronomy
-
     trends = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec", "temperature"]:
         trend = observatory_state.get_trend(metric_name, window=10)
         if trend is not None:
             trends[metric_name] = trend
-
     history_stats = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec"]:
         history_list = getattr(observatory_state.history, metric_name, [])
@@ -937,7 +884,6 @@ async def get_metrics(request: Request):
                 "max": max(history_list),
                 "avg": sum(history_list) / len(history_list),
             }
-
     return {
         "timestamp": datetime.now().isoformat(),
         "metrics": metrics,
@@ -965,19 +911,20 @@ async def get_metrics_history(
     if history_list is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Metric '{metric}' not found. Available: hfr, fwhm, rms_ra, rms_dec, temperature, wind_speed, humidity",
+            detail=(
+                f"Metric '{metric}' not found. Available: "
+                f"hfr, fwhm, rms_ra, rms_dec, temperature, "
+                f"wind_speed, humidity"
+            ),
         )
-
     limited_history = (
         history_list[-limit:] if len(history_list) > limit else history_list
     )
-
     timestamps = []
     now = datetime.now()
     for i in range(len(limited_history)):
         timestamp = now - timedelta(seconds=(len(limited_history) - i) * 3)
         timestamps.append(timestamp.isoformat())
-
     return {
         "metric": metric,
         "count": len(limited_history),
@@ -986,9 +933,9 @@ async def get_metrics_history(
         "stats": {
             "min": min(limited_history) if limited_history else None,
             "max": max(limited_history) if limited_history else None,
-            "avg": sum(limited_history) / len(limited_history)
-            if limited_history
-            else None,
+            "avg": (
+                sum(limited_history) / len(limited_history) if limited_history else None
+            ),
             "trend": observatory_state.get_trend(metric, window=10),
         },
     }
@@ -998,13 +945,9 @@ async def get_metrics_history(
 # EXECUTION LAYER ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/execution/trigger", tags=["Execution Layer"])
-async def fire_trigger(
-    request: Request,
-    body: TriggerRequest,
-):
+async def fire_trigger(request: Request, body: TriggerRequest):
     """Ручной вызов триггера через API."""
     logger.info(f"API Request: Fire trigger '{body.trigger_name}'")
-
     success = await trigger_emulator.fire_trigger(body.trigger_name, body.reason)
     if success:
         observatory_state.log_ai_action(
@@ -1013,7 +956,10 @@ async def fire_trigger(
             body.reason,
             "Success",
         )
-        return {"status": "success", "message": f"Trigger {body.trigger_name} fired"}
+        return {
+            "status": "success",
+            "message": f"Trigger {body.trigger_name} fired",
+        }
     else:
         raise HTTPException(
             status_code=400,
@@ -1022,13 +968,9 @@ async def fire_trigger(
 
 
 @app.post("/api/v1/execution/variable", tags=["Execution Layer"])
-async def set_variable(
-    request: Request,
-    body: VariableRequest,
-):
+async def set_variable(request: Request, body: VariableRequest):
     """Изменение глобальной переменной Sequencer+."""
     logger.info(f"API Request: Set variable '{body.name}' = {body.value}")
-
     success = await global_var_injector.set_variable(body.name, body.value, body.reason)
     if success:
         observatory_state.log_ai_action(
@@ -1037,7 +979,10 @@ async def set_variable(
             body.reason,
             "Success",
         )
-        return {"status": "success", "message": f"Variable {body.name} updated"}
+        return {
+            "status": "success",
+            "message": f"Variable {body.name} updated",
+        }
     else:
         raise HTTPException(
             status_code=400,
@@ -1049,17 +994,12 @@ async def set_variable(
 # RAG ENGINE ENDPOINTS
 # ============================================================================
 @app.post("/api/v1/rag/search", tags=["RAG Engine"])
-async def rag_search(
-    request: Request,
-    body: RAGSearchRequest,
-):
+async def rag_search(request: Request, body: RAGSearchRequest):
     """Семантический поиск по базе знаний RAG."""
     logger.info(f"RAG Search: '{body.query}' (top_k={body.top_k})")
-
     results = await rag_engine.search(
         query=body.query, top_k=body.top_k, filters=body.filters
     )
-
     return {
         "query": body.query,
         "results_count": len(results),
@@ -1093,13 +1033,12 @@ async def rag_stats(request: Request):
 # ============================================================================
 @app.get("/api/v1/plugins", tags=["Discovery"])
 async def get_discovered_plugins(request: Request):
-    """Возвращает список всех обнаруженных плагинов из Capability Registry."""
+    """Возвращает список обнаруженных плагинов."""
     registry = watcher_manager.registry
     if not registry:
         raise HTTPException(
             status_code=503, detail="Capability Registry not initialized"
         )
-
     plugins_summary = {}
     for guid, plugin_settings in registry._registry.items():
         plugins_summary[guid] = {
@@ -1109,20 +1048,21 @@ async def get_discovered_plugins(request: Request):
                 for v in plugin_settings.values()
             ),
         }
-
-    return {"total_plugins": len(plugins_summary), "plugins": plugins_summary}
+    return {
+        "total_plugins": len(plugins_summary),
+        "plugins": plugins_summary,
+    }
 
 
 @app.get("/api/v1/masters/catalog", tags=["Masters Library"])
 async def get_masters_catalog(request: Request):
-    """Возвращает каталог доступных мастер-кадров."""
+    """Возвращает каталог мастер-кадров."""
     if not watcher_manager.masters_auditor:
         raise HTTPException(
             status_code=503, detail="Masters Auditor not initialized yet"
         )
-
     return {
-        "summary": watcher_manager.masters_auditor.get_summary_by_category(),
+        "summary": (watcher_manager.masters_auditor.get_summary_by_category()),
         "stats": watcher_manager.masters_auditor.get_stats(),
     }
 
@@ -1130,7 +1070,7 @@ async def get_masters_catalog(request: Request):
 @app.get("/api/v1/masters/find", tags=["Masters Library"])
 async def find_matching_master(
     request: Request,
-    image_type: str = Query(..., description="Тип кадра: BIAS, DARK, FLAT"),
+    image_type: str = Query(..., description="Тип: BIAS, DARK, FLAT"),
     temperature: float = Query(..., description="Температура сенсора"),
     exposure: Optional[float] = Query(None),
     gain: Optional[int] = Query(None),
@@ -1143,7 +1083,6 @@ async def find_matching_master(
         raise HTTPException(
             status_code=503, detail="Masters Auditor not initialized yet"
         )
-
     master = watcher_manager.masters_auditor.find_matching_master(
         image_type=image_type,
         temperature=temperature,
@@ -1153,13 +1092,11 @@ async def find_matching_master(
         filter_name=filter_name,
         temp_tolerance=temp_tolerance,
     )
-
     if not master:
         raise HTTPException(
             status_code=404,
-            detail=f"No matching {image_type} master found for the given parameters",
+            detail=(f"No matching {image_type} master found for the given parameters"),
         )
-
     return master
 
 
@@ -1168,7 +1105,7 @@ async def find_matching_master(
 # ============================================================================
 @app.post("/api/v1/safety/preflight", tags=["Safety"])
 async def run_preflight_check(request: Request):
-    """Запускает pre-flight проверку перед стартом сессии."""
+    """Запускает pre-flight проверку."""
     report = await preflight_checker.run_all()
     return report
 
@@ -1178,7 +1115,7 @@ async def run_preflight_check(request: Request):
 # ============================================================================
 @app.get("/api/v1/storage/disk-usage", tags=["Storage"])
 async def get_disk_usage(request: Request):
-    """Возвращает информацию об использовании дискового пространства."""
+    """Информация об использовании дискового пространства."""
     return await disk_monitor.get_stats()
 
 
@@ -1194,8 +1131,10 @@ async def apply_retention_policy(
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown policy: {policy_name}. "
-            f"Available: {list(disk_monitor.policies.keys())}",
+            detail=(
+                f"Unknown policy: {policy_name}. "
+                f"Available: {list(disk_monitor.policies.keys())}"
+            ),
         )
 
 
@@ -1211,7 +1150,7 @@ async def get_audit_decisions(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """Возвращает историю решений из Decision Audit Trail."""
+    """Возвращает историю решений."""
     records = await decision_audit.get_decisions(
         agent=agent,
         decision_type=decision_type,
@@ -1219,7 +1158,6 @@ async def get_audit_decisions(
         limit=limit,
         offset=offset,
     )
-
     return {
         "records": [r.model_dump() for r in records],
         "count": len(records),
@@ -1231,37 +1169,10 @@ async def get_audit_stats(request: Request):
     """Возвращает статистику Decision Audit Trail."""
     return await decision_audit.get_stats()
 
-# Добавить после существующих Decision Audit endpoints:
 
 @app.get("/api/v1/audit/archives", tags=["Decision Audit"])
 async def get_audit_archives(request: Request):
-    """Возвращает список всех архивов Decision Audit Trail."""
-    archives = await decision_audit.get_archives()
-    return {
-        "archives": archives,
-        "count": len(archives),
-    }
-
-
-# Добавить после существующих Decision Audit endpoints (строки ~900-920):
-
-# ============================================================================
-# DECISION AUDIT ARCHIVES ENDPOINT (v4.0 — issue #53)
-# ============================================================================
-@app.get("/api/v1/audit/archives", tags=["Decision Audit"])
-async def get_audit_archives(request: Request):
-    """
-    Возвращает список всех архивов Decision Audit Trail.
-    Архивы создаются автоматически перед удалением старых записей
-    согласно политике хранения (retention policy).
-    
-    Каждый архив содержит:
-    - Дата создания
-    - Причина архивации (age/count_limit)
-    - Количество записей
-    - Размер файла в MB
-    - Путь к файлу
-    """
+    """Возвращает список архивов Decision Audit Trail."""
     archives = await decision_audit.get_archives()
     return {
         "archives": archives,
@@ -1273,35 +1184,27 @@ async def get_audit_archives(request: Request):
 
 @app.get("/api/v1/audit/archives/{filename}", tags=["Decision Audit"])
 async def download_audit_archive(request: Request, filename: str):
-    """
-    Скачивает конкретный архив Decision Audit Trail.
-    
-    Архив — это JSON-файл с решениями, которые были удалены из основной БД
-    согласно политике хранения. Используется для долгосрочного анализа
-    и обучения ML-моделей.
-    """
-    from fastapi.responses import FileResponse
-    
+    """Скачивает архив Decision Audit Trail."""
     archive_path = Path(decision_audit.config.archive_path) / filename
-    
     if not archive_path.exists():
         raise HTTPException(
             status_code=404,
-            detail=f"Archive '{filename}' not found. "
-                   f"Use GET /api/v1/audit/archives to see available archives.",
+            detail=(
+                f"Archive '{filename}' not found. "
+                f"Use GET /api/v1/audit/archives to see available."
+            ),
         )
-    
-    # Проверка, что файл находится внутри archive_path (защита от path traversal)
     try:
         archive_path.relative_to(decision_audit.config.archive_path)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    
     return FileResponse(
         path=str(archive_path),
         filename=filename,
         media_type="application/json",
     )
+
+
 # ============================================================================
 # SIMULATION MODE ENDPOINTS
 # ============================================================================
@@ -1311,16 +1214,14 @@ async def start_simulation(
     target: str = Query("M31", description="Имя цели"),
     frames: int = Query(10, description="Количество кадров"),
 ):
-    """Запускает симуляцию сессии (Fake NINA)."""
+    """Запускает симуляцию сессии."""
     from app.simulation.fake_nina import fake_nina
 
     await fake_nina.start()
     await fake_nina.start_sequence(target=target, frames=frames)
-
     await mode_manager.set_mode(
         OperationMode.SIMULATION, reason="Simulation started via API"
     )
-
     return {
         "status": "success",
         "message": f"Simulation started: {target} ({frames} frames)",
@@ -1334,11 +1235,9 @@ async def stop_simulation(request: Request):
 
     await fake_nina.stop_sequence()
     await fake_nina.stop()
-
     await mode_manager.set_mode(
         OperationMode.FULL_AI, reason="Simulation stopped via API"
     )
-
     return {"status": "success", "message": "Simulation stopped"}
 
 
@@ -1357,15 +1256,16 @@ async def inject_anomaly(
         "guiding_lost",
         "safety_unsafe",
     ]
-
     if anomaly_type not in valid_types:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid anomaly type. Valid types: {valid_types}",
         )
-
     await fake_nina.inject_anomaly(anomaly_type)
-    return {"status": "success", "message": f"Anomaly '{anomaly_type}' injected"}
+    return {
+        "status": "success",
+        "message": f"Anomaly '{anomaly_type}' injected",
+    }
 
 
 @app.post("/api/v1/simulation/trigger-autofocus", tags=["Simulation"])
@@ -1388,11 +1288,10 @@ async def trigger_meridian_flip_simulation(request: Request):
 
 @app.post("/api/v1/simulation/reset-cooldowns", tags=["Simulation"])
 async def reset_agent_cooldowns(request: Request):
-    """Сбрасывает cooldown всех агентов (для тестирования)."""
+    """Сбрасывает cooldown всех агентов."""
     watcher_agent._recent_anomalies.clear()
     if calibrator_agent:
         calibrator_agent._recent_alerts.clear()
-
     return {
         "status": "success",
         "message": "All agent cooldowns reset",
@@ -1411,77 +1310,47 @@ async def list_available_triggers(request: Request):
 
 
 @app.get("/api/v1/triggers/{trigger_name}", tags=["Execution Layer"])
-async def get_trigger_info(
-    request: Request,
-    trigger_name: str,
-):
+async def get_trigger_info(request: Request, trigger_name: str):
     """Возвращает информацию о конкретном триггере."""
     triggers = trigger_emulator.list_available_triggers()
-
     if trigger_name not in triggers:
         raise HTTPException(
             status_code=404,
-            detail=f"Trigger '{trigger_name}' not found. "
-            f"Available: {', '.join(sorted(triggers.keys()))}",
+            detail=(
+                f"Trigger '{trigger_name}' not found. "
+                f"Available: {', '.join(sorted(triggers.keys()))}"
+            ),
         )
-
     return triggers[trigger_name]
 
 
 # ============================================================================
 # LANGGRAPH ORCHESTRATOR ENDPOINTS
 # ============================================================================
-# Гибридный LangGraph оркестратор для сложных многошаговых workflows:
-# - DIAGNOSTIC: поиск root cause через RAG + корреляции
-# - POST_MORTEM: анализ завершённой сессии
-# - ADAPTIVE: адаптация к изменяющимся условиям (погода, оборудование)
-# ============================================================================
-
-
 @app.get("/api/v1/langgraph/types", tags=["LangGraph"])
 async def list_workflow_types(request: Request):
-    """
-    Возвращает список всех доступных типов LangGraph workflows.
-    
-    LangGraph Orchestrator поддерживает три типа многошаговых workflow:
-    
-    - **diagnostic**: Поиск root cause через RAG + корреляции метрик
-      - Используется когда Watcher детектирует сложную аномалию
-      - Анализирует историю похожих кейсов
-      - Предлагает решения на основе RAG
-      - Ожидаемое время выполнения: 30-120 секунд
-    
-    - **post_mortem**: Анализ завершённой сессии
-      - Генерирует Session Digest с выводами и рекомендациями
-      - Индексирует результаты в RAG для будущего обучения
-      - Ожидаемое время выполнения: 10-60 секунд
-    
-    - **adaptive**: Адаптация к изменяющимся условиям
-      - Реагирует на резкое изменение погоды или сбой оборудования
-      - Предлагает корректирующие действия
-      - Ожидаемое время выполнения: 5-30 секунд
-    
-    Returns:
-        Список типов workflow с описаниями и ожидаемым временем выполнения
-    """
+    """Возвращает список типов LangGraph workflows."""
     return {
         "workflow_types": [
             {
                 "type": WorkflowType.DIAGNOSTIC.value,
-                "description": "Complex diagnostic workflow: root cause analysis через RAG + корреляции метрик",
-                "use_case": "Когда Watcher детектирует сложную аномалию (HFR деградация, RMS spike)",
+                "description": (
+                    "Complex diagnostic: root cause analysis "
+                    "через RAG + корреляции метрик"
+                ),
+                "use_case": ("Когда Watcher детектирует сложную аномалию"),
                 "expected_duration_seconds": "30-120",
             },
             {
                 "type": WorkflowType.POST_MORTEM.value,
-                "description": "Post-mortem analysis завершённой сессии",
-                "use_case": "После SEQUENCE_STOPPED для генерации Session Digest",
+                "description": ("Post-mortem analysis завершённой сессии"),
+                "use_case": ("После SEQUENCE_STOPPED для Session Digest"),
                 "expected_duration_seconds": "10-60",
             },
             {
                 "type": WorkflowType.ADAPTIVE.value,
-                "description": "Adaptive response на изменение условий",
-                "use_case": "При резком изменении погоды или сбое оборудования",
+                "description": ("Adaptive response на изменение условий"),
+                "use_case": ("При резком изменении погоды или сбое оборудования"),
                 "expected_duration_seconds": "5-30",
             },
         ],
@@ -1491,13 +1360,9 @@ async def list_workflow_types(request: Request):
 
 @app.get("/api/v1/langgraph/workflows", tags=["LangGraph"])
 async def list_active_workflows(request: Request):
-    """
-    Возвращает список всех активных LangGraph workflows.
-    Включает ID, тип, статус, время создания.
-    """
+    """Возвращает список активных LangGraph workflows."""
     active_ids = hybrid_orchestrator.list_active_workflows()
     workflows = []
-
     for wf_id in active_ids:
         state = hybrid_orchestrator.get_workflow_status(wf_id)
         if state:
@@ -1513,7 +1378,6 @@ async def list_active_workflows(request: Request):
                     "errors_count": len(state.get("errors", [])),
                 }
             )
-
     return {
         "active_count": len(active_ids),
         "workflows": workflows,
@@ -1522,39 +1386,17 @@ async def list_active_workflows(request: Request):
 
 @app.get("/api/v1/langgraph/workflow/{workflow_id}", tags=["LangGraph"])
 async def get_workflow_status(request: Request, workflow_id: str):
-    Возвращает детальный статус конкретного LangGraph workflow.
-    
-    Включает:
-    - Общая информация: ID, тип, статус, время создания/обновления
-    - Trigger event: событие, которое инициировало workflow
-    - Рекомендации: список предложенных действий
-    - Executed actions: список выполненных действий с результатами
-    - Ошибки: список ошибок, возникших во время выполнения
-    - Типо-специфичные поля:
-      - **diagnostic**: symptoms, root_causes, confidence
-      - **post_mortem**: session_id, lessons_learned
-      - **adaptive**: current_conditions, adaptation_actions
-    
-    Args:
-        workflow_id: ID workflow (получен из POST /api/v1/langgraph/start)
-    
-    Returns:
-        Полный state workflow со всеми полями
-    
-    Raises:
-        HTTPException(404): Если workflow не найден
-    """
+    """Возвращает детальный статус LangGraph workflow."""
     state = hybrid_orchestrator.get_workflow_status(workflow_id)
-
     if not state:
         raise HTTPException(
             status_code=404,
-            detail=f"Workflow '{workflow_id}' not found. "
-            f"Use GET /api/v1/langgraph/workflows to see active workflows.",
+            detail=(
+                f"Workflow '{workflow_id}' not found. "
+                f"Use GET /api/v1/langgraph/workflows to see active."
+            ),
         )
-
-    # Возвращаем полный state без внутренних полей
-    return {
+    result = {
         "workflow_id": state.get("workflow_id"),
         "type": state.get("workflow_type"),
         "status": state.get("status"),
@@ -1568,85 +1410,48 @@ async def get_workflow_status(request: Request, workflow_id: str):
         "retry_count": state.get("retry_count", 0),
         "max_retries": state.get("max_retries", 3),
         "errors": state.get("errors", []),
-        # Типо-специфичные поля
-        "diagnostic_fields": {
+    }
+    wf_type = state.get("workflow_type")
+    if wf_type == WorkflowType.DIAGNOSTIC.value:
+        result["diagnostic_fields"] = {
             "symptoms": state.get("symptoms", []),
             "root_causes": state.get("root_causes", []),
             "confidence": state.get("diagnostic_confidence"),
         }
-        if state.get("workflow_type") == WorkflowType.DIAGNOSTIC.value
-        else None,
-        "post_mortem_fields": {
+    elif wf_type == WorkflowType.POST_MORTEM.value:
+        result["post_mortem_fields"] = {
             "session_id": state.get("session_id"),
             "lessons_learned": state.get("lessons_learned", []),
         }
-        if state.get("workflow_type") == WorkflowType.POST_MORTEM.value
-        else None,
-        "adaptive_fields": {
+    elif wf_type == WorkflowType.ADAPTIVE.value:
+        result["adaptive_fields"] = {
             "current_conditions": state.get("current_conditions", {}),
             "adaptation_actions": state.get("adaptation_actions", []),
         }
-        if state.get("workflow_type") == WorkflowType.ADAPTIVE.value
-        else None,
-    }
+    return result
 
 
 @app.post("/api/v1/langgraph/start", tags=["LangGraph"])
 async def start_langgraph_workflow(
     request: Request,
     workflow_type: str = Query(
-        ..., description="Тип workflow: diagnostic, post_mortem, adaptive"
+        ...,
+        description="Тип: diagnostic, post_mortem, adaptive",
     ),
-    trigger_event: str = Query(
-        "manual",
-        description="Событие-триггер (например: 'HFR_degradation', 'session_ended')",
-    ),
-    max_retries: int = Query(
-        3, ge=0, le=10, description="Максимальное количество попыток retry"
-    ),
+    trigger_event: str = Query("manual", description="Событие-триггер"),
+    max_retries: int = Query(3, ge=0, le=10, description="Макс retry"),
 ):
-    """
-     Запускает новый LangGraph workflow асинхронно в фоне.
-    
-    Workflow работает независимо от основного event loop.
-    Статус можно отслеживать через GET /api/v1/langgraph/workflow/{workflow_id}
-    
-    Args:
-        workflow_type: Тип workflow (diagnostic, post_mortem, adaptive)
-        trigger_event: Событие-триггер для логирования
-        max_retries: Максимальное количество попыток retry при ошибках
-    
-    Returns:
-        workflow_id: ID запущенного workflow для отслеживания
-        status_url: URL для проверки статуса
-    
-    Example:
-        ```bash
-        # Запустить diagnostic workflow
-        curl -X POST "http://localhost:8000/api/v1/langgraph/start?workflow_type=diagnostic&trigger_event=HFR_degradation"
-        
-        # Проверить статус
-        curl "http://localhost:8000/api/v1/langgraph/workflow/workflow_diagnostic_1234567890"
-        ```
-    
-    Raises:
-        HTTPException(400): Если указан невалидный тип workflow
-        HTTPException(500): Если не удалось запустить workflow
-    """
-    """
-    # Валидация типа workflow
+    """Запускает LangGraph workflow."""
     try:
         wf_type = WorkflowType(workflow_type)
     except ValueError:
         valid_types = [t.value for t in WorkflowType]
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid workflow type: '{workflow_type}'. "
-            f"Valid types: {valid_types}. "
-            f"Use GET /api/v1/langgraph/types to see all available types.",
+            detail=(
+                f"Invalid workflow type: '{workflow_type}'. Valid types: {valid_types}"
+            ),
         )
-
-    # Запуск workflow
     try:
         workflow_id = await hybrid_orchestrator.start_workflow(
             workflow_type=wf_type,
@@ -1661,25 +1466,20 @@ async def start_langgraph_workflow(
             },
             max_retries=max_retries,
         )
-
-        # Логируем в ObservatoryState для объяснимости
         observatory_state.log_ai_action(
             agent="LangGraphOrchestrator",
             action=f"Start Workflow: {workflow_type}",
             reason=f"Manual trigger: {trigger_event}",
             result=f"Workflow {workflow_id} started",
         )
-
         return {
             "status": "started",
             "workflow_id": workflow_id,
             "workflow_type": workflow_type,
             "max_retries": max_retries,
             "status_url": f"/api/v1/langgraph/workflow/{workflow_id}",
-            "message": f"Workflow '{workflow_id}' started successfully. "
-            f"Use the status_url to track progress.",
+            "message": (f"Workflow '{workflow_id}' started successfully."),
         }
-
     except Exception as e:
         logger.error(f"Failed to start workflow: {e}", exc_info=True)
         raise HTTPException(
@@ -1690,52 +1490,34 @@ async def start_langgraph_workflow(
 
 @app.post("/api/v1/langgraph/cancel/{workflow_id}", tags=["LangGraph"])
 async def cancel_langgraph_workflow(request: Request, workflow_id: str):
-    """
-     Отменяет активный LangGraph workflow.
-    
-    Workflow будет помечен как CANCELLED и больше не будет выполнять действия.
-    Уже выполненные действия НЕ откатываются.
-    
-    Args:
-        workflow_id: ID workflow для отмены
-    
-    Returns:
-        Подтверждение отмены
-    
-    Raises:
-        HTTPException(404): Если workflow не найден
-        HTTPException(400): Если workflow уже завершён (COMPLETED/FAILED)
-    """
+    """Отменяет активный LangGraph workflow."""
     state = hybrid_orchestrator.get_workflow_status(workflow_id)
-
     if not state:
         raise HTTPException(
             status_code=404,
             detail=f"Workflow '{workflow_id}' not found.",
         )
-
-    # Проверяем, что workflow ещё активен
     current_status = state.get("status")
-    if current_status in (WorkflowStatus.COMPLETED.value, WorkflowStatus.FAILED.value):
+    if current_status in (
+        WorkflowStatus.COMPLETED.value,
+        WorkflowStatus.FAILED.value,
+    ):
         raise HTTPException(
             status_code=400,
-            detail=f"Workflow '{workflow_id}' already finished with status '{current_status}'. "
-            f"Cannot cancel completed workflows.",
+            detail=(
+                f"Workflow '{workflow_id}' already finished "
+                f"with status '{current_status}'."
+            ),
         )
-
-    # Помечаем как CANCELLED
     state["status"] = "cancelled"
     state["updated_at"] = datetime.now().isoformat()
     state["final_outcome"] = "cancelled_by_user"
-
-    # Логируем отмену
     observatory_state.log_ai_action(
         agent="LangGraphOrchestrator",
         action=f"Cancel Workflow: {workflow_id}",
         reason="Manual cancellation via API",
         result="Workflow cancelled",
     )
-
     return {
         "status": "cancelled",
         "workflow_id": workflow_id,
@@ -1745,108 +1527,101 @@ async def cancel_langgraph_workflow(request: Request, workflow_id: str):
 
 @app.get("/api/v1/langgraph/stats", tags=["LangGraph"])
 async def get_langgraph_stats(request: Request):
-    """
-    Возвращает общую статистику LangGraph оркестратора.
-    """
+    """Статистика LangGraph оркестратора."""
     active_ids = hybrid_orchestrator.list_active_workflows()
-
-    # Подсчёт по статусам
-    status_counts = {}
-    type_counts = {}
-
+    status_counts: Dict[str, int] = {}
+    type_counts: Dict[str, int] = {}
     for wf_id, state in hybrid_orchestrator.active_workflows.items():
         status = state.get("status", "unknown")
         wf_type = state.get("workflow_type", "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
         type_counts[wf_type] = type_counts.get(wf_type, 0) + 1
-
     return {
         "total_workflows": len(hybrid_orchestrator.active_workflows),
         "active_workflows": len(active_ids),
         "by_status": status_counts,
         "by_type": type_counts,
         "available_types": [t.value for t in WorkflowType],
-        "orchestrator_initialized": hybrid_orchestrator.graph is not None,
+        "orchestrator_initialized": (hybrid_orchestrator.graph is not None),
     }
+
+
 # ============================================================================
-# BACKGROUND TASKS ENDPOINTS (v4.0)
+# BACKGROUND TASKS ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/system/background-tasks", tags=["System"])
 async def get_background_tasks_stats(request: Request):
-    """Возвращает статистику всех фоновых задач системы."""
+    """Статистика фоновых задач."""
     return background_tasks.get_stats()
 
 
-@app.post("/api/v1/system/background-tasks/{task_name}/toggle", tags=["System"])
+@app.post(
+    "/api/v1/system/background-tasks/{task_name}/toggle",
+    tags=["System"],
+)
 async def toggle_background_task(
     request: Request,
     task_name: str,
-    enabled: bool = Query(..., description="Включить/выключить задачу"),
+    enabled: bool = Query(..., description="Включить/выключить"),
 ):
-    """Включает или выключает конкретную фоновую задачу."""
+    """Включает или выключает фоновую задачу."""
     if enabled:
         success = background_tasks.enable(task_name)
     else:
         success = background_tasks.disable(task_name)
-
     if not success:
         raise HTTPException(
             status_code=404,
-            detail=f"Task '{task_name}' not found. "
-                   f"Available: {list(background_tasks._tasks.keys())}",
+            detail=(
+                f"Task '{task_name}' not found. "
+                f"Available: {list(background_tasks._tasks.keys())}"
+            ),
         )
-
     return {
         "status": "success",
         "task": task_name,
         "enabled": enabled,
     }
 
+
 # ============================================================================
-# RAG UPDATER ENDPOINTS (v4.0 — идея 1.2)
+# RAG UPDATER ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/rag/updater/stats", tags=["RAG Engine"])
 async def rag_updater_stats(request: Request):
-    """Возвращает статистику RAG Updater (автообновление базы знаний)."""
+    """Статистика RAG Updater."""
     return rag_updater.get_stats()
 
 
 @app.post("/api/v1/rag/updater/force", tags=["RAG Engine"])
 async def force_rag_update(request: Request):
-    """
-    Принудительно запускает обновление RAG.
-    Индексирует новые Session Digest и изменённую документацию.
-    """
+    """Принудительное обновление RAG."""
     logger.info("API Request: Force RAG update")
     result = await rag_updater.force_update()
-    
     observatory_state.log_ai_action(
         agent="API",
         action="Force RAG Update",
         reason="Manual API call",
-        result=f"Sessions: {result.get('sessions_indexed', 0)}, "
-               f"Docs: {result.get('docs_indexed', 0)}",
+        result=(
+            f"Sessions: {result.get('sessions_indexed', 0)}, "
+            f"Docs: {result.get('docs_indexed', 0)}"
+        ),
     )
-    
     return result
 
 
 # ============================================================================
-# DECISION ANALYZER ENDPOINTS (v4.0 — идея 2, RL foundation)
+# DECISION ANALYZER ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/analytics/agent/{agent_name}", tags=["Analytics"])
 async def get_agent_performance(
     request: Request,
     agent_name: str,
-    days: int = Query(30, ge=1, le=365, description="Период анализа (дни)"),
+    days: int = Query(30, ge=1, le=365),
 ):
-    """
-    Возвращает статистику производительности конкретного AI-агента.
-    Включает: success rate, количество решений по типам, среднюю уверенность.
-    """
+    """Статистика производительности агента."""
     perf = await decision_analyzer.analyze_agent_performance(
-        agent=agent_name,
-        days=days,
+        agent=agent_name, days=days
     )
     return perf.to_dict()
 
@@ -1854,9 +1629,9 @@ async def get_agent_performance(
 @app.get("/api/v1/analytics/agents", tags=["Analytics"])
 async def get_all_agents_performance(
     request: Request,
-    days: int = Query(30, ge=1, le=365, description="Период анализа (дни)"),
+    days: int = Query(30, ge=1, le=365),
 ):
-    """Возвращает производительность всех AI-агентов."""
+    """Производительность всех агентов."""
     all_perf = await decision_analyzer.analyze_all_agents(days=days)
     return {
         agent: perf.to_dict()
@@ -1868,17 +1643,11 @@ async def get_all_agents_performance(
 @app.get("/api/v1/analytics/recommendations", tags=["Analytics"])
 async def get_recommendations(
     request: Request,
-    agent: Optional[str] = Query(None, description="Фильтр по агенту"),
+    agent: Optional[str] = Query(None),
     days: int = Query(30, ge=1, le=365),
 ):
-    """
-    Возвращает рекомендации по улучшению производительности агентов.
-    Генерируются на основе анализа success rate и паттернов ошибок.
-    """
-    recs = await decision_analyzer.generate_recommendations(
-        agent=agent,
-        days=days,
-    )
+    """Рекомендации по улучшению."""
+    recs = await decision_analyzer.generate_recommendations(agent=agent, days=days)
     return {
         "recommendations": [r.to_dict() for r in recs],
         "count": len(recs),
@@ -1890,36 +1659,30 @@ async def get_analytics_report(
     request: Request,
     days: int = Query(30, ge=1, le=365),
 ):
-    """
-    Генерирует полный аналитический отчёт по всем агентам.
-    Включает: общую статистику, лучшего/худшего агента, рекомендации.
-    """
+    """Полный аналитический отчёт."""
     report = await decision_analyzer.generate_full_report(days=days)
     return report
 
 
 @app.get("/api/v1/analytics/stats", tags=["Analytics"])
 async def get_analyzer_stats(request: Request):
-    """Возвращает статистику самого Decision Analyzer."""
+    """Статистика Decision Analyzer."""
     return decision_analyzer.get_stats()
 
 
 # ============================================================================
-# SESSIONS METADATA ENDPOINTS (v4.0 — идея 1.3)
+# SESSIONS METADATA ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/sessions", tags=["Sessions Metadata"])
 async def list_sessions(
     request: Request,
-    target: Optional[str] = Query(None, description="Фильтр по имени цели"),
-    date_from: Optional[str] = Query(None, description="Начальная дата (YYYY-MM-DD)"),
-    date_to: Optional[str] = Query(None, description="Конечная дата (YYYY-MM-DD)"),
-    min_quality: Optional[float] = Query(None, ge=0, le=10, description="Минимальный quality_score"),
+    target: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    min_quality: Optional[float] = Query(None, ge=0, le=10),
     limit: int = Query(50, ge=1, le=500),
 ):
-    """
-    Возвращает список сессий с фильтрацией.
-    Можно фильтровать по цели, датам, минимальному quality_score.
-    """
+    """Спис сессий с фильтрацией."""
     sessions = await sessions_metadata.get_sessions(
         target_name=target,
         date_from=date_from,
@@ -1934,31 +1697,25 @@ async def list_sessions(
 
 
 @app.get("/api/v1/sessions/{session_id}", tags=["Sessions Metadata"])
-async def get_session_details(
-    request: Request,
-    session_id: str,
-):
-    """
-    Возвращает детальную информацию о сессии.
-    Включает: общую информацию, кадры, проблемы, статистику.
-    """
+async def get_session_details(request: Request, session_id: str):
+    """Детальная информация о сессии."""
     stats = await sessions_metadata.get_session_stats(session_id)
     if "error" in stats:
         raise HTTPException(status_code=404, detail=stats["error"])
     return stats
 
 
-@app.get("/api/v1/sessions/{session_id}/frames", tags=["Sessions Metadata"])
+@app.get(
+    "/api/v1/sessions/{session_id}/frames",
+    tags=["Sessions Metadata"],
+)
 async def get_session_frames(
     request: Request,
     session_id: str,
-    image_type: Optional[str] = Query(None, description="Фильтр по типу кадра"),
+    image_type: Optional[str] = Query(None),
     limit: int = Query(1000, ge=1, le=10000),
 ):
-    """
-    Возвращает все кадры сессии.
-    Можно фильтровать по типу кадра (LIGHT, FLAT, DARK, BIAS).
-    """
+    """Все кадры сессии."""
     frames = await sessions_metadata.get_frames(
         session_id=session_id,
         image_type=image_type,
@@ -1971,24 +1728,19 @@ async def get_session_frames(
     }
 
 
-@app.get("/api/v1/sessions/{session_id}/export", tags=["Sessions Metadata"])
-async def export_session(
-    request: Request,
-    session_id: str,
-):
-    """
-    Экспортирует все кадры сессии в CSV файл.
-    Возвращает путь к созданному файлу.
-    """
+@app.get(
+    "/api/v1/sessions/{session_id}/export",
+    tags=["Sessions Metadata"],
+)
+async def export_session(request: Request, session_id: str):
+    """Экспорт кадров сессии в CSV."""
     output_path = Path(f"./data/exports/{session_id}_frames.csv")
     success = await sessions_metadata.export_session_csv(session_id, output_path)
-    
     if not success:
         raise HTTPException(
             status_code=404,
-            detail=f"No frames found for session {session_id}"
+            detail=f"No frames found for session {session_id}",
         )
-    
     return {
         "status": "success",
         "session_id": session_id,
@@ -1999,21 +1751,22 @@ async def export_session(
 
 @app.get("/api/v1/sessions/stats", tags=["Sessions Metadata"])
 async def get_sessions_metadata_stats(request: Request):
-    """Возвращает общую статистику хранилища сессий."""
+    """Общая статистика хранилища сессий."""
     return await sessions_metadata.get_stats()
 
+
 # ============================================================================
-# PREDICTIVE HAL ENDPOINTS (v4.0 — идея 3)
+# PREDICTIVE HAL ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/safety/predictive", tags=["Safety"])
 async def get_predictive_hal_stats(request: Request):
-    """Возвращает статистику Predictive HAL."""
+    """Статистика Predictive HAL."""
     return predictive_hal.get_stats()
 
 
 @app.post("/api/v1/safety/predictive/check", tags=["Safety"])
 async def force_predictive_check(request: Request):
-    """Принудительно запускает проверку всех предсказаний."""
+    """Принудительная проверка Predictive HAL."""
     predictions = await predictive_hal.force_check()
     return {
         "predictions_count": len(predictions),
@@ -2021,29 +1774,24 @@ async def force_predictive_check(request: Request):
     }
 
 
+# ============================================================================
+# SHADOW VISUALIZER ENDPOINTS
+# ============================================================================
 @app.get("/api/v1/sequence/shadow/mermaid", tags=["Shadow Engine"])
 async def get_shadow_mermaid(
     request: Request,
-    include_details: bool = Query(True, description="Включать детали узлов"),
-    max_depth: int = Query(10, ge=1, le=50, description="Максимальная глубина"),
-    show_triggers: bool = Query(True, description="Показывать триггеры"),
-    show_conditions: bool = Query(True, description="Показывать условия"),
+    include_details: bool = Query(True),
+    max_depth: int = Query(10, ge=1, le=50),
+    show_triggers: bool = Query(True),
+    show_conditions: bool = Query(True),
 ):
-    """
-    Возвращает теневой граф в формате Mermaid для документации.
-    
-    Mermaid можно вставить в:
-    - GitHub README (авто-рендеринг)
-    - Markdown документы
-    - Notion/Obsidian
-    """
+    """Теневой граф в формате Mermaid."""
     mermaid_code = shadow_visualizer.generate_mermaid(
         include_details=include_details,
         max_depth=max_depth,
         show_triggers=show_triggers,
         show_conditions=show_conditions,
     )
-    
     return {
         "format": "mermaid",
         "code": mermaid_code,
@@ -2054,44 +1802,41 @@ async def get_shadow_mermaid(
 
 @app.get("/api/v1/sequence/shadow/html", tags=["Shadow Engine"])
 async def get_shadow_html_report(request: Request):
-    """
-    Возвращает полный HTML-отчёт с интерактивной диаграммой теневого графа.
-    Откройте в браузере для просмотра.
-    """
+    """HTML-отчёт с диаграммой теневого графа."""
     html = shadow_visualizer.generate_full_html_report()
     return Response(content=html, media_type="text/html")
 
 
-@app.get("/api/v1/sequence/shadow/visualizer/stats", tags=["Shadow Engine"])
+@app.get(
+    "/api/v1/sequence/shadow/visualizer/stats",
+    tags=["Shadow Engine"],
+)
 async def get_shadow_visualizer_stats(request: Request):
-    """Возвращает статистику Shadow Visualizer."""
+    """Статистика Shadow Visualizer."""
     return shadow_visualizer.get_stats()
 
+
 # ============================================================================
-# METRICS SOURCE MONITOR ENDPOINTS (v4.0 — идея 6)
+# METRICS SOURCE MONITOR ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/metrics/sources", tags=["Metrics"])
 async def get_metrics_sources_status(request: Request):
-    """Возвращает статус всех источников метрик и текущий активный."""
+    """Статус источников метрик."""
     return metrics_source_monitor.get_stats()
 
 
 @app.post("/api/v1/metrics/sources/override", tags=["Metrics"])
 async def set_metrics_source_override(
     request: Request,
-    source: str = Query(..., description="Имя источника: influxdb или prometheus"),
-    reason: str = Query("manual", description="Причина override"),
+    source: str = Query(..., description="influxdb или prometheus"),
+    reason: str = Query("manual"),
 ):
-    """
-    Устанавливает ручной override источника метрик.
-    Отключает автоматическое переключение до снятия override.
-    """
+    """Ручной override источника метрик."""
     if source not in ["influxdb", "prometheus"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid source: {source}. Valid: influxdb, prometheus"
+            detail=f"Invalid source: {source}. Valid: influxdb, prometheus",
         )
-    
     metrics_source_monitor.set_manual_override(source, reason)
     return {
         "status": "success",
@@ -2103,7 +1848,7 @@ async def set_metrics_source_override(
 
 @app.delete("/api/v1/metrics/sources/override", tags=["Metrics"])
 async def clear_metrics_source_override(request: Request):
-    """Снимает ручной override и включает автопереключение."""
+    """Снимает ручной override."""
     metrics_source_monitor.clear_manual_override()
     return {
         "status": "success",

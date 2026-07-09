@@ -38,10 +38,10 @@ class RetentionPolicy(BaseModel):
 
     name: str
     description: str
-    keep_last_days: int = 30
+    keep_last_days: int = 1000
     keep_best_quality: bool = False
     delete_raw_keep_stacked: bool = False
-    min_free_space_gb: float = 100.0
+    min_free_space_gb: float = 10.0
 
 
 class RetentionResult(BaseModel):

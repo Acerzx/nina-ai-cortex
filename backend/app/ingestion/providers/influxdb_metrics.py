@@ -2,11 +2,11 @@
 InfluxDB Metrics Provider
 Основной источник метрик обсерватории через InfluxDB Exporter.
 Устраняет зависимость от Prometheus Exporter.
-
 ИСПРАВЛЕНО:
 - Убран async with для QueryApiAsync (не поддерживает context manager)
 - Добавлена защита от None значений
 - Оптимизированы Flux queries
+- v4.1: Раскомментирован FLUX_QUERIES (был закомментирован в тройных кавычках)
 """
 
 import asyncio
@@ -23,7 +23,6 @@ logger = logging.getLogger("InfluxDBMetricsProvider")
 class InfluxDBMetricsProvider:
     """
     Поставщик метрик из InfluxDB.
-
     Заменяет Prometheus Scraper как основной источник метрик.
     InfluxDB Exporter записывает метрики N.I.N.A. в InfluxDB,
     откуда мы их читаем через Flux queries.
@@ -32,73 +31,71 @@ class InfluxDBMetricsProvider:
     # Унифицированная Flux query для получения последних значений по всем метрикам
     # Один запрос вместо 25+ отдельных — в 10 раз быстрее
     UNIFIED_FLUX_QUERY = """
-        from(bucket: "{bucket}")
-        |> range(start: -5m)
-        |> filter(fn: (r) => 
-            r._measurement == "nina_camera" or
-            r._measurement == "nina_focuser" or
-            r._measurement == "nina_guider" or
-            r._measurement == "nina_telescope" or
-            r._measurement == "nina_rotator" or
-            r._measurement == "nina_weather" or
-            r._measurement == "nina_image" or
-            r._measurement == "nina_sequence"
-        )
-        |> last()
-        |> group()
-    """
-    """
+from(bucket: "{bucket}")
+    |> range(start: -5m)
+    |> filter(fn: (r) =>
+        r._measurement == "nina_camera" or
+        r._measurement == "nina_focuser" or
+        r._measurement == "nina_guider" or
+        r._measurement == "nina_telescope" or
+        r._measurement == "nina_rotator" or
+        r._measurement == "nina_weather" or
+        r._measurement == "nina_image" or
+        r._measurement == "nina_sequence"
+    )
+    |> last()
+    |> group()
+"""
+
     # ИСПРАВЛЕНО (v4.0 — проблема #69): Разбито на группы для параллельного выполнения
     # Каждая группа запрашивается параллельно, что ускоряет общий запрос
-
+    # v4.1: РАСКОММЕНТИРОВАНО — было обёрнуто в тройные кавычки, что вызывало AttributeError
     FLUX_QUERIES = {
-        "camera": \"\"\"
-    from(bucket: "{bucket}")
+        "camera": """
+from(bucket: "{bucket}")
     |> range(start: -5m)
     |> filter(fn: (r) => r._measurement == "nina_camera")
     |> last()
     |> group()
-    \"\"\",
-        "focuser": \"\"\"
-    from(bucket: "{bucket}")
+""",
+        "focuser": """
+from(bucket: "{bucket}")
     |> range(start: -5m)
     |> filter(fn: (r) => r._measurement == "nina_focuser")
     |> last()
     |> group()
-    \"\"\",
-        "guider": \"\"\"
-    from(bucket: "{bucket}")
+""",
+        "guider": """
+from(bucket: "{bucket}")
     |> range(start: -5m)
     |> filter(fn: (r) => r._measurement == "nina_guider")
     |> last()
     |> group()
-    \"\"\",
-        "telescope": \"\"\"
-    from(bucket: "{bucket}")
+""",
+        "telescope": """
+from(bucket: "{bucket}")
     |> range(start: -5m)
     |> filter(fn: (r) => r._measurement == "nina_telescope")
     |> last()
     |> group()
-    \"\"\",
-        "weather": \"\"\"
-    from(bucket: "{bucket}")
+""",
+        "weather": """
+from(bucket: "{bucket}")
     |> range(start: -5m)
     |> filter(fn: (r) => r._measurement == "nina_weather")
     |> last()
     |> group()
-    \"\"\",
-        "image": \"\"\"
-    from(bucket: "{bucket}")
+""",
+        "image": """
+from(bucket: "{bucket}")
     |> range(start: -5m)
     |> filter(fn: (r) => r._measurement == "nina_image")
     |> last()
     |> group()
-    \"\"\",
+""",
     }
-"""
 
     # Маппинг InfluxDB полей на внутренние имена метрик
-    # Ключ: (measurement, field) → значение: внутреннее имя
     METRICS_MAPPING = {
         # Camera
         ("nina_camera", "temperature"): "camera_temp",
@@ -137,21 +134,20 @@ class InfluxDBMetricsProvider:
 
     # История метрик (единая query для всех)
     HISTORY_FLUX_QUERY = """
-        from(bucket: "{bucket}")
-        |> range(start: -1h)
-        |> filter(fn: (r) => 
-            r._measurement == "nina_camera" and r._field == "temperature" or
-            r._measurement == "nina_image" and r._field == "hfr" or
-            r._measurement == "nina_image" and r._field == "fwhm" or
-            r._measurement == "nina_guider" and r._field == "rms_ra" or
-            r._measurement == "nina_guider" and r._field == "rms_dec" or
-            r._measurement == "nina_weather" and r._field == "wind_speed"
-        )
-        |> aggregateWindow(every: 30s, fn: mean, createEmpty: false)
-        |> yield(name: "mean")
-    """
+from(bucket: "{bucket}")
+    |> range(start: -1h)
+    |> filter(fn: (r) =>
+        r._measurement == "nina_camera" and r._field == "temperature" or
+        r._measurement == "nina_image" and r._field == "hfr" or
+        r._measurement == "nina_image" and r._field == "fwhm" or
+        r._measurement == "nina_guider" and r._field == "rms_ra" or
+        r._measurement == "nina_guider" and r._field == "rms_dec" or
+        r._measurement == "nina_weather" and r._field == "wind_speed"
+    )
+    |> aggregateWindow(every: 30s, fn: mean, createEmpty: false)
+    |> yield(name: "mean")
+"""
 
-    # Маппинг для истории
     HISTORY_MAPPING = {
         ("nina_camera", "temperature"): "temperature_history",
         ("nina_image", "hfr"): "hfr_history",
@@ -167,38 +163,26 @@ class InfluxDBMetricsProvider:
         self.url = settings.influxdb.url
         self.token = settings.influxdb.token
         self.query_interval = query_interval
-
         self._client: Optional[InfluxDBClientAsync] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
-
-        # Кэш для трендового анализа
         self._history_cache: Dict[str, List[float]] = {}
-
-        # Защита от спама логов
         self._last_error_time: Optional[datetime] = None
         self._consecutive_errors: int = 0
         self._error_log_interval = timedelta(minutes=1)
-
-        # ИСПРАВЛЕНО (v4.0 — проблема #38): Throttling для переподключений
         self._reconnect_attempts = 0
-        self._max_reconnect_delay = 60.0  # Максимум 60 секунд
-        self._base_reconnect_delay = 2.0  # Начальная задержка 2 секунды
-
-        # Статистика
+        self._max_reconnect_delay = 60.0
+        self._base_reconnect_delay = 2.0
         self._last_metrics_count: int = 0
         self._successful_queries: int = 0
 
     async def start(self):
         """Запускает provider."""
         self._running = True
-
-        # Подключение к InfluxDB
         try:
             self._client = InfluxDBClientAsync(
                 url=self.url, token=self.token, org=self.org
             )
-            # Проверяем подключение
             ready = await self._client.ping()
             if ready:
                 logger.info(f"✅ InfluxDB Metrics Provider connected to {self.url}")
@@ -207,9 +191,6 @@ class InfluxDBMetricsProvider:
         except Exception as e:
             logger.error(f"❌ Failed to connect to InfluxDB: {e}")
             logger.error("   Убедитесь, что InfluxDB запущен: docker compose up -d")
-            # Не падаем, попробуем переподключиться в цикле
-
-        # Запуск цикла опроса
         self._task = asyncio.create_task(self._query_loop())
         logger.info(
             f"📊 InfluxDB Metrics Provider started (interval={self.query_interval}s)"
@@ -218,15 +199,12 @@ class InfluxDBMetricsProvider:
     async def stop(self):
         """Останавливает provider и корректно закрывает клиент."""
         self._running = False
-
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-
-        # ИСПРАВЛЕНО (v4.0 — проблема #19): Проверка перед закрытием
         if self._client is not None:
             try:
                 await self._client.close()
@@ -235,23 +213,18 @@ class InfluxDBMetricsProvider:
                 logger.debug(f"Error closing InfluxDB client: {e}")
             finally:
                 self._client = None
-
         logger.info("🛑 InfluxDB Metrics Provider stopped")
 
     async def _query_loop(self):
         """Основной цикл опроса InfluxDB."""
         while self._running:
             try:
-                # Проверяем подключение
                 if self._client is None:
                     await self._try_reconnect()
                     await asyncio.sleep(self.query_interval)
                     continue
-
-                # 1. Запрос текущих метрик
                 metrics = await self._fetch_current_metrics()
                 if metrics:
-                    # Сбрасываем счетчик ошибок при успехе
                     if self._consecutive_errors > 0:
                         logger.info(
                             f"✅ InfluxDB connection восстановлено после "
@@ -259,37 +232,22 @@ class InfluxDBMetricsProvider:
                         )
                         self._consecutive_errors = 0
                         self._last_error_time = None
-                        self._successful_queries += 1
-
-                    # Публикуем метрики в EventBus
+                    self._successful_queries += 1
                     await event_bus.publish("INFLUXDB_UPDATE", metrics)
-
-                    # Периодически логируем сводку (раз в 20 успешных запросов)
                     if self._successful_queries % 20 == 0:
                         self._log_metrics_summary(metrics)
-
-                # 2. Запрос истории (реже — раз в минуту)
-                if self._successful_queries % 20 == 0:
+                if self._successful_queries % 20 == 0 and self._successful_queries > 0:
                     await self._fetch_history_metrics()
-
             except Exception as e:
                 self._log_error_throttled(
                     f"Ошибка запроса к InfluxDB: {type(e).__name__}: {e}",
                     level="WARNING",
                 )
-                # Возможно, клиент отвалился - пробуем переподключиться
                 self._client = None
-
             await asyncio.sleep(self.query_interval)
 
     async def _try_reconnect(self):
-        """
-        Пытается переподключиться к InfluxDB.
-        ИСПРАВЛЕНО (v4.0 — проблема #38): добавлен exponential backoff.
-
-        Формула задержки: min(base_delay * 2^attempts + jitter, max_delay)
-        """
-        # === Шаг 1: Закрываем старый клиент, если он существует ===
+        """Переподключение к InfluxDB с exponential backoff."""
         if self._client is not None:
             try:
                 await self._client.close()
@@ -299,38 +257,30 @@ class InfluxDBMetricsProvider:
             finally:
                 self._client = None
 
-        # === Шаг 2: Вычисляем задержку с exponential backoff ===
         import random
 
         exponential_delay = self._base_reconnect_delay * (2**self._reconnect_attempts)
         jitter = random.uniform(0, self._base_reconnect_delay * 0.5)
         delay = min(exponential_delay + jitter, self._max_reconnect_delay)
-
         logger.info(
             f"🔄 Attempting to reconnect to InfluxDB in {delay:.1f}s... "
             f"(attempt {self._reconnect_attempts + 1})"
         )
-
-        # === Шаг 3: Ждём перед переподключением ===
         await asyncio.sleep(delay)
 
-        # === Шаг 4: Создаём новый клиент и проверяем подключение ===
         try:
             new_client = InfluxDBClientAsync(
                 url=self.url, token=self.token, org=self.org
             )
             ready = await new_client.ping()
-
             if ready:
                 self._client = new_client
                 logger.info(
                     f"✅ Reconnected to InfluxDB successfully "
                     f"(after {self._reconnect_attempts} attempts)"
                 )
-                # Сбрасываем счётчик попыток при успехе
                 self._reconnect_attempts = 0
             else:
-                # Ping не прошёл — закрываем только что созданный клиент
                 try:
                     await new_client.close()
                 except Exception:
@@ -338,61 +288,40 @@ class InfluxDBMetricsProvider:
                 logger.warning("⚠️ InfluxDB ping returned False after reconnect")
                 self._client = None
                 self._reconnect_attempts += 1
-
         except Exception as e:
             logger.debug(f"Reconnect failed: {e}")
             self._client = None
             self._reconnect_attempts += 1
 
     async def _fetch_current_metrics(self) -> Dict[str, Any]:
-        """
-        Запрашивает текущие метрики из InfluxDB.
-        ИСПРАВЛЕНО (v4.0 — проблема #69): Параллельное выполнение запросов.
-        """
+        """Запрашивает текущие метрики из InfluxDB параллельно."""
         if not self._client:
             return {}
-
         metrics = {}
-
-        # ИСПРАВЛЕНО: query_api() в async версии НЕ является context manager
         query_api = self._client.query_api()
-
         try:
-            # Параллельное выполнение всех запросов
             tasks = []
             for group_name, query_template in self.FLUX_QUERIES.items():
                 query = query_template.format(bucket=self.bucket)
                 tasks.append(self._execute_query(query_api, query))
-
-            # Ждём выполнения всех запросов
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Обрабатываем результаты
             for result in results:
                 if isinstance(result, Exception):
                     logger.debug(f"Query failed: {result}")
                     continue
-
                 tables = result
                 if not tables:
                     continue
-
-                # Обрабатываем все таблицы
                 for table in tables:
                     for record in table.records:
                         measurement = record.get_measurement()
                         field = record.get_field()
                         value = record.get_value()
-
                         if value is None:
                             continue
-
-                        # Ищем соответствие в маппинге
                         internal_name = self.METRICS_MAPPING.get((measurement, field))
                         if not internal_name:
                             continue
-
-                        # Конвертируем значение
                         try:
                             if isinstance(value, bool):
                                 metrics[internal_name] = value
@@ -400,11 +329,8 @@ class InfluxDBMetricsProvider:
                                 metrics[internal_name] = float(value)
                         except (ValueError, TypeError):
                             metrics[internal_name] = value
-
         except Exception as e:
-            # Логируем ошибку и пробрасываем выше
             raise
-
         self._last_metrics_count = len(metrics)
         return metrics
 
@@ -413,36 +339,23 @@ class InfluxDBMetricsProvider:
         return await query_api.query(query)
 
     async def _fetch_history_metrics(self):
-        """
-        Запрашивает историю метрик для трендового анализа.
-
-        ИСПРАВЛЕНО: НЕ использует async with для QueryApiAsync.
-        """
+        """Запрашивает историю метрик для трендового анализа."""
         if not self._client:
             return
-
-        # ИСПРАВЛЕНО: query_api() в async версии НЕ является context manager
         query_api = self._client.query_api()
-
         try:
             query = self.HISTORY_FLUX_QUERY.format(bucket=self.bucket)
             tables = await query_api.query(query)
-
             if not tables:
                 return
-
-            # Группируем значения по (measurement, field)
             grouped: Dict[tuple, List[float]] = {}
-
             for table in tables:
                 for record in table.records:
                     measurement = record.get_measurement()
                     field = record.get_field()
                     value = record.get_value()
-
                     if value is None:
                         continue
-
                     try:
                         float_value = float(value)
                         key = (measurement, field)
@@ -451,27 +364,21 @@ class InfluxDBMetricsProvider:
                         grouped[key].append(float_value)
                     except (ValueError, TypeError):
                         continue
-
-            # Обновляем кэш истории
             for (measurement, field), values in grouped.items():
                 history_name = self.HISTORY_MAPPING.get((measurement, field))
                 if history_name:
-                    # Ограничиваем историю 100 точками
                     self._history_cache[history_name] = values[-100:]
-
             if grouped:
                 logger.debug(
                     f"📈 History updated: {len(grouped)} metrics, "
                     f"{sum(len(v) for v in grouped.values())} points total"
                 )
-
         except Exception as e:
             logger.debug(f"Failed to query history: {type(e).__name__}: {e}")
 
     def _log_metrics_summary(self, metrics: Dict[str, Any]):
         """Логирует сводку метрик."""
         key_metrics = ["camera_temp", "image_hfr", "guider_rms_total", "wx_wind_speed"]
-
         summary_parts = []
         for key in key_metrics:
             if key in metrics and metrics[key] is not None:
@@ -479,26 +386,23 @@ class InfluxDBMetricsProvider:
                     summary_parts.append(f"{key}={float(metrics[key]):.2f}")
                 except (ValueError, TypeError):
                     summary_parts.append(f"{key}={metrics[key]}")
-
         if summary_parts:
             logger.info(
-                f"📊 InfluxDB metrics ({self._last_metrics_count} total): {', '.join(summary_parts)}"
+                f"📊 InfluxDB metrics ({self._last_metrics_count} total): "
+                f"{', '.join(summary_parts)}"
             )
 
     def _log_error_throttled(self, message: str, level: str = "ERROR"):
         """Логирует ошибки с throttling."""
         now = datetime.now()
         self._consecutive_errors += 1
-
         should_log = (
             self._last_error_time is None
             or (now - self._last_error_time) >= self._error_log_interval
         )
-
         if should_log:
             if self._consecutive_errors > 1:
                 message += f" ({self._consecutive_errors} ошибок подряд)"
-
             if level == "DEBUG":
                 logger.debug(message)
             elif level == "WARNING":
@@ -507,7 +411,6 @@ class InfluxDBMetricsProvider:
                 logger.error(message)
             else:
                 logger.info(message)
-
             self._last_error_time = now
 
     def get_history(self, metric_name: str) -> List[float]:
