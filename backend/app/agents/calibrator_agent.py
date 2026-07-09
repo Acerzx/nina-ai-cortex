@@ -319,11 +319,6 @@ class CalibratorAgent(BaseAgent):
                 )
         return None
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """Проверяет калибровки для текущих параметров съемки."""
-        # Делегируем в _make_decision через Template Method
-        return await self._make_decision(context)
-
     async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
         """
         HOOK: Принимает решение на основе контекста.
@@ -344,11 +339,6 @@ class CalibratorAgent(BaseAgent):
                 confidence=1.0,
             )
         return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет действия по обновлению калибровок."""
-        # Делегируем в _perform_action через Template Method
-        return await self._perform_action(decision)
 
     async def _perform_action(self, decision: AgentDecision) -> bool:
         """

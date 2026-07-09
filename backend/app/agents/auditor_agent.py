@@ -355,14 +355,6 @@ class AuditorAgent(BaseAgent):
         """Генерирует Session Digest (вызывается Orchestrator'ом)."""
         await self._on_sequence_stopped(data)
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует завершенную сессию.
-        Вызывается Orchestrator'ом при завершении сессии.
-        """
-        # Делегируем в _make_decision через Template Method
-        return await self._make_decision(context)
-
     async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
         """
         HOOK: Принимает решение на основе контекста.
@@ -381,11 +373,6 @@ class AuditorAgent(BaseAgent):
                 confidence=1.0,
             )
         return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет индексацию Session Digest в RAG."""
-        # Делегируем в _perform_action через Template Method
-        return await self._perform_action(decision)
 
     async def _perform_action(self, decision: AgentDecision) -> bool:
         """

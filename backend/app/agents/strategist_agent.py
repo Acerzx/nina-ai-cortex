@@ -495,14 +495,6 @@ class StrategistAgent(BaseAgent):
         elapsed = (datetime.now() - last_time).total_seconds()
         return elapsed < self._min_interval_between_changes
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует контекст и предлагает оптимизации.
-        Вызывается Orchestrator'ом при необходимости.
-        """
-        # Делегируем в _make_decision через Template Method
-        return await self._make_decision(context)
-
     async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
         """
         HOOK: Принимает решение на основе контекста.
@@ -535,11 +527,6 @@ class StrategistAgent(BaseAgent):
                 confidence=max(p.confidence for p in proposals),
             )
         return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет принятые оптимизации."""
-        # Делегируем в _perform_action через Template Method
-        return await self._perform_action(decision)
 
     async def _perform_action(self, decision: AgentDecision) -> bool:
         """

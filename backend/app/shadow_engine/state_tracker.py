@@ -266,47 +266,89 @@ class StateTracker:
     async def _update_flat_mode(
         self, item_id: Optional[str], item_name: str, item_type: str
     ):
-        """Обновляет состояние FLAT_MODE на основе ImageType из графа."""
+        """
+        Обновляет состояние FLAT_MODE на основе ImageType из графа.
+        ИСПРАВЛЕНО (v4.0 — проблема #36):
+        - Проверяем наличие TakeExposure инструкций с ImageType=FLAT
+        - Не полагаемся только на ключевые слова
+        """
         node = self._node_map.get(item_id, {}) if item_id else {}
         image_type = self._extract_image_type_from_node(node)
 
         if image_type:
-            async with self._state_lock:
-                self.state.current_image_type = image_type
+            self.state.current_image_type = image_type
 
+        # === Приоритет 1: ImageType из графа ===
         if image_type == "FLAT":
-            async with self._state_lock:
-                if not self.state.is_flat_mode:
-                    self.state.is_flat_mode = True
-            if image_type == "FLAT" and not self.state.is_flat_mode:
+            if not self.state.is_flat_mode:
+                self.state.is_flat_mode = True
                 logger.info(
                     f"🟦 FLAT_MODE activated via ImageType=FLAT (item: {item_name})"
                 )
         elif image_type in ("LIGHT", "DARK", "BIAS"):
-            async with self._state_lock:
-                was_flat = self.state.is_flat_mode
-                if was_flat:
-                    self.state.is_flat_mode = False
-            if (
-                image_type in ("LIGHT", "DARK", "BIAS")
-                and self.state.is_flat_mode is False
-            ):
-                # Log only if we just changed
-                pass
+            if self.state.is_flat_mode:
+                self.state.is_flat_mode = False
+                logger.info(
+                    f"🟩 FLAT_MODE deactivated via ImageType={image_type} "
+                    f"(item: {item_name})"
+                )
+        # === Приоритет 2: Проверка TakeExposure инструкций ===
+        elif image_type is None and item_type in ("TakeExposure", "SmartExposure"):
+            # Проверяем, есть ли в текущем контейнере TakeExposure с FLAT
+            has_flat_exposure = await self._check_for_flat_exposures(item_id)
+
+            if has_flat_exposure and not self.state.is_flat_mode:
+                self.state.is_flat_mode = True
+                logger.info(
+                    f"🟦 FLAT_MODE activated via TakeExposure check (item: {item_name})"
+                )
+            elif not has_flat_exposure and self.state.is_flat_mode:
+                self.state.is_flat_mode = False
+                logger.info(
+                    f"🟩 FLAT_MODE deactivated via TakeExposure check "
+                    f"(item: {item_name})"
+                )
+        # === Приоритет 3: Fallback на ключевые слова (только для контейнеров) ===
         elif image_type is None:
             item_name_lower = item_name.lower() if item_name else ""
             is_flat_container = any(kw in item_name_lower for kw in self._flat_keywords)
 
-            if is_flat_container:
+            # Активируем только для явно плоских контейнеров
+            if is_flat_container and not self.state.is_flat_mode:
                 node_type = node.get("type", "")
                 if "Container" in node_type or item_type == "":
-                    async with self._state_lock:
-                        if not self.state.is_flat_mode:
-                            self.state.is_flat_mode = True
-                            logger.info(
-                                f"🟦 FLAT_MODE pre-activated via container name "
-                                f"(item: {item_name}) [fallback mode]"
-                            )
+                    self.state.is_flat_mode = True
+                    logger.info(
+                        f"🟦 FLAT_MODE pre-activated via container name "
+                        f"(item: {item_name}) [fallback mode]"
+                    )
+
+    async def _check_for_flat_exposures(self, container_id: str) -> bool:
+        """
+        Проверяет, есть ли в контейнере TakeExposure инструкции с ImageType=FLAT.
+        ИСПРАВЛЕНО (v4.0 — проблема #36): надёжная детекция FLAT режима.
+        """
+        if container_id not in self._container_children:
+            return False
+
+        children_ids = self._container_children[container_id]
+
+        for child_id in children_ids:
+            child_node = self._node_map.get(child_id, {})
+            child_type = child_node.get("type", "")
+
+            # Проверяем TakeExposure и SmartExposure
+            if "TakeExposure" in child_type or "SmartExposure" in child_type:
+                image_type = self._extract_image_type_from_node(child_node)
+                if image_type == "FLAT":
+                    return True
+
+            # Рекурсивно проверяем вложенные контейнеры
+            if "Container" in child_type:
+                if await self._check_for_flat_exposures(child_id):
+                    return True
+
+        return False
 
     async def handle_sequence_item_completed(self, data: Dict):
         """Обработка события SequenceItemCompleted."""
