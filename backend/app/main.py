@@ -76,6 +76,9 @@ from app.core.rag_updater import rag_updater
 # НОВОЕ (v4.0): Decision Analyzer для статистического анализа решений
 from app.analytics.decision_analyzer import decision_analyzer
 
+# НОВОЕ (v4.0): Sessions Metadata для хранения всех данных сессий
+from app.storage.sessions_metadata import sessions_metadata
+
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -1618,3 +1621,102 @@ async def get_analytics_report(
 async def get_analyzer_stats(request: Request):
     """Возвращает статистику самого Decision Analyzer."""
     return decision_analyzer.get_stats()
+
+
+# ============================================================================
+# SESSIONS METADATA ENDPOINTS (v4.0 — идея 1.3)
+# ============================================================================
+@app.get("/api/v1/sessions", tags=["Sessions Metadata"])
+async def list_sessions(
+    request: Request,
+    target: Optional[str] = Query(None, description="Фильтр по имени цели"),
+    date_from: Optional[str] = Query(None, description="Начальная дата (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Конечная дата (YYYY-MM-DD)"),
+    min_quality: Optional[float] = Query(None, ge=0, le=10, description="Минимальный quality_score"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """
+    Возвращает список сессий с фильтрацией.
+    Можно фильтровать по цели, датам, минимальному quality_score.
+    """
+    sessions = await sessions_metadata.get_sessions(
+        target_name=target,
+        date_from=date_from,
+        date_to=date_to,
+        min_quality=min_quality,
+        limit=limit,
+    )
+    return {
+        "sessions": [s.model_dump() for s in sessions],
+        "count": len(sessions),
+    }
+
+
+@app.get("/api/v1/sessions/{session_id}", tags=["Sessions Metadata"])
+async def get_session_details(
+    request: Request,
+    session_id: str,
+):
+    """
+    Возвращает детальную информацию о сессии.
+    Включает: общую информацию, кадры, проблемы, статистику.
+    """
+    stats = await sessions_metadata.get_session_stats(session_id)
+    if "error" in stats:
+        raise HTTPException(status_code=404, detail=stats["error"])
+    return stats
+
+
+@app.get("/api/v1/sessions/{session_id}/frames", tags=["Sessions Metadata"])
+async def get_session_frames(
+    request: Request,
+    session_id: str,
+    image_type: Optional[str] = Query(None, description="Фильтр по типу кадра"),
+    limit: int = Query(1000, ge=1, le=10000),
+):
+    """
+    Возвращает все кадры сессии.
+    Можно фильтровать по типу кадра (LIGHT, FLAT, DARK, BIAS).
+    """
+    frames = await sessions_metadata.get_frames(
+        session_id=session_id,
+        image_type=image_type,
+        limit=limit,
+    )
+    return {
+        "session_id": session_id,
+        "frames": [f.model_dump() for f in frames],
+        "count": len(frames),
+    }
+
+
+@app.get("/api/v1/sessions/{session_id}/export", tags=["Sessions Metadata"])
+async def export_session(
+    request: Request,
+    session_id: str,
+):
+    """
+    Экспортирует все кадры сессии в CSV файл.
+    Возвращает путь к созданному файлу.
+    """
+    output_path = Path(f"./data/exports/{session_id}_frames.csv")
+    success = await sessions_metadata.export_session_csv(session_id, output_path)
+    
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No frames found for session {session_id}"
+        )
+    
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "export_path": str(output_path),
+        "message": f"Session exported to {output_path}",
+    }
+
+
+@app.get("/api/v1/sessions/stats", tags=["Sessions Metadata"])
+async def get_sessions_metadata_stats(request: Request):
+    """Возвращает общую статистику хранилища сессий."""
+    return await sessions_metadata.get_stats()
