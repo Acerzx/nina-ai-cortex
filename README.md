@@ -802,3 +802,5 @@ docker-compose restart qdrant
 ---
 
 **Made with ❤️ for astrophotographers**
+
+Тесты
