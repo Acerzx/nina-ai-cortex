@@ -118,7 +118,7 @@ class MetricsSourceMonitor:
 
         # Grace period: не переключаемся первые N секунд после старта
         # чтобы дать всем источникам время прислать первые данные
-        self.GRACE_PERIOD_SECONDS = 30
+        self.GRACE_PERIOD_SECONDS = 5
 
         logger.info(
             f"📊 Metrics Source Monitor initialized "
@@ -161,7 +161,7 @@ class MetricsSourceMonitor:
         if self._manual_override:
             return self._active_source
 
-        # Grace period: первые 30 секунд после старта не переключаемся
+        # Grace period: первые 5 секунд после старта не переключаемся
         if self._start_time:
             elapsed = (datetime.now() - self._start_time).total_seconds()
             if elapsed < self.GRACE_PERIOD_SECONDS:
