@@ -1,28 +1,64 @@
 """
 Cortex Metrics — Prometheus-совместимые метрики для мониторинга N.I.N.A. AI Cortex.
 
-Устраняет проблему аудита 11.2: отсутствие метрик для самого Cortex.
+ЭТАП 1.4 (рефакторинг):
+- Переход со своей реализации (~800 строк) на prometheus-client (~350 строк)
+- Потокобезопасность из коробки (встроена в prometheus-client)
+- Изолированный CollectorRegistry для Cortex метрик
+- Стандартный Prometheus exposition format через generate_latest()
 
-Предоставляемые метрики:
-- cortex_events_total: счётчик обработанных событий EventBus (по типам)
-- cortex_event_processing_seconds: гистограмма времени обработки событий
-- cortex_decisions_total: счётчик решений агентов (по агенту и типу)
-- cortex_llm_requests_total: счётчик запросов к LLM (по модели и статусу)
-- cortex_llm_request_duration_seconds: гистограмма времени ответа LLM
-- cortex_eventbus_queue_size: текущий размер очереди EventBus
-- cortex_eventbus_subscribers: количество активных подписчиков
-- cortex_operation_mode: текущий режим работы (gauge)
-- cortex_sequence_running: статус выполнения секвенсора (gauge)
-- cortex_api_requests_total: счётчик HTTP-запросов к API
-- cortex_api_request_duration_seconds: гистограмма времени ответа API
-- cortex_active_ws_connections: количество активных WebSocket-подключений
-- cortex_uptime_seconds: время работы Cortex
+Предоставляемые метрики (28 штук):
+
+EventBus:
+- cortex_events_total
+- cortex_event_processing_seconds
+- cortex_eventbus_queue_size
+- cortex_eventbus_subscribers
+- cortex_event_handler_errors_total
+
+AI Agents:
+- cortex_decisions_total
+- cortex_decision_confidence
+- cortex_agents_active
+
+LLM:
+- cortex_llm_requests_total
+- cortex_llm_request_duration_seconds
+- cortex_llm_tokens_total
+- cortex_llm_available
+
+API:
+- cortex_api_requests_total
+- cortex_api_request_duration_seconds
+
+System:
+- cortex_operation_mode
+- cortex_sequence_running
+- cortex_flat_mode_active
+- cortex_safety_status
+- cortex_active_ws_connections
+- cortex_uptime_seconds
+
+Execution:
+- cortex_triggers_fired_total
+- cortex_trigger_duration_seconds
+- cortex_variables_set_total
+
+RAG:
+- cortex_rag_searches_total
+- cortex_rag_search_duration_seconds
+- cortex_rag_documents_total
+
+Ingestion:
+- cortex_files_processed_total
+- cortex_watchers_active
 
 Использование:
     from app.core.metrics import cortex_metrics
 
-    # Инкремент счётчика
-    cortex_metrics.events_total.labels(event_type="NEW_FRAME").inc()
+    # Инкремент счётчика (async-safe)
+    cortex_metrics.events_total.inc(event_type="NEW_FRAME")
+    cortex_metrics.events_total.inc_sync(event_type="NEW_FRAME")  # алиас
 
     # Запись времени
     with cortex_metrics.llm_duration.labels(model="gemma4:31b").time():
@@ -36,225 +72,132 @@ Cortex Metrics — Prometheus-совместимые метрики для мо�
 """
 
 import time
-import asyncio
 import logging
-from typing import Dict, Any, Optional, List
-from collections import defaultdict
-from dataclasses import dataclass, field
+from typing import Dict, Any, Optional
+from prometheus_client import (
+    Counter,
+    Gauge,
+    Histogram,
+    CollectorRegistry,
+    generate_latest,
+)
 
 logger = logging.getLogger("CortexMetrics")
 
 
 # ============================================================================
-# DATA CLASSES
+# WRAPPER КЛАССЫ (для обратной совместимости API)
 # ============================================================================
+# prometheus-client уже потокобезопасен, поэтому inc_sync/observe_sync/set_sync
+# — это просто алиасы для inc/observe/set.
+# Это позволяет существующему коду (middleware, event handlers) работать
+# без изменений.
 
 
-@dataclass
-class CounterMetric:
-    """Счётчик (только увеличивается)."""
+class CounterWrapper:
+    """
+    Wrapper над prometheus_client.Counter.
+    Добавляет inc_sync() алиас для обратной совместимости.
+    """
 
-    name: str
-    help_text: str
-    labels: List[str] = field(default_factory=list)
-    _values: Dict[tuple, float] = field(default_factory=lambda: defaultdict(float))
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    def __init__(self, counter: Counter):
+        self._counter = counter
 
-    async def inc(self, value: float = 1.0, **label_values):
-        """Увеличивает счётчик."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        async with self._lock:
-            self._values[key] += value
+    def inc(self, amount: float = 1.0, **label_values):
+        """Увеличить счётчик (async-safe, потокобезопасно)."""
+        if label_values:
+            self._counter.labels(**label_values).inc(amount)
+        else:
+            self._counter.inc(amount)
 
-    def inc_sync(self, value: float = 1.0, **label_values):
-        """Синхронное увеличение (без блокировки)."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        self._values[key] += value
+    def inc_sync(self, amount: float = 1.0, **label_values):
+        """
+        Синхронное увеличение (алиас для inc).
+        prometheus-client уже потокобезопасен.
+        """
+        self.inc(amount, **label_values)
 
-    def get(self, **label_values) -> float:
-        """Возвращает текущее значение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        return self._values.get(key, 0.0)
-
-    def expose(self) -> str:
-        """Экспорт в Prometheus формате."""
-        lines = [f"# HELP {self.name} {self.help_text}"]
-        lines.append(f"# TYPE {self.name} counter")
-        for key, value in self._values.items():
-            if self.labels:
-                labels_str = ",".join(f'{l}="{v}"' for l, v in zip(self.labels, key))
-                lines.append(f"{self.name}{{{labels_str}}} {value}")
-            else:
-                lines.append(f"{self.name} {value}")
-        return "\n".join(lines)
+    def labels(self, **label_values) -> "CounterWrapper":
+        """Возвращает wrapper для конкретных label значений."""
+        return CounterWrapper(self._counter.labels(**label_values))
 
 
-@dataclass
-class GaugeMetric:
-    """Gauge (может увеличиваться и уменьшаться)."""
+class GaugeWrapper:
+    """
+    Wrapper над prometheus_client.Gauge.
+    Добавляет set_sync/inc_sync/dec_sync алиасы для обратной совместимости.
+    """
 
-    name: str
-    help_text: str
-    labels: List[str] = field(default_factory=list)
-    _values: Dict[tuple, float] = field(default_factory=lambda: defaultdict(float))
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    def __init__(self, gauge: Gauge):
+        self._gauge = gauge
 
-    async def set(self, value: float, **label_values):
-        """Устанавливает значение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        async with self._lock:
-            self._values[key] = value
+    def set(self, value: float, **label_values):
+        """Установить значение gauge."""
+        if label_values:
+            self._gauge.labels(**label_values).set(value)
+        else:
+            self._gauge.set(value)
 
     def set_sync(self, value: float, **label_values):
-        """Синхронная установка."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        self._values[key] = value
+        """Синхронная установка (алиас для set)."""
+        self.set(value, **label_values)
 
-    async def inc(self, value: float = 1.0, **label_values):
-        """Увеличивает значение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        async with self._lock:
-            self._values[key] += value
+    def inc(self, amount: float = 1.0, **label_values):
+        """Увеличить значение."""
+        if label_values:
+            self._gauge.labels(**label_values).inc(amount)
+        else:
+            self._gauge.inc(amount)
 
-    async def dec(self, value: float = 1.0, **label_values):
-        """Уменьшает значение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        async with self._lock:
-            self._values[key] -= value
+    def inc_sync(self, amount: float = 1.0, **label_values):
+        """Синхронное увеличение (алиас для inc)."""
+        self.inc(amount, **label_values)
 
-    def get(self, **label_values) -> float:
-        """Возвращает текущее значение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        return self._values.get(key, 0.0)
+    def dec(self, amount: float = 1.0, **label_values):
+        """Уменьшить значение."""
+        if label_values:
+            self._gauge.labels(**label_values).dec(amount)
+        else:
+            self._gauge.dec(amount)
 
-    def expose(self) -> str:
-        """Экспорт в Prometheus формате."""
-        lines = [f"# HELP {self.name} {self.help_text}"]
-        lines.append(f"# TYPE {self.name} gauge")
-        for key, value in self._values.items():
-            if self.labels:
-                labels_str = ",".join(f'{l}="{v}"' for l, v in zip(self.labels, key))
-                lines.append(f"{self.name}{{{labels_str}}} {value}")
-            else:
-                lines.append(f"{self.name} {value}")
-        return "\n".join(lines)
+    def dec_sync(self, amount: float = 1.0, **label_values):
+        """Синхронное уменьшение (алиас для dec)."""
+        self.dec(amount, **label_values)
+
+    def labels(self, **label_values) -> "GaugeWrapper":
+        """Возвращает wrapper для конкретных label значений."""
+        return GaugeWrapper(self._gauge.labels(**label_values))
 
 
-@dataclass
-class HistogramMetric:
-    """Гистограмма (распределение значений по бакетам)."""
+class HistogramWrapper:
+    """
+    Wrapper над prometheus_client.Histogram.
+    Добавляет observe_sync() алиас для обратной совместимости.
+    """
 
-    name: str
-    help_text: str
-    labels: List[str] = field(default_factory=list)
-    buckets: List[float] = field(
-        default_factory=lambda: [
-            0.005,
-            0.01,
-            0.025,
-            0.05,
-            0.1,
-            0.25,
-            0.5,
-            1.0,
-            2.5,
-            5.0,
-            10.0,
-        ]
-    )
-    _bucket_counts: Dict[tuple, List[int]] = field(default_factory=dict)
-    _sums: Dict[tuple, float] = field(default_factory=lambda: defaultdict(float))
-    _counts: Dict[tuple, int] = field(default_factory=lambda: defaultdict(int))
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    def __init__(self, histogram: Histogram):
+        self._histogram = histogram
 
-    async def observe(self, value: float, **label_values):
-        """Добавляет наблюдение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        async with self._lock:
-            if key not in self._bucket_counts:
-                self._bucket_counts[key] = [0] * len(self.buckets)
-            for i, bucket in enumerate(self.buckets):
-                if value <= bucket:
-                    self._bucket_counts[key][i] += 1
-            self._sums[key] += value
-            self._counts[key] += 1
+    def observe(self, value: float, **label_values):
+        """Добавить наблюдение."""
+        if label_values:
+            self._histogram.labels(**label_values).observe(value)
+        else:
+            self._histogram.observe(value)
 
     def observe_sync(self, value: float, **label_values):
-        """Синхронное наблюдение."""
-        key = tuple(label_values.get(l, "") for l in self.labels)
-        if key not in self._bucket_counts:
-            self._bucket_counts[key] = [0] * len(self.buckets)
-        for i, bucket in enumerate(self.buckets):
-            if value <= bucket:
-                self._bucket_counts[key][i] += 1
-        self._sums[key] += value
-        self._counts[key] += 1
+        """Синхронное наблюдение (алиас для observe)."""
+        self.observe(value, **label_values)
 
-    class _Timer:
-        """Контекстный менеджер для измерения времени."""
-
-        def __init__(self, histogram, label_values):
-            self.histogram = histogram
-            self.label_values = label_values
-            self.start_time = None
-
-        def __enter__(self):
-            self.start_time = time.perf_counter()
-            return self
-
-        def __exit__(self, *args):
-            duration = time.perf_counter() - self.start_time
-            self.histogram.observe_sync(duration, **self.label_values)
-
-        async def __aenter__(self):
-            self.start_time = time.perf_counter()
-            return self
-
-        async def __aexit__(self, *args):
-            duration = time.perf_counter() - self.start_time
-            await self.histogram.observe(duration, **self.label_values)
+    def labels(self, **label_values) -> "HistogramWrapper":
+        """Возвращает wrapper для конкретных label значений."""
+        return HistogramWrapper(self._histogram.labels(**label_values))
 
     def time(self, **label_values):
-        """Возвращает контекстный менеджер для измерения времени."""
-        return self._Timer(self, label_values)
-
-    def expose(self) -> str:
-        """Экспорт в Prometheus формате."""
-        lines = [f"# HELP {self.name} {self.help_text}"]
-        lines.append(f"# TYPE {self.name} histogram")
-        for key in set(list(self._bucket_counts.keys()) + list(self._counts.keys())):
-            counts = self._bucket_counts.get(key, [0] * len(self.buckets))
-            total = self._counts.get(key, 0)
-            total_sum = self._sums.get(key, 0.0)
-
-            if self.labels:
-                labels_str = ",".join(f'{l}="{v}"' for l, v in zip(self.labels, key))
-                base_labels = labels_str
-            else:
-                base_labels = ""
-
-            # Buckets (кумулятивные)
-            cumulative = 0
-            for i, bucket in enumerate(self.buckets):
-                cumulative += counts[i]
-                if base_labels:
-                    lines.append(
-                        f'{self.name}_bucket{{{base_labels},le="{bucket}"}} {cumulative}'
-                    )
-                else:
-                    lines.append(f'{self.name}_bucket{{le="{bucket}"}} {cumulative}')
-
-            # +Inf bucket
-            if base_labels:
-                lines.append(f'{self.name}_bucket{{{base_labels},le="+Inf"}} {total}')
-                lines.append(f"{self.name}_sum{{{base_labels}}} {total_sum}")
-                lines.append(f"{self.name}_count{{{base_labels}}} {total}")
-            else:
-                lines.append(f'{self.name}_bucket{{le="+Inf"}} {total}')
-                lines.append(f"{self.name}_sum {total_sum}")
-                lines.append(f"{self.name}_count {total}")
-
-        return "\n".join(lines)
+        """Контекстный менеджер для измерения времени."""
+        if label_values:
+            return self._histogram.labels(**label_values).time()
+        return self._histogram.time()
 
 
 # ============================================================================
@@ -266,14 +209,19 @@ class CortexMetrics:
     """
     Реестр всех метрик Cortex для Prometheus-экспорта.
 
+    Использует изолированный CollectorRegistry, чтобы:
+    - Не конфликтовать с другими библиотеками (fastapi, httpx и т.д.)
+    - Контролировать, какие метрики экспортируются
+    - Избежать засорения /metrics эндпоинта
+
     Использование:
         from app.core.metrics import cortex_metrics
 
         # Счётчик событий
-        cortex_metrics.events_total.labels(event_type="NEW_FRAME").inc()
+        cortex_metrics.events_total.inc(event_type="NEW_FRAME")
 
         # Время обработки события
-        with cortex_metrics.event_processing_time.labels(event_type="NEW_FRAME").time():
+        with cortex_metrics.event_processing_time.time(event_type="NEW_FRAME"):
             await process_event(...)
 
         # Экспорт для Prometheus
@@ -283,277 +231,346 @@ class CortexMetrics:
     def __init__(self):
         self._start_time = time.time()
 
+        # Изолированный registry для Cortex метрик
+        self._registry = CollectorRegistry()
+
         # ====================================================================
         # EventBus метрики
         # ====================================================================
-
-        self.events_total = CounterMetric(
-            name="cortex_events_total",
-            help_text="Total number of events processed by EventBus",
-            labels=["event_type"],
+        self.events_total = CounterWrapper(
+            Counter(
+                "cortex_events_total",
+                "Total number of events processed by EventBus",
+                labelnames=["event_type"],
+                registry=self._registry,
+            )
         )
 
-        self.event_processing_time = HistogramMetric(
-            name="cortex_event_processing_seconds",
-            help_text="Time spent processing events in EventBus",
-            labels=["event_type"],
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+        self.event_processing_time = HistogramWrapper(
+            Histogram(
+                "cortex_event_processing_seconds",
+                "Time spent processing events in EventBus",
+                labelnames=["event_type"],
+                buckets=[
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.1,
+                    0.25,
+                    0.5,
+                    1.0,
+                    2.5,
+                    5.0,
+                ],
+                registry=self._registry,
+            )
         )
 
-        self.eventbus_queue_size = GaugeMetric(
-            name="cortex_eventbus_queue_size",
-            help_text="Current number of events in EventBus queue",
+        self.eventbus_queue_size = GaugeWrapper(
+            Gauge(
+                "cortex_eventbus_queue_size",
+                "Current number of events in EventBus queue",
+                registry=self._registry,
+            )
         )
 
-        self.eventbus_subscribers = GaugeMetric(
-            name="cortex_eventbus_subscribers",
-            help_text="Number of active EventBus subscribers",
-            labels=["event_type"],
+        self.eventbus_subscribers = GaugeWrapper(
+            Gauge(
+                "cortex_eventbus_subscribers",
+                "Number of active EventBus subscribers",
+                labelnames=["event_type"],
+                registry=self._registry,
+            )
         )
 
-        self.event_handler_errors = CounterMetric(
-            name="cortex_event_handler_errors_total",
-            help_text="Total number of errors in event handlers",
-            labels=["event_type"],
+        self.event_handler_errors = CounterWrapper(
+            Counter(
+                "cortex_event_handler_errors_total",
+                "Total number of errors in event handlers",
+                labelnames=["event_type"],
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # AI Agents метрики
         # ====================================================================
-
-        self.decisions_total = CounterMetric(
-            name="cortex_decisions_total",
-            help_text="Total number of AI agent decisions",
-            labels=["agent", "decision_type", "outcome"],
+        self.decisions_total = CounterWrapper(
+            Counter(
+                "cortex_decisions_total",
+                "Total number of AI agent decisions",
+                labelnames=["agent", "decision_type", "outcome"],
+                registry=self._registry,
+            )
         )
 
-        self.decision_confidence = HistogramMetric(
-            name="cortex_decision_confidence",
-            help_text="Distribution of decision confidence scores",
-            labels=["agent"],
-            buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0],
+        self.decision_confidence = HistogramWrapper(
+            Histogram(
+                "cortex_decision_confidence",
+                "Distribution of decision confidence scores",
+                labelnames=["agent"],
+                buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0],
+                registry=self._registry,
+            )
         )
 
-        self.agents_active = GaugeMetric(
-            name="cortex_agents_active",
-            help_text="Number of currently active AI agents",
+        self.agents_active = GaugeWrapper(
+            Gauge(
+                "cortex_agents_active",
+                "Number of currently active AI agents",
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # LLM метрики
         # ====================================================================
-
-        self.llm_requests_total = CounterMetric(
-            name="cortex_llm_requests_total",
-            help_text="Total number of LLM requests",
-            labels=["model", "status", "fallback"],
+        self.llm_requests_total = CounterWrapper(
+            Counter(
+                "cortex_llm_requests_total",
+                "Total number of LLM requests",
+                labelnames=["model", "status", "fallback"],
+                registry=self._registry,
+            )
         )
 
-        self.llm_request_duration = HistogramMetric(
-            name="cortex_llm_request_duration_seconds",
-            help_text="Duration of LLM requests",
-            labels=["model"],
-            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0],
+        self.llm_request_duration = HistogramWrapper(
+            Histogram(
+                "cortex_llm_request_duration_seconds",
+                "Duration of LLM requests",
+                labelnames=["model"],
+                buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0],
+                registry=self._registry,
+            )
         )
 
-        self.llm_tokens_used = CounterMetric(
-            name="cortex_llm_tokens_total",
-            help_text="Total number of tokens used in LLM requests",
-            labels=["model"],
+        self.llm_tokens_used = CounterWrapper(
+            Counter(
+                "cortex_llm_tokens_total",
+                "Total number of tokens used in LLM requests",
+                labelnames=["model"],
+                registry=self._registry,
+            )
         )
 
-        self.llm_available = GaugeMetric(
-            name="cortex_llm_available",
-            help_text="LLM availability status (1=available, 0=unavailable)",
-            labels=["model"],
+        self.llm_available = GaugeWrapper(
+            Gauge(
+                "cortex_llm_available",
+                "LLM availability status (1=available, 0=unavailable)",
+                labelnames=["model"],
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # API метрики
         # ====================================================================
-
-        self.api_requests_total = CounterMetric(
-            name="cortex_api_requests_total",
-            help_text="Total number of API requests",
-            labels=["method", "path", "status_code"],
+        self.api_requests_total = CounterWrapper(
+            Counter(
+                "cortex_api_requests_total",
+                "Total number of API requests",
+                labelnames=["method", "path", "status_code"],
+                registry=self._registry,
+            )
         )
 
-        self.api_request_duration = HistogramMetric(
-            name="cortex_api_request_duration_seconds",
-            help_text="Duration of API requests",
-            labels=["method", "path"],
-            buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+        self.api_request_duration = HistogramWrapper(
+            Histogram(
+                "cortex_api_request_duration_seconds",
+                "Duration of API requests",
+                labelnames=["method", "path"],
+                buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # System метрики
         # ====================================================================
-
-        self.operation_mode = GaugeMetric(
-            name="cortex_operation_mode",
-            help_text="Current operation mode (0=manual, 1=safe, 2=full_ai, 3=simulation)",
+        self.operation_mode = GaugeWrapper(
+            Gauge(
+                "cortex_operation_mode",
+                "Current operation mode (0=manual, 1=safe, 2=full_ai, 3=simulation)",
+                registry=self._registry,
+            )
         )
 
-        self.sequence_running = GaugeMetric(
-            name="cortex_sequence_running",
-            help_text="Whether a sequence is currently running (1=yes, 0=no)",
+        self.sequence_running = GaugeWrapper(
+            Gauge(
+                "cortex_sequence_running",
+                "Whether a sequence is currently running (1=yes, 0=no)",
+                registry=self._registry,
+            )
         )
 
-        self.flat_mode_active = GaugeMetric(
-            name="cortex_flat_mode_active",
-            help_text="Whether FLAT_MODE is currently active (1=yes, 0=no)",
+        self.flat_mode_active = GaugeWrapper(
+            Gauge(
+                "cortex_flat_mode_active",
+                "Whether FLAT_MODE is currently active (1=yes, 0=no)",
+                registry=self._registry,
+            )
         )
 
-        self.safety_status = GaugeMetric(
-            name="cortex_safety_status",
-            help_text="Safety monitor status (0=SAFE, 1=UNSAFE, -1=UNKNOWN)",
+        self.safety_status = GaugeWrapper(
+            Gauge(
+                "cortex_safety_status",
+                "Safety monitor status (0=SAFE, 1=UNSAFE, -1=UNKNOWN)",
+                registry=self._registry,
+            )
         )
 
-        self.active_ws_connections = GaugeMetric(
-            name="cortex_active_ws_connections",
-            help_text="Number of active WebSocket connections",
+        self.active_ws_connections = GaugeWrapper(
+            Gauge(
+                "cortex_active_ws_connections",
+                "Number of active WebSocket connections",
+                registry=self._registry,
+            )
         )
 
-        self.uptime_seconds = GaugeMetric(
-            name="cortex_uptime_seconds",
-            help_text="Time since Cortex startup in seconds",
+        self.uptime_seconds = GaugeWrapper(
+            Gauge(
+                "cortex_uptime_seconds",
+                "Time since Cortex startup in seconds",
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # Execution Layer метрики
         # ====================================================================
-
-        self.triggers_fired = CounterMetric(
-            name="cortex_triggers_fired_total",
-            help_text="Total number of triggers fired",
-            labels=["trigger_name", "status"],
+        self.triggers_fired = CounterWrapper(
+            Counter(
+                "cortex_triggers_fired_total",
+                "Total number of triggers fired",
+                labelnames=["trigger_name", "status"],
+                registry=self._registry,
+            )
         )
 
-        self.trigger_duration = HistogramMetric(
-            name="cortex_trigger_duration_seconds",
-            help_text="Duration of trigger execution",
-            labels=["trigger_name"],
-            buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+        self.trigger_duration = HistogramWrapper(
+            Histogram(
+                "cortex_trigger_duration_seconds",
+                "Duration of trigger execution",
+                labelnames=["trigger_name"],
+                buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+                registry=self._registry,
+            )
         )
 
-        self.variables_set = CounterMetric(
-            name="cortex_variables_set_total",
-            help_text="Total number of global variables set",
-            labels=["status"],
+        self.variables_set = CounterWrapper(
+            Counter(
+                "cortex_variables_set_total",
+                "Total number of global variables set",
+                labelnames=["status"],
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # RAG метрики
         # ====================================================================
-
-        self.rag_searches_total = CounterMetric(
-            name="cortex_rag_searches_total",
-            help_text="Total number of RAG searches",
-            labels=["status"],
+        self.rag_searches_total = CounterWrapper(
+            Counter(
+                "cortex_rag_searches_total",
+                "Total number of RAG searches",
+                labelnames=["status"],
+                registry=self._registry,
+            )
         )
 
-        self.rag_search_duration = HistogramMetric(
-            name="cortex_rag_search_duration_seconds",
-            help_text="Duration of RAG searches",
-            buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+        self.rag_search_duration = HistogramWrapper(
+            Histogram(
+                "cortex_rag_search_duration_seconds",
+                "Duration of RAG searches",
+                buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+                registry=self._registry,
+            )
         )
 
-        self.rag_documents_total = GaugeMetric(
-            name="cortex_rag_documents_total",
-            help_text="Total number of documents in RAG database",
+        self.rag_documents_total = GaugeWrapper(
+            Gauge(
+                "cortex_rag_documents_total",
+                "Total number of documents in RAG database",
+                registry=self._registry,
+            )
         )
 
         # ====================================================================
         # Ingestion Layer метрики
         # ====================================================================
-
-        self.files_processed = CounterMetric(
-            name="cortex_files_processed_total",
-            help_text="Total number of files processed by watchers",
-            labels=["watcher", "status"],
+        self.files_processed = CounterWrapper(
+            Counter(
+                "cortex_files_processed_total",
+                "Total number of files processed by watchers",
+                labelnames=["watcher", "status"],
+                registry=self._registry,
+            )
         )
 
-        self.watchers_active = GaugeMetric(
-            name="cortex_watchers_active",
-            help_text="Number of active file watchers",
+        self.watchers_active = GaugeWrapper(
+            Gauge(
+                "cortex_watchers_active",
+                "Number of active file watchers",
+                registry=self._registry,
+            )
         )
 
-        logger.info("✅ CortexMetrics initialized")
+        logger.info(
+            "✅ CortexMetrics initialized (prometheus-client backend, "
+            "isolated registry, 28 metrics)"
+        )
 
     def expose(self) -> str:
         """
         Экспортирует все метрики в Prometheus exposition формате.
 
+        Использует generate_latest() из prometheus-client —
+        стандартный способ генерации text format для /metrics эндпоинта.
+
         Returns:
             Строка в формате Prometheus text exposition
         """
-        # Обновляем uptime
-        self.uptime_seconds.set_sync(time.time() - self._start_time)
+        # Обновляем uptime перед экспортом
+        self.uptime_seconds.set(time.time() - self._start_time)
 
-        # Собираем все метрики
-        all_metrics = [
-            self.events_total,
-            self.event_processing_time,
-            self.eventbus_queue_size,
-            self.eventbus_subscribers,
-            self.event_handler_errors,
-            self.decisions_total,
-            self.decision_confidence,
-            self.agents_active,
-            self.llm_requests_total,
-            self.llm_request_duration,
-            self.llm_tokens_used,
-            self.llm_available,
-            self.api_requests_total,
-            self.api_request_duration,
-            self.operation_mode,
-            self.sequence_running,
-            self.flat_mode_active,
-            self.safety_status,
-            self.active_ws_connections,
-            self.uptime_seconds,
-            self.triggers_fired,
-            self.trigger_duration,
-            self.variables_set,
-            self.rag_searches_total,
-            self.rag_search_duration,
-            self.rag_documents_total,
-            self.files_processed,
-            self.watchers_active,
-        ]
-
-        output_lines = [
-            "# N.I.N.A. AI Cortex Prometheus Metrics",
-            f"# Generated at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}",
-            "",
-        ]
-
-        for metric in all_metrics:
-            output_lines.append(metric.expose())
-            output_lines.append("")
-
-        return "\n".join(output_lines)
+        # Генерируем стандартный Prometheus output
+        output_bytes = generate_latest(self._registry)
+        return output_bytes.decode("utf-8")
 
     def get_summary(self) -> Dict[str, Any]:
         """
         Возвращает сводку метрик в JSON-формате (для API).
 
-        Полезно для dashboard и health check endpoints.
+        Полезно для:
+        - dashboard и health check endpoints
+        - Быстрого просмотра состояния системы
+        - WebSocket broadcast на Frontend
+
+        Читает значения напрямую из registry через get_sample_value().
         """
+
+        def get_counter_value(name: str) -> float:
+            """Получает значение counter из registry."""
+            try:
+                return self._registry.get_sample_value(f"{name}_total") or 0.0
+            except Exception:
+                return 0.0
+
         return {
             "uptime_seconds": round(time.time() - self._start_time, 2),
-            "events_total": sum(self.events_total._values.values()),
-            "decisions_total": sum(self.decisions_total._values.values()),
-            "llm_requests_total": sum(self.llm_requests_total._values.values()),
-            "api_requests_total": sum(self.api_requests_total._values.values()),
-            "triggers_fired_total": sum(self.triggers_fired._values.values()),
-            "rag_searches_total": sum(self.rag_searches_total._values.values()),
-            "files_processed_total": sum(self.files_processed._values.values()),
+            "events_total": get_counter_value("cortex_events"),
+            "decisions_total": get_counter_value("cortex_decisions"),
+            "llm_requests_total": get_counter_value("cortex_llm_requests"),
+            "api_requests_total": get_counter_value("cortex_api_requests"),
+            "triggers_fired_total": get_counter_value("cortex_triggers_fired"),
+            "rag_searches_total": get_counter_value("cortex_rag_searches"),
+            "files_processed_total": get_counter_value("cortex_files_processed"),
         }
 
 
 # ============================================================================
 # SINGLETON INSTANCE
 # ============================================================================
-
 cortex_metrics = CortexMetrics()

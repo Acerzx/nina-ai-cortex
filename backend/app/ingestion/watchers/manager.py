@@ -1,6 +1,11 @@
 """
-Watcher Manager — централизованный хаб для управления всеми watchers, pollers и subscribers.
-Устраняет проблему дублирования инициализации и обеспечивает единый lifecycle management.
+Watcher Manager — централизованный хаб для управления всеми watchers, pollers.
+
+ЭТАП 3 (Watchers Cleanup):
+- Удалён AIWeatherWatcher (нестабилен, погода через InfluxDB)
+- Удалён DynamicSequencerWatcher (редактор сам знает о изменениях)
+- Удалён SafetyInterceptor (python_bridge удалён)
+- Единый lifecycle management для всех компонентов
 
 ИСПРАВЛЕНО (audit 5.1): Сохранение ссылок на фоновые задачи для предотвращения
 их отмены сборщиком мусора в Python 3.12+
@@ -10,6 +15,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Set
+
 from app.core.config import settings
 from app.core.events import event_bus
 from app.core.capability_registry import CapabilityRegistry
@@ -26,17 +32,15 @@ from app.ingestion.watchers.dither_guiding_watchers import (
     DitherStatisticsWatcher,
     GuidingAnalyzerWatcher,
 )
-from app.ingestion.watchers.autofocus_analysis_watcher import AutoFocusAnalysisWatcher
+from app.ingestion.watchers.autofocus_analysis_watcher import (
+    AutoFocusAnalysisWatcher,
+)
 from app.ingestion.watchers.night_summary_watcher import NightSummaryWatcher
-from app.ingestion.watchers.ai_weather_watcher import AIWeatherWatcher
-from app.ingestion.watchers.dynamic_sequencer_watcher import DynamicSequencerWatcher
 from app.ingestion.watchers.websocket_client import NinaWebSocketClient
-from app.ingestion.subscribers.influxdb_subscriber import InfluxDBSubscriber
 
 # Shadow Engine & Execution
 from app.shadow_engine.state_tracker import state_tracker
 from app.shadow_engine.sequence_parser import SequenceParser
-from app.execution.safety_interceptor import safety_interceptor
 from app.execution.hal import hal
 
 # Multi-Agent Swarm Foundation
@@ -47,8 +51,12 @@ logger = logging.getLogger("WatcherManager")
 
 class WatcherManager:
     """
-    Централизованный менеджер для всех watchers, pollers и subscribers.
+    Централизованный менеджер для всех watchers и pollers.
     Обеспечивает единый lifecycle management и Dependency Injection.
+
+    ЭТАП 3 (Watchers Cleanup):
+    - Удалены: AIWeatherWatcher, DynamicSequencerWatcher, SafetyInterceptor
+    - Оставлены 9 watchers + 2 pollers + WebSocket client
 
     ИСПРАВЛЕНО (audit 5.1): Добавлен набор _background_tasks для хранения
     ссылок на все фоновые задачи, предотвращая их сбор мусором.
@@ -58,7 +66,6 @@ class WatcherManager:
         self.watchers = []
         self.pollers = []
         self.ws_client = None
-        self.influx = None
         self.registry = None
         self.masters_auditor = None
 
@@ -72,12 +79,10 @@ class WatcherManager:
         2. Capability Registry (DI)
         3. Foundation (ObservatoryState, HAL)
         4. Shadow Engine (Sequence Parser)
-        5. File Watchers
-        6. Pollers (Prometheus, LogTailer)
-        7. Subscribers (InfluxDB)
-        8. Masters Library Audit (background)
-        9. WebSocket Client (to N.I.N.A.)
-        10. Safety Interceptor
+        5. File Watchers (9 штук)
+        6. Pollers (InfluxDB Provider, Prometheus, LogTailer)
+        7. Masters Library Audit (background)
+        8. WebSocket Client (to N.I.N.A.)
         """
         logger.info("🚀 Initializing N.I.N.A. AI Cortex...")
 
@@ -100,6 +105,7 @@ class WatcherManager:
         state_tracker.set_shadow_graph(graph)
 
         # 5. File Watchers (Передаем registry через DI)
+        # ЭТАП 3: Убраны AIWeatherWatcher и DynamicSequencerWatcher
         logger.info("📂 Starting File Watchers...")
         self.watchers.extend(
             [
@@ -111,37 +117,35 @@ class WatcherManager:
                 GuidingAnalyzerWatcher(self.registry),
                 AutoFocusAnalysisWatcher(self.registry),
                 NightSummaryWatcher(self.registry),
-                AIWeatherWatcher(self.registry),
-                DynamicSequencerWatcher(self.registry),
             ]
         )
         for watcher in self.watchers:
             watcher.start()
         logger.info(f"   ✅ {len(self.watchers)} File Watchers started")
 
-        # 6. Pollers (Prometheus, LogTailer, InfluxDB)
+        # 6. Pollers (InfluxDB Provider, Prometheus, LogTailer)
         logger.info("🔄 Starting Pollers...")
-        # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB ===
-        from app.ingestion.providers.influxdb_metrics import influxdb_metrics_provider
+
+        # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB Metrics Provider ===
+        from app.ingestion.providers.influxdb_metrics import (
+            influxdb_metrics_provider,
+        )
 
         await influxdb_metrics_provider.start()
 
-        # === РЕЗЕРВНЫЙ ИСТОЧНИК: Prometheus ===
+        # === РЕЗЕРВНЫЙ ИСТОЧНИК: Prometheus Scraper ===
         prometheus = PrometheusScraper()
         await prometheus.start()
         self.pollers.append(prometheus)
 
+        # === LogTailer ===
         log_tailer = LogTailer()
         await log_tailer.start()
         self.pollers.append(log_tailer)
+
         logger.info(f"   ✅ {len(self.pollers)} Pollers started")
 
-        # 7. Subscribers (InfluxDB)
-        logger.info("📊 Starting InfluxDB Subscriber...")
-        self.influx = InfluxDBSubscriber()
-        await self.influx.start()
-
-        # 8. Masters Library Audit (background task)
+        # 7. Masters Library Audit (background task)
         logger.info("📚 Starting Masters Library Audit in background...")
         self.masters_auditor = MastersLibraryAuditor()
 
@@ -151,14 +155,10 @@ class WatcherManager:
         scan_task.add_done_callback(self._background_tasks.discard)
         logger.info("   ✅ Masters Library Audit task scheduled")
 
-        # 9. WebSocket Client (к N.I.N.A.)
+        # 8. WebSocket Client (к N.I.N.A.)
         logger.info("📡 Starting WebSocket Client to N.I.N.A....")
         self.ws_client = NinaWebSocketClient(url=settings.network.nina_ws_url)
         await self.ws_client.start()
-
-        # 10. Safety Interceptor
-        logger.info("🛡️ Starting Safety Interceptor...")
-        await safety_interceptor.start()
 
         logger.info("=" * 70)
         logger.info("✅ Cortex fully initialized with Dependency Injection.")
@@ -169,6 +169,7 @@ class WatcherManager:
         Корректно останавливает все компоненты в обратном порядке.
 
         ИСПРАВЛЕНО (audit 5.1): Отменяет все фоновые задачи перед остановкой.
+        ЭТАП 3: Убрана остановка SafetyInterceptor (удалён).
         """
         logger.info("🛑 Stopping all Cortex components...")
 
@@ -180,7 +181,6 @@ class WatcherManager:
             for task in list(self._background_tasks):
                 if not task.done():
                     task.cancel()
-
             # Ждем завершения всех задач
             if self._background_tasks:
                 await asyncio.gather(*self._background_tasks, return_exceptions=True)
@@ -218,19 +218,7 @@ class WatcherManager:
             except Exception as e:
                 logger.error(f"Error stopping WebSocket client: {e}")
 
-        # Останавливаем InfluxDB subscriber
-        if self.influx:
-            try:
-                await self.influx.stop()
-            except Exception as e:
-                logger.error(f"Error stopping InfluxDB subscriber: {e}")
-
-        # Останавливаем Safety Interceptor
-        try:
-            await safety_interceptor.stop()
-        except Exception as e:
-            logger.error(f"Error stopping Safety Interceptor: {e}")
-
         # Останавливаем EventBus
         await event_bus.stop()
+
         logger.info("✅ All Cortex components stopped gracefully.")

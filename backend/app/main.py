@@ -2,6 +2,12 @@
 N.I.N.A. AI Cortex - Main Application Entry Point
 FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
 
+ЭТАП 2 (рефакторинг метрик):
+- Удалён metrics_source_monitor (заменён на встроенную логику в MetricsAggregator)
+- Добавлен endpoint /api/v1/metrics/unified для нового формата UnifiedMetric
+- Добавлен endpoint /api/v1/metrics/sources-status для статуса источников данных
+- InfluxDB = PRIMARY, Prometheus = UNIQUE + FALLBACK (логика в observatory_state.py)
+
 ИСПРАВЛЕНО (v4.2 — критическое):
 - Структура lifespan полностью перестроена
 - Весь startup код ПЕРЕД yield
@@ -20,7 +26,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
-
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -33,7 +38,6 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, FileResponse
 from pydantic import BaseModel
-
 from app.core.config import settings
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
@@ -54,7 +58,6 @@ from app.agents.diagnostician_agent import DiagnosticianAgent
 from app.agents.strategist_agent import StrategistAgent
 from app.agents.auditor_agent import AuditorAgent
 from app.agents.calibrator_agent import CalibratorAgent
-from app.agents.scheduler_agent import SchedulerAgent
 from app.agents.copilot_agent import CopilotAgent
 from app.core.mode_manager import mode_manager
 from app.safety.preflight import preflight_checker
@@ -77,8 +80,6 @@ from app.analytics.decision_analyzer import decision_analyzer
 from app.storage.sessions_metadata import sessions_metadata
 from app.execution.predictive_hal import predictive_hal
 from app.shadow_engine.shadow_visualizer import shadow_visualizer
-from app.core.metrics_source_monitor import metrics_source_monitor
-
 
 # ============================================================================
 # LOGGING SETUP
@@ -95,14 +96,12 @@ logger = logging.getLogger("CortexMain")
 # GLOBAL INSTANCES
 # ============================================================================
 watcher_manager = WatcherManager()
-
 watcher_agent = WatcherAgent()
 guardian_agent = GuardianAgent()
 diagnostician_agent = DiagnosticianAgent()
 strategist_agent = StrategistAgent()
 auditor_agent = AuditorAgent()
 calibrator_agent: Optional[CalibratorAgent] = None
-scheduler_agent = SchedulerAgent()
 copilot_agent = CopilotAgent()
 
 # Хранилище ссылок на обработчики событий (для корректной отписки при shutdown)
@@ -167,6 +166,8 @@ async def lifespan(app: FastAPI):
     - Весь STARTUP код ПЕРЕД yield
     - yield — приложение работает
     - Весь SHUTDOWN код ПОСЛЕ yield
+
+    ЭТАП 2: Убран metrics_source_monitor (логика перенесена в MetricsAggregator)
     """
     global calibrator_agent
 
@@ -179,6 +180,7 @@ async def lifespan(app: FastAPI):
     # ███  STARTUP PHASE — ВСЁ ДО yield                                ███
     # ████████████████████████████████████████████████████████████████████
     # ====================================================================
+
     try:
         # 1. Запуск Ingestion, Shadow Engine и Execution
         await watcher_manager.start()
@@ -212,7 +214,6 @@ async def lifespan(app: FastAPI):
         await strategist_agent.initialize()
         await auditor_agent.initialize()
         await calibrator_agent.initialize()
-        await scheduler_agent.initialize()
         await copilot_agent.initialize()
 
         # 8. Регистрация в Orchestrator
@@ -222,7 +223,6 @@ async def lifespan(app: FastAPI):
         orchestrator.register_agent("Strategist", strategist_agent)
         orchestrator.register_agent("Auditor", auditor_agent)
         orchestrator.register_agent("Calibrator", calibrator_agent)
-        orchestrator.register_agent("Scheduler", scheduler_agent)
         orchestrator.register_agent("Copilot", copilot_agent)
 
         # 9. Запуск Orchestrator
@@ -230,7 +230,6 @@ async def lifespan(app: FastAPI):
 
         # 10. Подписка на события для сбора метрик
         logger.info("📊 Subscribing to EventBus for metrics collection...")
-
         general_events = [
             "SEQUENCE_STARTED",
             "SEQUENCE_STOPPED",
@@ -261,7 +260,6 @@ async def lifespan(app: FastAPI):
         _event_handlers["DECISION_MADE_detail"] = _on_decision_made
         _event_handlers["TRIGGER_FIRED_detail"] = _on_trigger_fired
         _event_handlers["LLM_RESPONSE_detail"] = _on_llm_response
-
         event_bus.subscribe("DECISION_MADE", _on_decision_made)
         event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
         event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
@@ -381,36 +379,15 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ Predictive HAL disabled (feature flag off)")
 
-        # 11.5. Metrics Source Monitor (feature flag)
-        metrics_auto_enabled = False
-        try:
-            ff = getattr(settings, "feature_flags", None)
-            if ff:
-                metrics_ff = getattr(ff, "metrics", None)
-                if metrics_ff:
-                    metrics_auto_enabled = getattr(
-                        metrics_ff, "auto_source_selection", True
-                    )
-        except Exception:
-            pass
+        # ЭТАП 2: metrics_source_monitor УДАЛЁН
+        # Логика переключения источников теперь встроена в MetricsAggregator
+        # (observatory_state.py) — InfluxDB = PRIMARY, Prometheus = UNIQUE + FALLBACK
+        logger.info(
+            "   ℹ️ Metrics source monitoring: built into MetricsAggregator "
+            "(InfluxDB=PRIMARY, Prometheus=UNIQUE+FALLBACK)"
+        )
 
-        if metrics_auto_enabled:
-
-            async def metrics_source_check_task():
-                await metrics_source_monitor.check_and_switch()
-
-            background_tasks.register(
-                name="metrics_source_monitor",
-                coro=metrics_source_check_task,
-                interval_seconds=60.0,
-                enabled=True,
-                description="Monitor metrics sources quality and auto-switch",
-            )
-            logger.info("   ✅ Metrics Source Monitor registered (every 60s)")
-        else:
-            logger.info("   ⏭️ Metrics Source Monitor disabled (feature flag off)")
-
-        # 11.6. RAG cleanup (weekly)
+        # 11.5. RAG cleanup (weekly)
         async def rag_cleanup_task():
             try:
                 deleted = await rag_engine.cleanup_old_documents(max_age_days=365)
@@ -449,6 +426,7 @@ async def lifespan(app: FastAPI):
     # ███  ПРИЛОЖЕНИЕ РАБОТАЕТ                                         ███
     # ████████████████████████████████████████████████████████████████████
     # ====================================================================
+
     yield
 
     # ====================================================================
@@ -456,6 +434,7 @@ async def lifespan(app: FastAPI):
     # ███  SHUTDOWN PHASE — ВСЁ ПОСЛЕ yield (в обратном порядке)       ███
     # ████████████████████████████████████████████████████████████████████
     # ====================================================================
+
     logger.info("=" * 70)
     logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
@@ -481,7 +460,6 @@ async def lifespan(app: FastAPI):
         # 3. Останавливаем агентов
         await orchestrator.stop()
         await copilot_agent.shutdown()
-        await scheduler_agent.shutdown()
         if calibrator_agent:
             await calibrator_agent.shutdown()
         await auditor_agent.shutdown()
@@ -557,13 +535,16 @@ async def metrics_middleware(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
+
     method = request.method
     path = request.url.path
     status_code = response.status_code
+
     cortex_metrics.api_requests_total.inc_sync(
         method=method, path=path, status_code=str(status_code)
     )
     cortex_metrics.api_request_duration.observe_sync(duration, method=method, path=path)
+
     return response
 
 
@@ -596,6 +577,7 @@ async def health_check(request: Request):
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
     metrics_summary = cortex_metrics.get_summary()
+
     return {
         "status": "healthy",
         "version": "4.2.0",
@@ -682,7 +664,9 @@ async def websocket_endpoint(
     """WebSocket endpoint для real-time broadcasting."""
     if not client_id:
         client_id = str(uuid.uuid4())[:8]
+
     conn = await ws_broadcast_manager.connect(websocket, client_id)
+
     try:
         while True:
             try:
@@ -802,7 +786,6 @@ async def get_agents_status(request: Request):
             "Strategist": strategist_agent.get_stats(),
             "Auditor": auditor_agent.get_stats(),
             "Calibrator": (calibrator_agent.get_stats() if calibrator_agent else {}),
-            "Scheduler": scheduler_agent.get_stats(),
             "Copilot": copilot_agent.get_stats(),
         },
     }
@@ -856,6 +839,7 @@ async def test_llm_generation(
     """Тестовый эндпоинт для проверки генерации LLM."""
     if not llm_client.is_available():
         raise HTTPException(status_code=503, detail="LLM (Ollama) is not available")
+
     response = await llm_client.generate(
         agent_name=agent, prompt=prompt, max_tokens=500
     )
@@ -863,19 +847,25 @@ async def test_llm_generation(
 
 
 # ============================================================================
-# METRICS ENDPOINTS
+# METRICS ENDPOINTS (ЭТАП 2: обновлены для поддержки UnifiedMetric)
 # ============================================================================
 @app.get("/api/v1/metrics", tags=["Metrics"])
 async def get_metrics(request: Request):
-    """Возвращает текущие метрики обсерватории."""
+    """
+    Возвращает текущие метрики обсерватории.
+
+    ЭТАП 2: Добавлена поддержка unified формата через query параметр.
+    """
     metrics = observatory_state.current_metrics
     weather = observatory_state.weather
     astronomy = observatory_state.astronomy
+
     trends = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec", "temperature"]:
         trend = observatory_state.get_trend(metric_name, window=10)
         if trend is not None:
             trends[metric_name] = trend
+
     history_stats = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec"]:
         history_list = getattr(observatory_state.history, metric_name, [])
@@ -886,6 +876,7 @@ async def get_metrics(request: Request):
                 "max": max(history_list),
                 "avg": sum(history_list) / len(history_list),
             }
+
     return {
         "timestamp": datetime.now().isoformat(),
         "metrics": metrics,
@@ -902,6 +893,36 @@ async def get_metrics(request: Request):
     }
 
 
+@app.get("/api/v1/metrics/unified", tags=["Metrics"])
+async def get_unified_metrics(request: Request):
+    """
+    ЭТАП 2 (НОВЫЙ): Возвращает все метрики в UnifiedMetric формате.
+
+    Каждая метрика содержит:
+    - name, value, timestamp
+    - source (influxdb, prometheus, websocket, file_watcher)
+    - priority (primary, unique, fallback, events, enrichment)
+    - unit, quality, labels
+    - age_seconds, is_stale
+    """
+    return observatory_state.get_unified_metrics()
+
+
+@app.get("/api/v1/metrics/sources-status", tags=["Metrics"])
+async def get_metrics_sources_status(request: Request):
+    """
+    ЭТАП 2 (НОВЫЙ): Возвращает статус всех источников данных.
+
+    Показывает:
+    - InfluxDB: PRIMARY источник, last_update, is_stale
+    - Prometheus: UNIQUE + FALLBACK, fallback_active если InfluxDB stale
+    - WebSocket: EVENTS источник
+    - File Watchers: ENRICHMENT источник
+    - Список уникальных Prometheus-метрик
+    """
+    return observatory_state.get_data_sources_status()
+
+
 @app.get("/api/v1/metrics/history", tags=["Metrics"])
 async def get_metrics_history(
     request: Request,
@@ -910,6 +931,7 @@ async def get_metrics_history(
 ):
     """Возвращает историю конкретной метрики."""
     history_list = getattr(observatory_state.history, metric, None)
+
     if history_list is None:
         raise HTTPException(
             status_code=404,
@@ -919,14 +941,17 @@ async def get_metrics_history(
                 f"wind_speed, humidity"
             ),
         )
+
     limited_history = (
         history_list[-limit:] if len(history_list) > limit else history_list
     )
+
     timestamps = []
     now = datetime.now()
     for i in range(len(limited_history)):
         timestamp = now - timedelta(seconds=(len(limited_history) - i) * 3)
         timestamps.append(timestamp.isoformat())
+
     return {
         "metric": metric,
         "count": len(limited_history),
@@ -951,6 +976,7 @@ async def fire_trigger(request: Request, body: TriggerRequest):
     """Ручной вызов триггера через API."""
     logger.info(f"API Request: Fire trigger '{body.trigger_name}'")
     success = await trigger_emulator.fire_trigger(body.trigger_name, body.reason)
+
     if success:
         observatory_state.log_ai_action(
             "API",
@@ -974,6 +1000,7 @@ async def set_variable(request: Request, body: VariableRequest):
     """Изменение глобальной переменной Sequencer+."""
     logger.info(f"API Request: Set variable '{body.name}' = {body.value}")
     success = await global_var_injector.set_variable(body.name, body.value, body.reason)
+
     if success:
         observatory_state.log_ai_action(
             "API",
@@ -1041,6 +1068,7 @@ async def get_discovered_plugins(request: Request):
         raise HTTPException(
             status_code=503, detail="Capability Registry not initialized"
         )
+
     plugins_summary = {}
     for guid, plugin_settings in registry._registry.items():
         plugins_summary[guid] = {
@@ -1050,6 +1078,7 @@ async def get_discovered_plugins(request: Request):
                 for v in plugin_settings.values()
             ),
         }
+
     return {
         "total_plugins": len(plugins_summary),
         "plugins": plugins_summary,
@@ -1063,6 +1092,7 @@ async def get_masters_catalog(request: Request):
         raise HTTPException(
             status_code=503, detail="Masters Auditor not initialized yet"
         )
+
     return {
         "summary": (watcher_manager.masters_auditor.get_summary_by_category()),
         "stats": watcher_manager.masters_auditor.get_stats(),
@@ -1085,6 +1115,7 @@ async def find_matching_master(
         raise HTTPException(
             status_code=503, detail="Masters Auditor not initialized yet"
         )
+
     master = watcher_manager.masters_auditor.find_matching_master(
         image_type=image_type,
         temperature=temperature,
@@ -1094,11 +1125,13 @@ async def find_matching_master(
         filter_name=filter_name,
         temp_tolerance=temp_tolerance,
     )
+
     if not master:
         raise HTTPException(
             status_code=404,
             detail=(f"No matching {image_type} master found for the given parameters"),
         )
+
     return master
 
 
@@ -1192,6 +1225,7 @@ async def get_audit_archives(request: Request):
 async def download_audit_archive(request: Request, filename: str):
     """Скачивает архив Decision Audit Trail."""
     archive_path = Path(decision_audit.config.archive_path) / filename
+
     if not archive_path.exists():
         raise HTTPException(
             status_code=404,
@@ -1200,10 +1234,12 @@ async def download_audit_archive(request: Request, filename: str):
                 f"Use GET /api/v1/audit/archives to see available."
             ),
         )
+
     try:
         archive_path.relative_to(decision_audit.config.archive_path)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
+
     return FileResponse(
         path=str(archive_path),
         filename=filename,
@@ -1262,11 +1298,13 @@ async def inject_anomaly(
         "guiding_lost",
         "safety_unsafe",
     ]
+
     if anomaly_type not in valid_types:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid anomaly type. Valid types: {valid_types}",
         )
+
     await fake_nina.inject_anomaly(anomaly_type)
     return {
         "status": "success",
@@ -1298,6 +1336,7 @@ async def reset_agent_cooldowns(request: Request):
     watcher_agent._recent_anomalies.clear()
     if calibrator_agent:
         calibrator_agent._recent_alerts.clear()
+
     return {
         "status": "success",
         "message": "All agent cooldowns reset",
@@ -1319,6 +1358,7 @@ async def list_available_triggers(request: Request):
 async def get_trigger_info(request: Request, trigger_name: str):
     """Возвращает информацию о конкретном триггере."""
     triggers = trigger_emulator.list_available_triggers()
+
     if trigger_name not in triggers:
         raise HTTPException(
             status_code=404,
@@ -1327,6 +1367,7 @@ async def get_trigger_info(request: Request, trigger_name: str):
                 f"Available: {', '.join(sorted(triggers.keys()))}"
             ),
         )
+
     return triggers[trigger_name]
 
 
@@ -1369,6 +1410,7 @@ async def list_active_workflows(request: Request):
     """Возвращает список активных LangGraph workflows."""
     active_ids = hybrid_orchestrator.list_active_workflows()
     workflows = []
+
     for wf_id in active_ids:
         state = hybrid_orchestrator.get_workflow_status(wf_id)
         if state:
@@ -1384,6 +1426,7 @@ async def list_active_workflows(request: Request):
                     "errors_count": len(state.get("errors", [])),
                 }
             )
+
     return {
         "active_count": len(active_ids),
         "workflows": workflows,
@@ -1394,6 +1437,7 @@ async def list_active_workflows(request: Request):
 async def get_workflow_status(request: Request, workflow_id: str):
     """Возвращает детальный статус LangGraph workflow."""
     state = hybrid_orchestrator.get_workflow_status(workflow_id)
+
     if not state:
         raise HTTPException(
             status_code=404,
@@ -1402,6 +1446,7 @@ async def get_workflow_status(request: Request, workflow_id: str):
                 f"Use GET /api/v1/langgraph/workflows to see active."
             ),
         )
+
     result = {
         "workflow_id": state.get("workflow_id"),
         "type": state.get("workflow_type"),
@@ -1417,6 +1462,7 @@ async def get_workflow_status(request: Request, workflow_id: str):
         "max_retries": state.get("max_retries", 3),
         "errors": state.get("errors", []),
     }
+
     wf_type = state.get("workflow_type")
     if wf_type == WorkflowType.DIAGNOSTIC.value:
         result["diagnostic_fields"] = {
@@ -1434,6 +1480,7 @@ async def get_workflow_status(request: Request, workflow_id: str):
             "current_conditions": state.get("current_conditions", {}),
             "adaptation_actions": state.get("adaptation_actions", []),
         }
+
     return result
 
 
@@ -1458,6 +1505,7 @@ async def start_langgraph_workflow(
                 f"Invalid workflow type: '{workflow_type}'. Valid types: {valid_types}"
             ),
         )
+
     try:
         workflow_id = await hybrid_orchestrator.start_workflow(
             workflow_type=wf_type,
@@ -1472,12 +1520,14 @@ async def start_langgraph_workflow(
             },
             max_retries=max_retries,
         )
+
         observatory_state.log_ai_action(
             agent="LangGraphOrchestrator",
             action=f"Start Workflow: {workflow_type}",
             reason=f"Manual trigger: {trigger_event}",
             result=f"Workflow {workflow_id} started",
         )
+
         return {
             "status": "started",
             "workflow_id": workflow_id,
@@ -1486,6 +1536,7 @@ async def start_langgraph_workflow(
             "status_url": f"/api/v1/langgraph/workflow/{workflow_id}",
             "message": (f"Workflow '{workflow_id}' started successfully."),
         }
+
     except Exception as e:
         logger.error(f"Failed to start workflow: {e}", exc_info=True)
         raise HTTPException(
@@ -1498,11 +1549,13 @@ async def start_langgraph_workflow(
 async def cancel_langgraph_workflow(request: Request, workflow_id: str):
     """Отменяет активный LangGraph workflow."""
     state = hybrid_orchestrator.get_workflow_status(workflow_id)
+
     if not state:
         raise HTTPException(
             status_code=404,
             detail=f"Workflow '{workflow_id}' not found.",
         )
+
     current_status = state.get("status")
     if current_status in (
         WorkflowStatus.COMPLETED.value,
@@ -1515,15 +1568,18 @@ async def cancel_langgraph_workflow(request: Request, workflow_id: str):
                 f"with status '{current_status}'."
             ),
         )
+
     state["status"] = "cancelled"
     state["updated_at"] = datetime.now().isoformat()
     state["final_outcome"] = "cancelled_by_user"
+
     observatory_state.log_ai_action(
         agent="LangGraphOrchestrator",
         action=f"Cancel Workflow: {workflow_id}",
         reason="Manual cancellation via API",
         result="Workflow cancelled",
     )
+
     return {
         "status": "cancelled",
         "workflow_id": workflow_id,
@@ -1535,13 +1591,16 @@ async def cancel_langgraph_workflow(request: Request, workflow_id: str):
 async def get_langgraph_stats(request: Request):
     """Статистика LangGraph оркестратора."""
     active_ids = hybrid_orchestrator.list_active_workflows()
+
     status_counts: Dict[str, int] = {}
     type_counts: Dict[str, int] = {}
+
     for wf_id, state in hybrid_orchestrator.active_workflows.items():
         status = state.get("status", "unknown")
         wf_type = state.get("workflow_type", "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
         type_counts[wf_type] = type_counts.get(wf_type, 0) + 1
+
     return {
         "total_workflows": len(hybrid_orchestrator.active_workflows),
         "active_workflows": len(active_ids),
@@ -1575,6 +1634,7 @@ async def toggle_background_task(
         success = background_tasks.enable(task_name)
     else:
         success = background_tasks.disable(task_name)
+
     if not success:
         raise HTTPException(
             status_code=404,
@@ -1583,6 +1643,7 @@ async def toggle_background_task(
                 f"Available: {list(background_tasks._tasks.keys())}"
             ),
         )
+
     return {
         "status": "success",
         "task": task_name,
@@ -1604,6 +1665,7 @@ async def force_rag_update(request: Request):
     """Принудительное обновление RAG."""
     logger.info("API Request: Force RAG update")
     result = await rag_updater.force_update()
+
     observatory_state.log_ai_action(
         agent="API",
         action="Force RAG Update",
@@ -1613,6 +1675,7 @@ async def force_rag_update(request: Request):
             f"Docs: {result.get('docs_indexed', 0)}"
         ),
     )
+
     return result
 
 
@@ -1742,11 +1805,13 @@ async def export_session(request: Request, session_id: str):
     """Экспорт кадров сессии в CSV."""
     output_path = Path(f"./data/exports/{session_id}_frames.csv")
     success = await sessions_metadata.export_session_csv(session_id, output_path)
+
     if not success:
         raise HTTPException(
             status_code=404,
             detail=f"No frames found for session {session_id}",
         )
+
     return {
         "status": "success",
         "session_id": session_id,
@@ -1798,6 +1863,7 @@ async def get_shadow_mermaid(
         show_triggers=show_triggers,
         show_conditions=show_conditions,
     )
+
     return {
         "format": "mermaid",
         "code": mermaid_code,
@@ -1820,44 +1886,3 @@ async def get_shadow_html_report(request: Request):
 async def get_shadow_visualizer_stats(request: Request):
     """Статистика Shadow Visualizer."""
     return shadow_visualizer.get_stats()
-
-
-# ============================================================================
-# METRICS SOURCE MONITOR ENDPOINTS
-# ============================================================================
-@app.get("/api/v1/metrics/sources", tags=["Metrics"])
-async def get_metrics_sources_status(request: Request):
-    """Статус источников метрик."""
-    return metrics_source_monitor.get_stats()
-
-
-@app.post("/api/v1/metrics/sources/override", tags=["Metrics"])
-async def set_metrics_source_override(
-    request: Request,
-    source: str = Query(..., description="influxdb или prometheus"),
-    reason: str = Query("manual"),
-):
-    """Ручной override источника метрик."""
-    if source not in ["influxdb", "prometheus"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid source: {source}. Valid: influxdb, prometheus",
-        )
-    metrics_source_monitor.set_manual_override(source, reason)
-    return {
-        "status": "success",
-        "active_source": source,
-        "manual_override": True,
-        "reason": reason,
-    }
-
-
-@app.delete("/api/v1/metrics/sources/override", tags=["Metrics"])
-async def clear_metrics_source_override(request: Request):
-    """Снимает ручной override."""
-    metrics_source_monitor.clear_manual_override()
-    return {
-        "status": "success",
-        "active_source": metrics_source_monitor.get_active_source(),
-        "manual_override": False,
-    }

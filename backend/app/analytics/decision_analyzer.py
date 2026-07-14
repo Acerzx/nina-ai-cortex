@@ -140,7 +140,6 @@ class DecisionAnalyzer:
         "Strategist",
         "Auditor",
         "Calibrator",
-        "Scheduler",
         "Copilot",
         "Orchestrator",
         "HybridLangGraphOrchestrator",

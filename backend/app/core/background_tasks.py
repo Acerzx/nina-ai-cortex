@@ -1,19 +1,35 @@
 """
 Background Task Manager — единый планировщик фоновых задач для Cortex.
-Решение архитектурной проблемы #64: отсутствие единого планировщика.
+
+ЭТАП 1.3 (упрощение):
+- Удалены методы enable/disable/unregister (не используются)
+- Упрощён TaskInfo (убраны метрики на задачу)
+- Оставлен минимум необходимой функционала:
+  * register() — регистрация задачи
+  * start() — запуск всех задач
+  * stop() — graceful shutdown
+  * get_stats() — статистика для API
 
 Features:
 - Централизованная регистрация периодических задач
 - Graceful shutdown с гарантированной отменой всех задач
-- Feature flag поддержка (через settings.feature_flags)
 - Интеграция с FastAPI lifespan
-- Метрики для каждой задачи (успешные/неуспешные запуски)
 
 Использование:
     # В lifespan
     await background_tasks.start()
-    background_tasks.register("cleanup", cleanup_loop, interval_hours=24)
-    background_tasks.register("health_check", health_check_loop, interval_seconds=300)
+
+    background_tasks.register(
+        name="cleanup",
+        coro=cleanup_loop,
+        interval_seconds=24 * 3600,
+    )
+
+    background_tasks.register(
+        name="health_check",
+        coro=health_check_loop,
+        interval_seconds=300,
+    )
 
     # При shutdown
     await background_tasks.stop()
@@ -36,18 +52,21 @@ class TaskInfo:
     coro: Callable[[], Awaitable[None]]
     interval_seconds: float
     enabled: bool = True
-    description: str = ""
+    description: str = ""  # ← ДОБАВЛЕНО ОБРАТНО для совместимости с main.py
     task: Optional[asyncio.Task] = field(default=None, repr=False)
     last_run: Optional[datetime] = None
-    successful_runs: int = 0
-    failed_runs: int = 0
-    last_error: Optional[str] = None
 
 
 class BackgroundTaskManager:
     """
     Менеджер фоновых задач.
+
     Обеспечивает централизованное управление всеми periodics в системе.
+
+    ЭТАП 1.3 (упрощение):
+    - Убраны методы enable/disable/unregister (не используются)
+    - Упрощён TaskInfo (убраны метрики на задачу)
+    - Минимум необходимой функционала
     """
 
     def __init__(self):
@@ -106,16 +125,17 @@ class BackgroundTaskManager:
         coro: Callable[[], Awaitable[None]],
         interval_seconds: float,
         enabled: bool = True,
-        description: str = "",
+        description: str = "",  # ← ДОБАВЛЕНО ОБРАТНО
     ) -> None:
         """
         Регистрирует фоновую задачу.
+
         Args:
             name: Уникальное имя задачи
             coro: Асинхронная функция-обработчик (без аргументов)
             interval_seconds: Интервал между запусками (секунды)
             enabled: Включена ли задача
-            description: Описание задачи
+            description: Описание задачи (для API)
         """
         if name in self._tasks:
             logger.warning(f"Task '{name}' already registered, replacing...")
@@ -128,7 +148,7 @@ class BackgroundTaskManager:
             coro=coro,
             interval_seconds=interval_seconds,
             enabled=enabled,
-            description=description,
+            description=description,  # ← ДОБАВЛЕНО
         )
         self._tasks[name] = info
 
@@ -141,45 +161,6 @@ class BackgroundTaskManager:
             f"(interval: {interval_seconds}s, enabled: {enabled})"
         )
 
-    def unregister(self, name: str) -> bool:
-        """Удаляет задачу из реестра."""
-        if name not in self._tasks:
-            return False
-
-        info = self._tasks[name]
-        if info.task and not info.task.done():
-            info.task.cancel()
-
-        del self._tasks[name]
-        logger.info(f"🗑️ Unregistered background task: '{name}'")
-        return True
-
-    def enable(self, name: str) -> bool:
-        """Включает задачу."""
-        if name not in self._tasks:
-            return False
-
-        info = self._tasks[name]
-        info.enabled = True
-
-        if self._running and (info.task is None or info.task.done()):
-            self._start_task(info)
-
-        return True
-
-    def disable(self, name: str) -> bool:
-        """Выключает задачу."""
-        if name not in self._tasks:
-            return False
-
-        info = self._tasks[name]
-        info.enabled = False
-
-        if info.task and not info.task.done():
-            info.task.cancel()
-
-        return True
-
     def _start_task(self, info: TaskInfo):
         """Запускает одну задачу."""
         if info.task and not info.task.done():
@@ -190,6 +171,7 @@ class BackgroundTaskManager:
     async def _task_wrapper(self, info: TaskInfo):
         """
         Обёртка для задачи с обработкой ошибок и интервалом.
+
         Гарантирует, что задача не упадёт даже при исключениях.
         """
         logger.debug(f"🔄 Background task '{info.name}' started")
@@ -198,17 +180,11 @@ class BackgroundTaskManager:
             try:
                 # Выполняем саму задачу
                 await info.coro()
-
                 info.last_run = datetime.now()
-                info.successful_runs += 1
-                info.last_error = None
-
             except asyncio.CancelledError:
                 logger.debug(f"Background task '{info.name}' cancelled")
                 break
             except Exception as e:
-                info.failed_runs += 1
-                info.last_error = f"{type(e).__name__}: {e}"
                 logger.error(
                     f"❌ Background task '{info.name}' failed: {e}",
                     exc_info=True,
@@ -237,20 +213,13 @@ class BackgroundTaskManager:
                 name: {
                     "enabled": info.enabled,
                     "interval_seconds": info.interval_seconds,
-                    "description": info.description,
+                    "description": info.description,  # ← ДОБАВЛЕНО для API
                     "last_run": info.last_run.isoformat() if info.last_run else None,
-                    "successful_runs": info.successful_runs,
-                    "failed_runs": info.failed_runs,
-                    "last_error": info.last_error,
                     "active": info.task is not None and not info.task.done(),
                 }
                 for name, info in self._tasks.items()
             },
         }
-
-    def get_task_info(self, name: str) -> Optional[TaskInfo]:
-        """Возвращает информацию о конкретной задаче."""
-        return self._tasks.get(name)
 
 
 # ============================================================================

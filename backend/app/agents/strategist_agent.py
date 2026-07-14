@@ -2,6 +2,12 @@
 Strategist Agent — оптимизирует параметры съемки для максимального качества.
 Анализирует LiveStack SNR, Dynamic Sequencer, Diagnostician рекомендации.
 
+ЭТАП 7 (делегирование):
+- Strategist теперь делегирует расчёты в ParameterOptimizer
+- Убрано дублирование формул (SNR ~ sqrt(time))
+- Strategist фокусируется на принятии решений, а не на расчётах
+- Сохранена интеграция с Diagnostician и LiveStack
+
 ИСПРАВЛЕНО (audit 4.2): Убран хардкод интервалов автофокуса.
 - Текущий интервал читается из глобальных переменных Shadow Engine
 - Пороговые значения извлекаются из settings.thresholds
@@ -19,7 +25,7 @@ from app.core.config import settings
 from app.execution.global_var_injector import global_var_injector
 from app.execution.dynamic_editor import dynamic_editor
 from app.shadow_engine.state_tracker import state_tracker
-import math
+from app.ml.parameter_optimizer import parameter_optimizer
 
 logger = logging.getLogger("StrategistAgent")
 
@@ -41,15 +47,16 @@ class StrategistAgent(BaseAgent):
     Агент оптимизации параметров съемки.
 
     Responsibilities:
-    - Анализ SNR из LiveStack и расчет оптимальной экспозиции
-    - Оптимизация параметров через глобальные переменные Sequencer+
-    - Редактирование Dynamic Sequencer проектов
-    - Отключение неоптимальных целей при плохих условиях
+    - Делегирует расчёты в ParameterOptimizer
+    - Принимает решения на основе предложений ML/Heuristic моделей
+    - Применяет оптимизации через глобальные переменные Sequencer+
+    - Редактирует Dynamic Sequencer проекты
+    - Отключает неоптимальные цели при плохих условиях
 
-    ИСПРАВЛЕНО (audit 4.2):
-    - Интервалы автофокуса теперь читаются из Shadow Engine / settings
-    - Все пороговые значения вынесены в settings.thresholds
-    - Предложения учитывают реальную конфигурацию оборудования
+    ЭТАП 7 (делегирование):
+    - Strategist больше не содержит формул расчёта
+    - Все расчёты делегируются в ParameterOptimizer
+    - Strategist фокусируется на принятии решений
 
     Примеры оптимизации:
     - "SNR = 15, target = 20" → "Увеличить экспозицию с 60s до 90s"
@@ -118,9 +125,6 @@ class StrategistAgent(BaseAgent):
         event_bus.subscribe(
             "DIAGNOSTIC_RECOMMENDATION", self._on_diagnostic_recommendation
         )
-        event_bus.subscribe(
-            "DYNAMIC_SEQUENCER_UPDATE", self._on_dynamic_sequencer_update
-        )
 
         logger.info("✅ Strategist Agent initialized with quality targets:")
         for key, value in self.quality_targets.items():
@@ -135,9 +139,6 @@ class StrategistAgent(BaseAgent):
         event_bus.unsubscribe(
             "DIAGNOSTIC_RECOMMENDATION", self._on_diagnostic_recommendation
         )
-        event_bus.unsubscribe(
-            "DYNAMIC_SEQUENCER_UPDATE", self._on_dynamic_sequencer_update
-        )
         await super().shutdown()
 
     async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
@@ -147,7 +148,7 @@ class StrategistAgent(BaseAgent):
         """
         proposals = []
 
-        # 1. Анализ SNR и расчет оптимальной экспозиции
+        # 1. Делегируем анализ SNR и экспозиции в ParameterOptimizer
         snr_proposal = await self._analyze_snr_and_exposure()
         if snr_proposal:
             proposals.append(snr_proposal)
@@ -157,7 +158,7 @@ class StrategistAgent(BaseAgent):
         if target_proposal:
             proposals.append(target_proposal)
 
-        # 3. Анализ интервала автофокуса
+        # 3. Делегируем анализ интервала автофокуса в ParameterOptimizer
         autofocus_proposal = await self._analyze_autofocus_interval()
         if autofocus_proposal:
             proposals.append(autofocus_proposal)
@@ -173,6 +174,7 @@ class StrategistAgent(BaseAgent):
             )
             self.log_decision(decision)
             return decision
+
         return None
 
     async def execute(self, decision: AgentDecision) -> bool:
@@ -180,12 +182,15 @@ class StrategistAgent(BaseAgent):
         if decision.decision_type == "OPTIMIZATION_PROPOSED":
             proposals = decision.outputs.get("proposals", [])
             success_count = 0
+
             for proposal_data in proposals:
                 proposal = OptimizationProposal(**proposal_data)
                 success = await self._apply_optimization(proposal)
                 if success:
                     success_count += 1
+
             return success_count > 0
+
         return False
 
     async def _on_livestack_update(self, data: Dict[str, Any]) -> None:
@@ -210,79 +215,72 @@ class StrategistAgent(BaseAgent):
 
         for action in recommended_actions:
             if "автофокус" in action.lower() or "интервал" in action.lower():
-                # ИСПРАВЛЕНО (audit 4.2): используем реальный текущий интервал
-                # и значение из конфига
+                # Делегируем расчёт в ParameterOptimizer
                 current_interval = self._get_current_autofocus_interval()
-                proposed_interval = self.autofocus_config["interval_frequent"]
 
-                # Если уже частый — используем emergency
-                if current_interval <= self.autofocus_config["interval_frequent"]:
-                    proposed_interval = self.autofocus_config["interval_emergency"]
+                conditions = {
+                    "hfr_trend": observatory_state.get_trend("hfr", window=10),
+                    "current_interval": current_interval,
+                }
 
-                # Только если реально меняем
-                if proposed_interval < current_interval:
+                suggestion = await parameter_optimizer.suggest_autofocus_interval(
+                    conditions
+                )
+
+                if suggestion:
                     proposal = OptimizationProposal(
                         parameter="autofocus_interval",
                         current_value=current_interval,
-                        proposed_value=proposed_interval,
+                        proposed_value=suggestion.suggested_value,
                         expected_improvement=(
-                            "Более частая компенсация температурного дрейфа "
-                            f"(с {current_interval} до {proposed_interval} мин)"
+                            f"Более частая компенсация температурного дрейфа "
+                            f"(с {current_interval} до {suggestion.suggested_value} мин)"
                         ),
-                        confidence=0.85,
-                        rationale=action,
+                        confidence=suggestion.confidence,
+                        rationale=suggestion.rationale,
                         risk_level="LOW",
                     )
                     await self._propose_optimization(proposal)
 
-    async def _on_dynamic_sequencer_update(self, data: Dict[str, Any]) -> None:
-        """Обработка обновления Dynamic Sequencer проекта."""
-        targets = data.get("data", {}).get("Targets", [])
-        logger.debug(f"Dynamic Sequencer updated: {len(targets)} targets")
-
     async def _analyze_snr_and_exposure(self) -> Optional[OptimizationProposal]:
-        """Анализирует SNR и рассчитывает оптимальную экспозицию."""
+        """
+        Делегирует анализ SNR и расчёт экспозиции в ParameterOptimizer.
+        """
         current_snr = observatory_state.current_metrics.get("snr")
+        current_exposure = observatory_state.current_metrics.get("exposure_time", 60.0)
+
         if current_snr is None:
             return None
 
-        target_snr = self.quality_targets["snr_target"]
+        # Делегируем расчёт в ParameterOptimizer
+        conditions = {
+            "current_snr": current_snr,
+            "current_exposure": current_exposure,
+            "target_snr": self.quality_targets["snr_target"],
+        }
 
-        # SNR растет как sqrt(time)
-        # new_snr / old_snr = sqrt(new_time / old_time)
-        # new_time = old_time * (new_snr / old_snr)^2
-        current_exposure = observatory_state.current_metrics.get("exposure_time", 60.0)
+        suggestion = await parameter_optimizer.suggest_exposure(conditions)
 
-        if current_snr < target_snr * 0.8:  # SNR менее 80% от целевого
-            ratio = target_snr / current_snr
-            proposed_exposure = current_exposure * (ratio**2)
+        if suggestion:
+            return OptimizationProposal(
+                parameter="exposure_time",
+                current_value=current_exposure,
+                proposed_value=suggestion.suggested_value,
+                expected_improvement=(
+                    f"SNR увеличится с {current_snr:.1f} до "
+                    f"{self.quality_targets['snr_target']:.1f}"
+                ),
+                confidence=suggestion.confidence,
+                rationale=suggestion.rationale,
+                risk_level="LOW",
+            )
 
-            # Ограничиваем разумными пределами
-            proposed_exposure = max(30.0, min(300.0, proposed_exposure))
-
-            # Проверяем, не слишком ли большое изменение
-            if abs(proposed_exposure - current_exposure) / current_exposure > 0.1:
-                return OptimizationProposal(
-                    parameter="exposure_time",
-                    current_value=current_exposure,
-                    proposed_value=proposed_exposure,
-                    expected_improvement=(
-                        f"SNR увеличится с {current_snr:.1f} до {target_snr:.1f}"
-                    ),
-                    confidence=0.90,
-                    rationale=(
-                        f"SNR {current_snr:.1f} ниже целевого {target_snr:.1f}. "
-                        f"SNR ~ sqrt(time), поэтому увеличиваем экспозицию."
-                    ),
-                    risk_level="LOW",
-                )
         return None
 
     async def _analyze_target_suitability(self) -> Optional[OptimizationProposal]:
         """Анализирует пригодность текущей цели для текущих условий."""
         wind_speed = observatory_state.weather.get("wind_speed")
         wind_direction = observatory_state.weather.get("wind_direction")
-
         current_target = (
             observatory_state.active_targets[0]
             if observatory_state.active_targets
@@ -318,65 +316,49 @@ class StrategistAgent(BaseAgent):
                         ),
                         risk_level="MEDIUM",
                     )
+
         return None
 
     async def _analyze_autofocus_interval(self) -> Optional[OptimizationProposal]:
         """
-        Анализирует интервал автофокуса на основе тренда HFR.
-
-        ИСПРАВЛЕНО (audit 4.2):
-        - Текущий интервал читается из Shadow Engine (глобальные переменные)
-        - Пороговые значения из settings.thresholds
-        - Предложения учитывают реальную конфигурацию
+        Делегирует анализ интервала автофокуса в ParameterOptimizer.
         """
         # Получаем тренд HFR
         hfr_trend = observatory_state.get_trend("hfr", window=10)
+
         if hfr_trend is None:
             return None
 
-        # Порог деградации из конфига
-        degradation_threshold = self.autofocus_config["hfr_degradation_threshold"]
+        # Делегируем расчёт в ParameterOptimizer
+        current_interval = self._get_current_autofocus_interval()
 
-        # Если HFR быстро растет, нужен более частый автофокус
-        if hfr_trend > degradation_threshold:
-            # ИСПРАВЛЕНО: читаем текущий интервал из Shadow Engine
-            current_interval = self._get_current_autofocus_interval()
+        conditions = {
+            "hfr_trend": hfr_trend,
+            "current_interval": current_interval,
+        }
 
-            # Определяем целевой интервал в зависимости от скорости деградации
-            if hfr_trend > degradation_threshold * 2:
-                # Быстрая деградация — emergency интервал
-                proposed_interval = self.autofocus_config["interval_emergency"]
-            else:
-                # Умеренная деградация — frequent интервал
-                proposed_interval = self.autofocus_config["interval_frequent"]
+        suggestion = await parameter_optimizer.suggest_autofocus_interval(conditions)
 
-            # Предлагаем изменение, только если реально уменьшаем интервал
-            if proposed_interval < current_interval:
-                return OptimizationProposal(
-                    parameter="autofocus_interval",
-                    current_value=current_interval,
-                    proposed_value=proposed_interval,
-                    expected_improvement=(
-                        f"Более быстрая компенсация дрейфа фокуса "
-                        f"(интервал уменьшен с {current_interval} "
-                        f"до {proposed_interval} мин)"
-                    ),
-                    confidence=0.80,
-                    rationale=(
-                        f"HFR растет со скоростью {hfr_trend:.3f} пикселей/кадр "
-                        f"(порог {degradation_threshold}). "
-                        f"Рекомендуется уменьшить интервал автофокуса."
-                    ),
-                    risk_level="LOW",
-                )
+        if suggestion:
+            return OptimizationProposal(
+                parameter="autofocus_interval",
+                current_value=current_interval,
+                proposed_value=suggestion.suggested_value,
+                expected_improvement=(
+                    f"Более быстрая компенсация дрейфа фокуса "
+                    f"(интервал уменьшен с {current_interval} "
+                    f"до {suggestion.suggested_value} мин)"
+                ),
+                confidence=suggestion.confidence,
+                rationale=suggestion.rationale,
+                risk_level="LOW",
+            )
+
         return None
 
     def _get_current_autofocus_interval(self) -> int:
         """
         Читает текущий интервал автофокуса из глобальных переменных Shadow Engine.
-
-        ИСПРАВЛЕНО (audit 4.2): заменяет хардкод `current_interval = 60`.
-
         Returns:
             Текущий интервал в минутах (default: из settings если не найден)
         """
@@ -436,10 +418,8 @@ class StrategistAgent(BaseAgent):
                 success = await global_var_injector.set_variable(
                     "EXPOSURE_TIME", proposal.proposed_value, proposal.rationale
                 )
-            elif proposal.parameter == "autofocus_interval":
-                # ИСПРАВЛЕНО (v4.0 — проблема #21): используем единое имя из конфига
-                # и обновляем только существующие переменные
 
+            elif proposal.parameter == "autofocus_interval":
                 # Читаем имя переменной из конфига (или используем default)
                 var_name = self.autofocus_config.get(
                     "interval_variable_name",
@@ -475,23 +455,25 @@ class StrategistAgent(BaseAgent):
                         )
                         success = success and result
 
-                # Логируем результат
-                if success:
-                    logger.info(
-                        f"✅ Autofocus interval updated successfully "
-                        f"({len(existing_vars)} variables)"
-                    )
-                else:
-                    logger.warning(
-                        f"⚠️ Autofocus interval update partially failed "
-                        f"({len(existing_vars)} variables attempted)"
-                    )
+                    # Логируем результат
+                    if success:
+                        logger.info(
+                            f"✅ Autofocus interval updated successfully "
+                            f"({len(existing_vars)} variables)"
+                        )
+                    else:
+                        logger.warning(
+                            f"⚠️ Autofocus interval update partially failed "
+                            f"({len(existing_vars)} variables attempted)"
+                        )
+
             elif proposal.parameter == "active_target":
                 # Переключение цели через Dynamic Sequencer
                 success = True
                 logger.info(
                     f"Target switch proposed (requires Dynamic Sequencer integration)"
                 )
+
             else:
                 logger.warning(f"Unknown parameter: {proposal.parameter}")
                 success = False
@@ -507,6 +489,7 @@ class StrategistAgent(BaseAgent):
                     }
                 )
                 logger.info(f"✅ Optimization applied successfully")
+
             return success
 
         except Exception as e:
@@ -518,12 +501,14 @@ class StrategistAgent(BaseAgent):
         recent_changes = [
             h for h in self._optimization_history if h["parameter"] == parameter
         ]
+
         if not recent_changes:
             return False
 
         last_change = max(recent_changes, key=lambda h: h["timestamp"])
         last_time = datetime.fromisoformat(last_change["timestamp"])
         elapsed = (datetime.now() - last_time).total_seconds()
+
         return elapsed < self._min_interval_between_changes
 
     async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
@@ -533,7 +518,7 @@ class StrategistAgent(BaseAgent):
         """
         proposals = []
 
-        # 1. Анализ SNR и расчет оптимальной экспозиции
+        # 1. Делегируем анализ SNR в ParameterOptimizer
         snr_proposal = await self._analyze_snr_and_exposure()
         if snr_proposal:
             proposals.append(snr_proposal)
@@ -543,7 +528,7 @@ class StrategistAgent(BaseAgent):
         if target_proposal:
             proposals.append(target_proposal)
 
-        # 3. Анализ интервала автофокуса
+        # 3. Делегируем анализ интервала автофокуса в ParameterOptimizer
         autofocus_proposal = await self._analyze_autofocus_interval()
         if autofocus_proposal:
             proposals.append(autofocus_proposal)
@@ -557,6 +542,7 @@ class StrategistAgent(BaseAgent):
                 rationale=f"Предложено {len(proposals)} оптимизаций",
                 confidence=max(p.confidence for p in proposals),
             )
+
         return None
 
     async def _perform_action(self, decision: AgentDecision) -> bool:
@@ -575,4 +561,5 @@ class StrategistAgent(BaseAgent):
                     success_count += 1
 
             return success_count > 0
+
         return False

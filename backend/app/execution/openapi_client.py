@@ -1,27 +1,23 @@
 """
 OpenAPI Client Generator для N.I.N.A. Advanced API.
-Загружает OpenAPI спецификацию (YAML/JSON) и предоставляет динамический
+Загружает OpenAPI спецификацию (только JSON) и предоставляет динамический
 клиент с типизированными методами и валидацией параметров.
 
-УЛУЧШЕНИЯ (рефакторинг v3):
-- Динамический вызов эндпоинтов по operationId или path
-- Автоматическая валидация параметров по OpenAPI схеме (min/max, enum, required)
-- Кэширование распарсенной спецификации
-- Поиск эндпоинтов по тегам, operationId, паттернам в path
-- Загрузка из локального файла или URL
-- Метод get_nina_api_client() для обратной совместимости
+ЭТАП 7 (упрощение):
+- Удалена поддержка YAML (только JSON)
+- Удалена загрузка из URL (только локальный файл)
+- Удалено кэширование (файл и так на диске)
+- Упрощена динамическая генерация методов
+- Сохранена валидация параметров из OpenAPI схемы
 """
 
 import logging
 import json
-import hashlib
-import yaml
-import httpx
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
+import httpx
 from app.core.config import settings
 
 logger = logging.getLogger("OpenAPIClient")
@@ -75,6 +71,7 @@ class APIParameter:
                     f"Parameter '{self.name}' = {numeric_value} "
                     f"is below minimum {self.min_value}"
                 )
+
             if self.max_value is not None and numeric_value > self.max_value:
                 return False, (
                     f"Parameter '{self.name}' = {numeric_value} "
@@ -152,6 +149,7 @@ class APIEndpoint:
             elif p.location == "query":
                 req = "*" if p.required else "?"
                 params_str.append(f"{p.name}{req}:{p.param_type}")
+
         params_part = ", ".join(params_str) if params_str else ""
         return f"{self.method:6s} {self.path} ({params_part})"
 
@@ -203,38 +201,21 @@ class APIEndpoint:
 
 
 # ============================================================================
-# ЗАГРУЗЧИК OPENAPI СПЕЦИФИКАЦИИ
+# ЗАГРУЗЧИК OPENAPI СПЕЦИФИКАЦИИ (УПРОЩЁННЫЙ)
 # ============================================================================
 
 
 class OpenAPILoader:
-    """Загружает и парсит OpenAPI спецификацию."""
+    """Загружает и парсит OpenAPI спецификацию (только JSON из файла)."""
 
     @staticmethod
     def load_from_file(file_path: Path) -> Dict[str, Any]:
-        """Загружает спецификацию из локального файла (YAML или JSON)."""
+        """Загружает спецификацию из локального JSON файла."""
         if not file_path.exists():
             raise FileNotFoundError(f"OpenAPI spec not found: {file_path}")
 
         with open(file_path, "r", encoding="utf-8") as f:
-            if file_path.suffix in [".yaml", ".yml"]:
-                data = yaml.safe_load(f)
-            else:
-                data = json.load(f)
-
-        return data
-
-    @staticmethod
-    async def load_from_url(url: str, timeout: float = 30.0) -> Dict[str, Any]:
-        """Загружает спецификацию по URL (асинхронно)."""
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-
-            content_type = response.headers.get("content-type", "")
-            if "yaml" in content_type or url.endswith((".yaml", ".yml")):
-                return yaml.safe_load(response.text)
-            return response.json()
+            return json.load(f)
 
 
 # ============================================================================
@@ -341,7 +322,7 @@ class DynamicAPIClient:
     async def _get_client(self) -> httpx.AsyncClient:
         """Возвращает или создаёт HTTP клиент (thread-safe)."""
         async with self._client_lock:
-            # ИСПРАВЛЕНО (v4.0 — проблема #17): Закрываем старый если есть
+            # Закрываем старый если есть
             if self._client is not None and not self._client.is_closed:
                 return self._client
 
@@ -530,13 +511,13 @@ class DynamicAPIClient:
                 error_body = e.response.json()
             except Exception:
                 error_body = e.response.text[:500]
-
             return {
                 "status": "error",
                 "code": e.response.status_code,
                 "message": str(e),
                 "response": error_body,
             }
+
         except httpx.RequestError as e:
             logger.error(f"Request error: {e}")
             return {"status": "error", "message": str(e)}
@@ -643,9 +624,7 @@ async def get_nina_api_client(
                 # Fallback paths
                 possible_paths = [
                     Path("config/nina_api_spec.json"),
-                    Path("config/nina_api_spec.yaml"),
                     Path("../config/nina_api_spec.json"),
-                    Path("../config/nina_api_spec.yaml"),
                 ]
                 for path in possible_paths:
                     if path.exists():
@@ -654,10 +633,7 @@ async def get_nina_api_client(
 
         if spec_path is None or not spec_path.exists():
             raise FileNotFoundError(
-                "OpenAPI spec not found. Please download from:\n"
-                "  https://christian-photo.github.io/github-page/projects/"
-                "ninaAPI/v2/doc/api\n"
-                "and save to config/nina_api_spec.json"
+                "OpenAPI spec not found. Please save to config/nina_api_spec.json"
             )
 
         logger.info(f"📖 Loading N.I.N.A. API spec from: {spec_path}")

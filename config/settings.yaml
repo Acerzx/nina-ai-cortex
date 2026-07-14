@@ -1,12 +1,11 @@
 # ============================================================================
-# N.I.N.A. AI Cortex — Конфигурация (v4.2)
+# N.I.N.A. AI Cortex — Конфигурация (v5.0)
 # ============================================================================
-# v4.2 изменения:
-#   - ВСЕ настраиваемые параметры вынесены в этот файл
-#   - DiskMonitor: только мониторинг, без удаления файлов
-#   - Добавлены секции: predictive_hal, rag, rag_updater, metrics_monitor
-#   - Добавлены секции: python_bridge, global_var_injector, decision_analyzer
-#   - Добавлена секция: shadow_visualizer, embeddings
+# v5.0 изменения (Этап 4 — Pre-flight v2):
+#   - Расширен thresholds.preflight: 20 gates в 6 категориях
+#   - Добавлены: min_altitude, moon_avoidance_angle, dew_risk_threshold
+#   - Добавлены: required_equipment, optional_equipment
+#   - Добавлен focus_position_min/max для FocusPositionGate
 # ============================================================================
 
 # 1. ПУТИ N.I.N.A.
@@ -108,12 +107,87 @@ thresholds:
     temperature_tolerance: 2.0
     alert_cooldown_seconds: 600
 
+  # ================================================================
+  # ПРЕРАБОТАНО v5.0 (Этап 4): 20 gates в 6 категориях
+  # ================================================================
   preflight:
+    # --- ENVIRONMENT (4 gates) ---
+    # WeatherGate
     cloud_cover_max: 80.0
     wind_speed_max: 20.0
     humidity_max: 90.0
-    min_free_disk_space_gb: 50.0
+
+    # FocuserTempGate (proxy для ambient)
+    focuser_temp_min: -30.0
+    focuser_temp_max: 40.0
+
+    # DewRiskGate
+    dew_risk_threshold: 3.0 # °C разница между фокусером и камерой
+
+    # MoonInterferenceGate
+    moon_avoidance_angle: 30.0 # Минимальное угловое расстояние до Луны (°)
+
+    # --- HARDWARE (5 gates) ---
+    # EquipmentConnectionGate
+    required_equipment:
+      - "camera"
+      - "mount"
+      - "focuser"
+      - "filterwheel"
+      - "guider"
+    optional_equipment:
+      - "dome"
+      - "rotator"
+      - "safety_monitor"
+      - "weather"
+      - "switch"
+
+    # CameraTempGate
     camera_cooled_threshold: -10.0
+
+    # FocusPositionGate
+    focus_position_min: 0
+    focus_position_max: 50000
+
+    # --- CALIBRATION (2 gates) ---
+    # CalibrationGate (свежесть мастеров)
+    bias_freshness_days: 90
+    dark_freshness_days: 30
+    flat_freshness_days: 7
+
+    # GuiderCalibrationGate
+    guider_calibration_max_age_hours: 24
+
+    # --- STORAGE (2 gates) ---
+    # DiskSpaceGate
+    min_free_disk_space_gb: 50.0
+
+    # StorageWriteGate (тестовая запись)
+    write_test_enabled: true
+
+    # --- SOFTWARE (4 gates) ---
+    # APIHealthGate
+    api_timeout_seconds: 5.0
+
+    # LLMHealthGate
+    llm_required_for_full_ai: true
+
+    # DatabaseGate
+    database_check_timeout_seconds: 3.0
+
+    # TimeSyncGate (NTP)
+    ntp_max_offset_seconds: 1.0
+    ntp_server: "pool.ntp.org"
+
+    # --- SEQUENCE (3 gates) ---
+    # SequenceValidationGate
+    sequence_min_nodes: 1
+
+    # TargetVisibilityGate
+    min_altitude: 30.0 # Минимальная высота цели над горизонтом (°)
+
+    # ModeGate
+    mode_check_enabled: true
 
   strategist:
     snr_target: 20.0
@@ -134,7 +208,6 @@ thresholds:
     rms_recalibration: 3.0
     temperature_alarm: 5.0
 
-  # ИСПРАВЛЕНО (v4.2): DiskMonitor только мониторит, НЕ удаляет
   storage:
     warning_threshold_gb: 50.0
     critical_threshold_gb: 20.0
@@ -233,7 +306,7 @@ security:
     - secretkey
 
 # ============================================================================
-# НОВОЕ v4.2: DISK MONITOR (только мониторинг, без удаления)
+# DISK MONITOR (только мониторинг, без удаления)
 # ============================================================================
 disk_monitor:
   check_interval_seconds: 3600
@@ -242,7 +315,7 @@ disk_monitor:
   max_recommendations_per_check: 50
 
 # ============================================================================
-# НОВОЕ v4.2: PREDICTIVE HAL CONFIGURATION
+# PREDICTIVE HAL CONFIGURATION
 # ============================================================================
 predictive_hal:
   window_short: 10
@@ -255,7 +328,7 @@ predictive_hal:
   warning_temperature_celsius: -5.0
 
 # ============================================================================
-# НОВОЕ v4.2: RAG ENGINE CONFIGURATION
+# RAG ENGINE CONFIGURATION
 # ============================================================================
 rag:
   chunk_sizes:
@@ -265,7 +338,7 @@ rag:
   embedding_cache_max_size: 10000
 
 # ============================================================================
-# НОВОЕ v4.2: RAG UPDATER CONFIGURATION
+# RAG UPDATER CONFIGURATION
 # ============================================================================
 rag_updater:
   docs_dir: "./docs"
@@ -276,14 +349,14 @@ rag_updater:
   max_docs_per_run: 50
 
 # ============================================================================
-# НОВОЕ v4.2: METRICS SOURCE MONITOR CONFIGURATION
+# METRICS SOURCE MONITOR CONFIGURATION
 # ============================================================================
 metrics_monitor:
   expected_metrics_count: 25
   history_size: 20
 
 # ============================================================================
-# НОВОЕ v4.2: PYTHON BRIDGE (Safety) CONFIGURATION
+# PYTHON BRIDGE (Safety) CONFIGURATION
 # ============================================================================
 python_bridge:
   forbidden_substrings:
@@ -303,7 +376,7 @@ python_bridge:
     - "System.Net.Http"
 
 # ============================================================================
-# НОВОЕ v4.2: GLOBAL VAR INJECTOR (Security) CONFIGURATION
+# GLOBAL VAR INJECTOR (Security) CONFIGURATION
 # ============================================================================
 global_var_injector:
   sensitive_patterns:
@@ -325,7 +398,7 @@ global_var_injector:
     - secretkey
 
 # ============================================================================
-# НОВОЕ v4.2: DECISION ANALYZER CONFIGURATION
+# DECISION ANALYZER CONFIGURATION
 # ============================================================================
 decision_analyzer:
   low_success_rate_threshold: 0.6
@@ -338,13 +411,13 @@ decision_analyzer:
     - Strategist
     - Auditor
     - Calibrator
-    - Scheduler
+
     - Copilot
     - Orchestrator
     - HybridLangGraphOrchestrator
 
 # ============================================================================
-# НОВОЕ v4.2: SHADOW VISUALIZER CONFIGURATION
+# SHADOW VISUALIZER CONFIGURATION
 # ============================================================================
 shadow_visualizer:
   critical_keywords:
@@ -354,7 +427,7 @@ shadow_visualizer:
     - flip
 
 # ============================================================================
-# НОВОЕ v4.2: EMBEDDINGS CONFIGURATION
+# EMBEDDINGS CONFIGURATION
 # ============================================================================
 embeddings:
   model: "nomic-embed-text"

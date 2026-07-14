@@ -519,7 +519,6 @@ class DecisionAnalyzerConfig(BaseModel):
             "Strategist",
             "Auditor",
             "Calibrator",
-            "Scheduler",
             "Copilot",
             "Orchestrator",
             "HybridLangGraphOrchestrator",
