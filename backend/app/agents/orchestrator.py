@@ -353,7 +353,9 @@ class Orchestrator:
     async def _handle_sequence_started(self, data: Dict[str, Any]):
         """Обработка начала секвенсора."""
         logger.info("🚀 Sequence started")
-
+        # УБРАНО (Этап 8): маршрутизация в Scheduler
+        # (Scheduler удалён — N.I.N.A. Dynamic Sequencer сам планирует сессии)
+        # Watcher начинает мониторинг
         # Watcher начинает мониторинг
         await self._route_to_agent("Watcher", "start_monitoring", data)
 

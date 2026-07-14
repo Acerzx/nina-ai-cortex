@@ -563,3 +563,29 @@ class StrategistAgent(BaseAgent):
             return success_count > 0
 
         return False
+
+    # В strategist_agent.py
+    async def _on_snr_update(self, data: Dict[str, Any]) -> None:
+        """Обработка обновления SNR от LiveStack."""
+        snr = data.get("snr")
+        snr_target = data.get("snr_target", self.quality_targets["snr_target"])
+
+        if snr is not None and snr < snr_target * 0.8:
+            # Расчет оптимальной экспозиции
+            current_exposure = observatory_state.current_metrics.get(
+                "exposure_time", 60.0
+            )
+            ratio = snr_target / snr
+            proposed_exposure = current_exposure * (ratio**2)
+            proposed_exposure = max(30.0, min(300.0, proposed_exposure))
+
+            proposal = OptimizationProposal(
+                parameter="exposure_time",
+                current_value=current_exposure,
+                proposed_value=proposed_exposure,
+                expected_improvement=f"SNR увеличится с {snr:.1f} до {snr_target:.1f}",
+                confidence=0.90,
+                rationale=f"SNR {snr:.1f} ниже целевого {snr_target:.1f}",
+                risk_level="LOW",
+            )
+            await self._propose_optimization(proposal)

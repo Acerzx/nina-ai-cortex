@@ -1,11 +1,13 @@
 """
-Watcher Manager — централизованный хаб для управления всеми watchers, pollers.
+Watcher Manager — централизованный хаб для управления всеми watchers и pollers.
 
-ЭТАП 3 (Watchers Cleanup):
-- Удалён AIWeatherWatcher (нестабилен, погода через InfluxDB)
-- Удалён DynamicSequencerWatcher (редактор сам знает о изменениях)
-- Удалён SafetyInterceptor (python_bridge удалён)
-- Единый lifecycle management для всех компонентов
+ЭТАП 8 (финальная синхронизация):
+- Удалены импорты и использование мёртвых модулей:
+  * InfluxDBSubscriber (Этап 1)
+  * AIWeatherWatcher (Этап 3)
+  * DynamicSequencerWatcher (Этап 3)
+  * SafetyInterceptor + PythonBridge (Этап 3)
+- Оставлены 8 watcher'ов + 2 poller'а + WebSocket client
 
 ИСПРАВЛЕНО (audit 5.1): Сохранение ссылок на фоновые задачи для предотвращения
 их отмены сборщиком мусора в Python 3.12+
@@ -20,7 +22,7 @@ from app.core.config import settings
 from app.core.events import event_bus
 from app.core.capability_registry import CapabilityRegistry
 
-# Ingestion Watchers
+# === Ingestion Watchers (8 активных) ===
 from app.ingestion.watchers.session_watcher import SessionWatcher
 from app.ingestion.watchers.hocus_focus_watcher import HocusFocusWatcher
 from app.ingestion.watchers.fits_header_scanner import FITSHeaderScanner
@@ -38,6 +40,10 @@ from app.ingestion.watchers.autofocus_analysis_watcher import (
 from app.ingestion.watchers.night_summary_watcher import NightSummaryWatcher
 from app.ingestion.watchers.websocket_client import NinaWebSocketClient
 
+# === УДАЛЕНО (Этап 3): AIWeatherWatcher, DynamicSequencerWatcher ===
+# === УДАЛЕНО (Этап 1): InfluxDBSubscriber ===
+# === УДАЛЕНО (Этап 3): SafetyInterceptor ===
+
 # Shadow Engine & Execution
 from app.shadow_engine.state_tracker import state_tracker
 from app.shadow_engine.sequence_parser import SequenceParser
@@ -52,14 +58,9 @@ logger = logging.getLogger("WatcherManager")
 class WatcherManager:
     """
     Централизованный менеджер для всех watchers и pollers.
-    Обеспечивает единый lifecycle management и Dependency Injection.
 
-    ЭТАП 3 (Watchers Cleanup):
-    - Удалены: AIWeatherWatcher, DynamicSequencerWatcher, SafetyInterceptor
-    - Оставлены 9 watchers + 2 pollers + WebSocket client
-
-    ИСПРАВЛЕНО (audit 5.1): Добавлен набор _background_tasks для хранения
-    ссылок на все фоновые задачи, предотвращая их сбор мусором.
+    ЭТАП 8: Убраны все мёртвые модули.
+    Оставлены 8 watcher'ов + 2 poller'а + WebSocket client.
     """
 
     def __init__(self):
@@ -79,7 +80,7 @@ class WatcherManager:
         2. Capability Registry (DI)
         3. Foundation (ObservatoryState, HAL)
         4. Shadow Engine (Sequence Parser)
-        5. File Watchers (9 штук)
+        5. File Watchers (8 штук)
         6. Pollers (InfluxDB Provider, Prometheus, LogTailer)
         7. Masters Library Audit (background)
         8. WebSocket Client (to N.I.N.A.)
@@ -104,8 +105,7 @@ class WatcherManager:
         graph = await parser.parse()
         state_tracker.set_shadow_graph(graph)
 
-        # 5. File Watchers (Передаем registry через DI)
-        # ЭТАП 3: Убраны AIWeatherWatcher и DynamicSequencerWatcher
+        # 5. File Watchers (8 активных, без удалённых)
         logger.info("📂 Starting File Watchers...")
         self.watchers.extend(
             [
@@ -117,13 +117,15 @@ class WatcherManager:
                 GuidingAnalyzerWatcher(self.registry),
                 AutoFocusAnalysisWatcher(self.registry),
                 NightSummaryWatcher(self.registry),
+                # УДАЛЕНО (Этап 3): AIWeatherWatcher
+                # УДАЛЕНО (Этап 3): DynamicSequencerWatcher
             ]
         )
         for watcher in self.watchers:
-            watcher.start()
+            await watcher.start()
         logger.info(f"   ✅ {len(self.watchers)} File Watchers started")
 
-        # 6. Pollers (InfluxDB Provider, Prometheus, LogTailer)
+        # 6. Pollers
         logger.info("🔄 Starting Pollers...")
 
         # === ОСНОВНОЙ ИСТОЧНИК: InfluxDB Metrics Provider ===
@@ -145,6 +147,10 @@ class WatcherManager:
 
         logger.info(f"   ✅ {len(self.pollers)} Pollers started")
 
+        # УДАЛЕНО (Этап 1): InfluxDB Subscriber
+        # (on-demand Flux queries не используются,
+        #  InfluxDB Metrics Provider покрывает все потребности)
+
         # 7. Masters Library Audit (background task)
         logger.info("📚 Starting Masters Library Audit in background...")
         self.masters_auditor = MastersLibraryAuditor()
@@ -160,16 +166,19 @@ class WatcherManager:
         self.ws_client = NinaWebSocketClient(url=settings.network.nina_ws_url)
         await self.ws_client.start()
 
+        # УДАЛЕНО (Этап 3): Safety Interceptor
+        # (PythonBridge удалён, Safety Interceptor не нужен)
+
         logger.info("=" * 70)
-        logger.info("✅ Cortex fully initialized with Dependency Injection.")
+        logger.info(
+            "✅ Cortex fully initialized "
+            f"({len(self.watchers)} watchers, {len(self.pollers)} pollers)"
+        )
         logger.info("=" * 70)
 
     async def stop(self):
         """
         Корректно останавливает все компоненты в обратном порядке.
-
-        ИСПРАВЛЕНО (audit 5.1): Отменяет все фоновые задачи перед остановкой.
-        ЭТАП 3: Убрана остановка SafetyInterceptor (удалён).
         """
         logger.info("🛑 Stopping all Cortex components...")
 
@@ -181,7 +190,6 @@ class WatcherManager:
             for task in list(self._background_tasks):
                 if not task.done():
                     task.cancel()
-            # Ждем завершения всех задач
             if self._background_tasks:
                 await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
@@ -217,6 +225,9 @@ class WatcherManager:
                 await self.ws_client.stop()
             except Exception as e:
                 logger.error(f"Error stopping WebSocket client: {e}")
+
+        # УДАЛЕНО (Этап 1): InfluxDB Subscriber stop
+        # УДАЛЕНО (Этап 3): Safety Interceptor stop
 
         # Останавливаем EventBus
         await event_bus.stop()

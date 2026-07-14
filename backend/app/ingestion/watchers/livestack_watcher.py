@@ -1,32 +1,23 @@
 """
-LiveStack Watcher — расширенный мониторинг real-time стекинга.
+LiveStack Watcher - расширенный мониторинг real-time стекинга.
+Мониторит рабочую папку LiveStack (stack_status.json, history.csv).
+Устраняет Упрощение #3.
 
-ЭТАП 3.5 (полный рефакторинг):
-- SNR — единственный источник в системе!
-- Acceptance rate мониторинг с трендовым анализом
-- Причины rejection (HFR, eccentricity, clouds, etc.)
-- Автогенерация WARNING алертов при деградации
+ЭТАП 9 (расширение):
+- Парсинг SNR, acceptance_rate, frames_stacked/rejected из stack_status.json
+- Trend analysis из history.csv (последние N кадров)
+- Публикация расширенного события LIVESTACK_ENHANCED
 - Интеграция со Strategist Agent через SNR_UPDATE событие
-- Layer 5 (ENRICHMENT) в Metrics Aggregator
-
-Источники данных:
-- stack_status.json — текущее состояние стекинга
-- history.csv — история добавления/отклонения кадров
-- calibrated/*.fits — игнорируются (не наша задача)
-
-LiveStack plugin: https://github.com/isbeorn/nina.plugin.livestack
-GUID: 10bc1716-54af-425e-b307-c0ca1ce10600
+- Рекомендации на основе SNR и acceptance rate
 """
 
 import json
 import logging
 import csv
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-from collections import Counter
 import aiofiles
-
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
 from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
@@ -39,71 +30,56 @@ class LiveStackWatcher(BaseFileWatcher):
     Расширенный мониторинг LiveStack.
 
     Отслеживает:
-    1. stack_status.json — текущее состояние стекинга
-    2. history.csv — история добавления/отклонения кадров
+    - stack_status.json: текущее состояние стекинга (SNR, acceptance_rate, frames)
+    - history.csv: история добавления/отклонения кадров
 
-    Ключевые метрики:
-    - SNR (единственный источник в системе!)
-    - Acceptance rate (текущий и тренд за последние N кадров)
-    - Frames stacked / rejected
-    - Причины rejection
-    - Stacking progress (total_exposure_seconds)
-
-    Публикуемые события:
-    - LIVESTACK_STATUS — полное состояние (для ObservatoryState/Metrics Aggregator)
-    - SNR_UPDATE — для Strategist Agent (оптимизация экспозиции)
-    - ALERT — при проблемах (низкий acceptance rate, stalled stacking)
+    Публикует события:
+    - LIVESTACK_STATUS: базовое состояние (для обратной совместимости)
+    - LIVESTACK_ENHANCED: расширенная аналитика (SNR, trends, recommendations)
+    - SNR_UPDATE: обновление SNR для Strategist Agent
     """
 
     LIVESTACK_GUID = "10bc1716-54af-425e-b307-c0ca1ce10600"
 
-    # Пороговые значения для алертов
-    LOW_ACCEPTANCE_RATE_THRESHOLD = 0.70  # < 70% → WARNING
-    MIN_FRAMES_FOR_TREND = 10  # Минимум кадров для анализа тренда
-    RECENT_FRAMES_WINDOW = 20  # Сколько последних кадров анализировать
+    # История последних значений для trend analysis
+    SNR_HISTORY_SIZE = 20
+    ACCEPTANCE_HISTORY_SIZE = 20
 
     def __init__(self, registry: CapabilityRegistry):
-        # Получаем рабочую директорию LiveStack из XML-профиля N.I.N.A.
         working_dir = registry.get_plugin_path(self.LIVESTACK_GUID, "WorkingDirectory")
         if not working_dir:
             logger.warning(
-                "LiveStack WorkingDirectory not found in profile. "
-                "Using fallback: sessions_root/Live"
+                "LiveStack WorkingDirectory not found in profile. Using fallback."
             )
             working_dir = Path(settings.nina_environment.sessions_root) / "Live"
 
         super().__init__(
-            watch_path=working_dir,
-            target_files=[".json", ".csv"],
-            registry=registry,
+            watch_path=working_dir, target_files=[".json", ".csv"], registry=registry
         )
 
-        # Кэш последнего состояния (для дедупликации событий)
-        self._last_status: Dict[str, Any] = {}
-        self._last_history_count: int = 0
-
-        # История acceptance rate для трендового анализа
+        # Кэш последних значений для trend analysis
+        self._snr_history: List[float] = []
         self._acceptance_history: List[float] = []
+        self._last_status_hash: Optional[str] = None
+
+        # Thresholds для рекомендаций
+        self.snr_target = getattr(settings.thresholds.strategist, "snr_target", 20.0)
+        self.acceptance_threshold = getattr(
+            settings.thresholds.strategist, "acceptance_rate_target", 0.90
+        )
 
         logger.info(
-            f"📊 LiveStackWatcher initialized "
-            f"(watching: {working_dir}, "
-            f"low_acceptance_threshold: {self.LOW_ACCEPTANCE_RATE_THRESHOLD:.0%})"
+            f"LiveStackWatcher initialized (watching: {working_dir}, "
+            f"snr_target: {self.snr_target}, acceptance_threshold: {self.acceptance_threshold})"
         )
 
     async def process_file(self, path: Path) -> None:
-        """
-        Обработка изменённого файла LiveStack.
-
-        Игнорирует:
-        - Не JSON/CSV файлы
-        - FITS-файлы (calibrated/, stacked/) — не наша задача
-        """
+        """Обработка измененного файла LiveStack."""
         if path.suffix.lower() not in [".json", ".csv"]:
             return
 
         # Игнорируем FITS-файлы (калиброванные и стек)
-        if "calibrated" in str(path).lower() or "stacked" in str(path).lower():
+        if "calibrated" in path.name.lower() or "stacked" in path.name.lower():
             return
 
         try:
@@ -114,18 +90,19 @@ class LiveStackWatcher(BaseFileWatcher):
         except Exception as e:
             logger.error(f"Error processing LiveStack file {path.name}: {e}")
 
-    async def _process_status(self, path: Path) -> None:
+    async def _process_status(self, path: Path):
         """
-        Обработка stack_status.json.
+        Обработка stack_status.json с расширенным парсингом.
 
-        Извлекает:
-        - snr: Signal-to-Noise Ratio стека (ЕДИНСТВЕННЫЙ источник!)
-        - acceptance_rate: процент принятых кадров
+        Ожидаемые поля:
+        - state: текущее состояние (running, paused, stopped)
+        - snr: текущий SNR стека
         - frames_stacked: количество принятых кадров
-        - frames_rejected: количество отклонённых
-        - state: running / paused / stopped / idle
+        - frames_rejected: количество отклоненных кадров
+        - acceptance_rate: процент принятых кадров (0.0-1.0)
+        - total_exposure: суммарная экспозиция в секундах
         - filter: текущий фильтр
-        - total_exposure_seconds: суммарная экспозиция
+        - target: имя цели
         """
         async with aiofiles.open(path, "r", encoding="utf-8") as f:
             content = await f.read()
@@ -136,92 +113,110 @@ class LiveStackWatcher(BaseFileWatcher):
             logger.warning(f"Invalid JSON in {path.name}: {e}")
             return
 
-        # Извлекаем ключевые метрики (с защитой от отсутствующих полей)
-        metrics = {
-            "snr": self._safe_float(data.get("snr")),
-            "acceptance_rate": self._safe_float(data.get("acceptance_rate")),
-            "frames_stacked": self._safe_int(data.get("frames_stacked")),
-            "frames_rejected": self._safe_int(data.get("frames_rejected")),
-            "state": data.get("state", "unknown"),
-            "current_filter": data.get("filter"),
-            "total_exposure_seconds": self._safe_float(
-                data.get("total_exposure_seconds")
-            ),
-            "target_name": data.get("target"),
-            "timestamp": datetime.now().isoformat(),
-        }
+        # Проверка на дубликаты (hash-based)
+        status_hash = json.dumps(data, sort_keys=True)
+        if status_hash == self._last_status_hash:
+            return  # Данные не изменились
+        self._last_status_hash = status_hash
 
-        # Дедупликация: пропускаем, если состояние не изменилось
-        if metrics == self._last_status:
-            return
-        self._last_status = metrics
+        # === Базовое событие (для обратной совместимости) ===
+        await event_bus.publish("LIVESTACK_STATUS", data)
 
-        # === Публикуем LIVESTACK_STATUS (для Metrics Aggregator / ObservatoryState) ===
-        await event_bus.publish("LIVESTACK_STATUS", metrics)
+        # === Извлечение расширенных метрик ===
+        snr = data.get("snr")
+        frames_stacked = data.get("frames_stacked", 0)
+        frames_rejected = data.get("frames_rejected", 0)
+        acceptance_rate = data.get("acceptance_rate")
+        total_exposure = data.get("total_exposure", 0.0)
+        filter_name = data.get("filter")
+        target_name = data.get("target")
+        state = data.get("state", "unknown")
 
-        logger.info(
-            f"📊 LiveStack status: state={metrics['state']}, "
-            f"SNR={metrics['snr']}, "
-            f"acceptance={metrics['acceptance_rate']}, "
-            f"frames={metrics['frames_stacked']}/{metrics['frames_stacked'] + (metrics['frames_rejected'] or 0)}, "
-            f"filter={metrics['current_filter']}"
+        # === Обновление истории для trend analysis ===
+        if snr is not None:
+            self._snr_history.append(snr)
+            if len(self._snr_history) > self.SNR_HISTORY_SIZE:
+                self._snr_history.pop(0)
+
+        if acceptance_rate is not None:
+            self._acceptance_history.append(acceptance_rate)
+            if len(self._acceptance_history) > self.ACCEPTANCE_HISTORY_SIZE:
+                self._acceptance_history.pop(0)
+
+        # === Trend analysis ===
+        snr_trend = self._calculate_trend(self._snr_history)
+        acceptance_trend = self._calculate_trend(self._acceptance_history)
+
+        # === Генерация рекомендаций ===
+        recommendations = self._generate_recommendations(
+            snr=snr,
+            acceptance_rate=acceptance_rate,
+            frames_stacked=frames_stacked,
+            frames_rejected=frames_rejected,
+            snr_trend=snr_trend,
+            acceptance_trend=acceptance_trend,
         )
 
-        # === Публикуем SNR_UPDATE (для Strategist Agent) ===
-        if metrics["snr"] is not None:
-            # Читаем target SNR из настроек Strategist
-            target_snr = getattr(settings.thresholds.strategist, "snr_target", 20.0)
-            current_exposure = metrics.get("total_exposure_seconds")
-            if current_exposure and metrics["frames_stacked"]:
-                # Средняя экспозиция на кадр
-                avg_exposure = current_exposure / metrics["frames_stacked"]
-            else:
-                avg_exposure = None
+        # === Публикация расширенного события ===
+        enhanced_data = {
+            "timestamp": datetime.now().isoformat(),
+            "state": state,
+            "snr": snr,
+            "snr_target": self.snr_target,
+            "snr_trend": snr_trend,
+            "frames_stacked": frames_stacked,
+            "frames_rejected": frames_rejected,
+            "acceptance_rate": acceptance_rate,
+            "acceptance_threshold": self.acceptance_threshold,
+            "acceptance_trend": acceptance_trend,
+            "total_exposure": total_exposure,
+            "filter": filter_name,
+            "target": target_name,
+            "recommendations": recommendations,
+        }
 
+        await event_bus.publish("LIVESTACK_ENHANCED", enhanced_data)
+
+        # === Интеграция со Strategist Agent ===
+        if snr is not None:
             await event_bus.publish(
                 "SNR_UPDATE",
                 {
-                    "snr": metrics["snr"],
-                    "target_snr": target_snr,
-                    "exposure_time": avg_exposure,
-                    "filter": metrics["current_filter"],
-                    "frames_stacked": metrics["frames_stacked"],
-                    "timestamp": metrics["timestamp"],
+                    "snr": snr,
+                    "snr_target": self.snr_target,
+                    "filter": filter_name,
+                    "target": target_name,
+                    "total_exposure": total_exposure,
                 },
             )
-            logger.debug(
-                f"📈 SNR_UPDATE published: "
-                f"current={metrics['snr']:.2f}, target={target_snr}"
-            )
 
-        # === Автогенерация алертов ===
-        await self._check_and_alert(metrics)
+        logger.info(
+            f"LiveStack status: state={state}, SNR={snr}, "
+            f"frames={frames_stacked}/{frames_stacked + frames_rejected}, "
+            f"acceptance={acceptance_rate:.2% if acceptance_rate else 'N/A'}, "
+            f"filter={filter_name}"
+        )
 
-    async def _process_history(self, path: Path) -> None:
+    async def _process_history(self, path: Path):
         """
-        Обработка history.csv.
+        Обработка history.csv для детального trend analysis.
 
-        Анализирует:
-        - Общее количество кадров
-        - Тренд acceptance rate за последние RECENT_FRAMES_WINDOW кадров
-        - Причины rejection (топ-3)
-        - Детекция stalled stacking (все последние кадры rejected)
+        Ожидаемые колонки:
+        - timestamp: время кадра
+        - frame_index: индекс кадра
+        - accepted: принят/отклонен (true/false)
+        - reason: причина отклонения (если accepted=false)
+        - hfr: HFR кадра
+        - fwhm: FWHM кадра
         """
         async with aiofiles.open(path, "r", encoding="utf-8") as f:
             content = await f.read()
 
         lines = content.strip().split("\n")
         if len(lines) < 2:
-            # Нет данных или только заголовок
-            return
-
-        # Дедупликация
-        if len(lines) == self._last_history_count:
-            return
-        self._last_history_count = len(lines)
+            return  # Только заголовок или пусто
 
         try:
-            # Парсим CSV
             reader = csv.DictReader(lines)
             rows = list(reader)
 
@@ -229,161 +224,157 @@ class LiveStackWatcher(BaseFileWatcher):
                 return
 
             # Анализ последних N кадров
-            recent = rows[-self.RECENT_FRAMES_WINDOW :]
-            accepted = [
-                r
-                for r in recent
-                if r.get("accepted", "").lower() in ("true", "1", "yes")
-            ]
-            rejected = [
-                r
-                for r in recent
-                if r.get("accepted", "").lower() in ("false", "0", "no")
-            ]
+            recent_frames = rows[-self.ACCEPTANCE_HISTORY_SIZE :]
 
-            acceptance_rate_recent = len(accepted) / len(recent) if recent else 0.0
+            # Подсчет acceptance rate для последних кадров
+            accepted_count = sum(
+                1 for row in recent_frames if row.get("accepted", "").lower() == "true"
+            )
+            recent_acceptance_rate = accepted_count / len(recent_frames)
 
-            # Причины rejection
-            rejection_reasons = Counter(r.get("reason", "unknown") for r in rejected)
+            # Анализ причин отклонения
+            rejection_reasons = {}
+            for row in recent_frames:
+                if row.get("accepted", "").lower() == "false":
+                    reason = row.get("reason", "unknown")
+                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
 
-            # Сохраняем в тренд
-            self._acceptance_history.append(acceptance_rate_recent)
-            if len(self._acceptance_history) > 10:
-                self._acceptance_history.pop(0)
-
-            # === Публикуем LIVESTACK_HISTORY ===
-            history_payload = {
-                "total_frames": len(rows),
-                "recent_frames_analyzed": len(recent),
-                "acceptance_rate_recent": acceptance_rate_recent,
-                "rejection_reasons": dict(rejection_reasons.most_common(5)),
-                "last_frame_timestamp": rows[-1].get("timestamp"),
-                "trend_window": self.RECENT_FRAMES_WINDOW,
-                "acceptance_trend": self._calculate_acceptance_trend(),
-                "timestamp": datetime.now().isoformat(),
-            }
-
-            await event_bus.publish("LIVESTACK_HISTORY", history_payload)
-
-            logger.info(
-                f"📊 LiveStack history: "
-                f"total={len(rows)}, "
-                f"recent_acceptance={acceptance_rate_recent:.1%}, "
-                f"top_rejection={rejection_reasons.most_common(1)}"
+            # Публикация детальной истории
+            await event_bus.publish(
+                "LIVESTACK_HISTORY",
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "total_frames": len(rows),
+                    "recent_frames": len(recent_frames),
+                    "recent_acceptance_rate": recent_acceptance_rate,
+                    "rejection_reasons": rejection_reasons,
+                    "last_frame": rows[-1] if rows else None,
+                },
             )
 
-            # === Автогенерация алертов при проблемах ===
-            if (
-                len(recent) >= self.MIN_FRAMES_FOR_TREND
-                and acceptance_rate_recent < self.LOW_ACCEPTANCE_RATE_THRESHOLD
-            ):
-                top_reason, top_count = rejection_reasons.most_common(1)[0]
-                await event_bus.publish(
-                    "ALERT",
-                    {
-                        "level": "WARNING",
-                        "message": (
-                            f"LiveStack acceptance rate low: "
-                            f"{acceptance_rate_recent:.0%} "
-                            f"(last {len(recent)} frames). "
-                            f"Top rejection reason: {top_reason} "
-                            f"({top_count} frames)"
-                        ),
-                        "agent": "LiveStackWatcher",
-                        "timestamp": datetime.now().isoformat(),
-                        "context": {
-                            "acceptance_rate": acceptance_rate_recent,
-                            "rejection_reasons": dict(rejection_reasons),
-                            "total_frames": len(rows),
-                        },
-                    },
-                )
+            logger.debug(
+                f"LiveStack history: {len(rows)} total frames, "
+                f"recent acceptance: {recent_acceptance_rate:.2%}, "
+                f"top rejection: {max(rejection_reasons.items(), key=lambda x: x[1], default=('none', 0))}"
+            )
 
         except Exception as e:
             logger.error(f"Error parsing LiveStack history CSV: {e}")
 
-    def _calculate_acceptance_trend(self) -> Optional[float]:
+    def _calculate_trend(self, history: List[float]) -> Optional[str]:
         """
-        Вычисляет тренд acceptance rate (наклон линейной регрессии).
+        Расчет тренда на основе истории значений.
 
         Returns:
-            Положительный → acceptance улучшается
-            Отрицательный → acceptance деградирует
-            None → недостаточно данных
+            "improving" - значения растут (для SNR) или падают (для rejection)
+            "degrading" - значения падают (для SNR) или растут (для rejection)
+            "stable" - значения стабильны
+            None - недостаточно данных
         """
-        history = self._acceptance_history
-        if len(history) < 3:
+        if len(history) < 5:
             return None
 
-        n = len(history)
-        x_mean = (n - 1) / 2
-        y_mean = sum(history) / n
+        # Берем последние 10 значений (или все, если меньше)
+        recent = history[-10:]
+        if len(recent) < 5:
+            return None
 
-        numerator = sum((i - x_mean) * (history[i] - y_mean) for i in range(n))
+        # Линейная регрессия для определения тренда
+        n = len(recent)
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(recent) / n
+
+        numerator = sum((i - x_mean) * (recent[i] - y_mean) for i in range(n))
         denominator = sum((i - x_mean) ** 2 for i in range(n))
 
         if denominator == 0:
-            return 0.0
+            return "stable"
 
-        return numerator / denominator
+        slope = numerator / denominator
 
-    async def _check_and_alert(self, metrics: Dict[str, Any]) -> None:
+        # Порог для определения тренда (5% от среднего значения)
+        threshold = abs(y_mean) * 0.05 if y_mean != 0 else 0.1
+
+        if slope > threshold:
+            return "improving"
+        elif slope < -threshold:
+            return "degrading"
+        else:
+            return "stable"
+
+    def _generate_recommendations(
+        self,
+        snr: Optional[float],
+        acceptance_rate: Optional[float],
+        frames_stacked: int,
+        frames_rejected: int,
+        snr_trend: Optional[str],
+        acceptance_trend: Optional[str],
+    ) -> List[str]:
         """
-        Проверяет метрики и генерирует алерты при проблемах.
+        Генерация рекомендаций на основе метрик LiveStack.
 
-        Проверяемые условия:
-        1. Низкий acceptance rate (< 70%)
-        2. Stalled stacking (state='running', но frames_stacked не растёт)
-        3. SNR деградирует (требует истории, пока placeholder)
+        Returns:
+            Список текстовых рекомендаций
         """
-        acceptance = metrics.get("acceptance_rate")
-        frames_stacked = metrics.get("frames_stacked") or 0
-        frames_rejected = metrics.get("frames_rejected") or 0
-        total_frames = frames_stacked + frames_rejected
-        state = metrics.get("state")
+        recommendations = []
 
-        # Условие 1: Низкий acceptance rate (при достаточном количестве кадров)
-        if (
-            acceptance is not None
-            and total_frames >= self.MIN_FRAMES_FOR_TREND
-            and acceptance < self.LOW_ACCEPTANCE_RATE_THRESHOLD
-        ):
-            await event_bus.publish(
-                "ALERT",
-                {
-                    "level": "WARNING",
-                    "message": (
-                        f"LiveStack low acceptance rate: {acceptance:.0%} "
-                        f"({frames_stacked}/{total_frames} frames). "
-                        f"Check HFR, guiding, clouds."
-                    ),
-                    "agent": "LiveStackWatcher",
-                    "timestamp": datetime.now().isoformat(),
-                    "context": {
-                        "acceptance_rate": acceptance,
-                        "frames_stacked": frames_stacked,
-                        "frames_rejected": frames_rejected,
-                        "filter": metrics.get("current_filter"),
-                    },
-                },
+        # === SNR-based рекомендации ===
+        if snr is not None:
+            if snr < self.snr_target * 0.5:
+                recommendations.append(
+                    f"SNR очень низкий ({snr:.1f} vs target {self.snr_target:.1f}). "
+                    f"Рассмотрите увеличение экспозиции или переход на более чувствительный фильтр."
+                )
+            elif snr < self.snr_target * 0.8:
+                recommendations.append(
+                    f"SNR ниже целевого ({snr:.1f} vs {self.snr_target:.1f}). "
+                    f"Можно увеличить экспозицию на 20-30%."
+                )
+
+            if snr_trend == "degrading":
+                recommendations.append(
+                    "SNR деградирует. Проверьте условия наблюдения (облачность, световое загрязнение)."
+                )
+
+        # === Acceptance rate рекомендации ===
+        if acceptance_rate is not None:
+            total_frames = frames_stacked + frames_rejected
+
+            if acceptance_rate < 0.5 and total_frames >= 10:
+                recommendations.append(
+                    f"Очень низкий acceptance rate ({acceptance_rate:.1%}). "
+                    f"Проверьте качество гидирования, фокус и условия наблюдения."
+                )
+            elif acceptance_rate < self.acceptance_threshold and total_frames >= 10:
+                recommendations.append(
+                    f"Acceptance rate ниже целевого ({acceptance_rate:.1%} vs {self.acceptance_threshold:.1%}). "
+                    f"Рассмотрите ужесточение критериев отбора кадров."
+                )
+
+            if acceptance_trend == "degrading":
+                recommendations.append(
+                    "Acceptance rate деградирует. Возможны проблемы с оборудованием или условиями."
+                )
+
+        # === Рекомендации на основе количества кадров ===
+        if frames_stacked >= 50 and snr is not None and snr >= self.snr_target:
+            recommendations.append(
+                f"Достигнут целевой SNR ({snr:.1f}) после {frames_stacked} кадров. "
+                f"Можно завершить съемку этой цели."
             )
 
-    @staticmethod
-    def _safe_float(value: Any) -> Optional[float]:
-        """Безопасная конвертация в float."""
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return None
+        return recommendations
 
-    @staticmethod
-    def _safe_int(value: Any) -> Optional[int]:
-        """Безопасная конвертация в int."""
-        if value is None:
-            return None
-        try:
-            return int(float(value))
-        except (ValueError, TypeError):
-            return None
+    def get_stats(self) -> Dict[str, Any]:
+        """Возвращает статистику LiveStackWatcher."""
+        return {
+            "snr_history_size": len(self._snr_history),
+            "acceptance_history_size": len(self._acceptance_history),
+            "last_snr": self._snr_history[-1] if self._snr_history else None,
+            "last_acceptance_rate": (
+                self._acceptance_history[-1] if self._acceptance_history else None
+            ),
+            "snr_target": self.snr_target,
+            "acceptance_threshold": self.acceptance_threshold,
+        }

@@ -669,3 +669,21 @@ class WatcherAgent(BaseAgent):
             return True
 
         return False
+
+    # В watcher_agent.py
+    async def _on_livestack_enhanced(self, data: Dict[str, Any]) -> None:
+        """Обработка расширенных данных LiveStack."""
+        acceptance_rate = data.get("acceptance_rate")
+
+        if acceptance_rate is not None and acceptance_rate < 0.5:
+            # Генерация алерта о низком acceptance rate
+            anomaly = AnomalyReport(
+                metric="LIVESTACK_ACCEPTANCE",
+                current_value=acceptance_rate,
+                baseline_value=0.90,
+                deviation_percent=((0.90 - acceptance_rate) / 0.90) * 100,
+                z_score=0,
+                severity="HIGH",
+                context={"recommendations": data.get("recommendations", [])},
+            )
+            await self._handle_anomaly(anomaly)
