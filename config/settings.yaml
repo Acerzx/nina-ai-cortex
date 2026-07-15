@@ -86,7 +86,6 @@ cors:
   allowed_headers: ["Content-Type", "X-Request-ID"]
   max_age: 3600
 
-
 # 11. ПОРОГОВЫЕ ЗНАЧЕНИЯ
 thresholds:
   # ================================================================
@@ -96,7 +95,7 @@ thresholds:
     bias_freshness_days: 90
     dark_freshness_days: 30
     flat_freshness_days: 7
-  
+
   watcher:
     hfr_increase_percent: 30.0
     fwhm_increase_percent: 30.0
@@ -108,7 +107,7 @@ thresholds:
     z_score_threshold: 3.0
     min_history_points: 5
     anomaly_cooldown_seconds: 300
-  
+
   # ================================================================
   # CALIBRATOR (наследует calibration_freshness через YAML merge)
   # ================================================================
@@ -116,7 +115,7 @@ thresholds:
     <<: *calibration_freshness
     temperature_tolerance: 2.0
     alert_cooldown_seconds: 600
-  
+
   # ================================================================
   # PRE-FLIGHT CHECKLIST (20 gates в 6 категориях)
   # ================================================================
@@ -163,8 +162,6 @@ thresholds:
     min_altitude: 30.0
     mode_check_enabled: true
 
-
-
   strategist:
     snr_target: 20.0
     hfr_target: 2.5
@@ -196,7 +193,7 @@ data_sources:
   primary_metrics_source: "influxdb"
   enable_fallback_source: true
   metrics_poll_interval: 3.0
-  stale_threshold_seconds: 30.0  # Порог "InfluxDB stale" (секунды)
+  stale_threshold_seconds: 30.0 # Порог "InfluxDB stale" (секунды)
 
 # 13. DECISION AUDIT TRAIL
 decision_audit:
@@ -219,6 +216,9 @@ metrics:
   ai_action_log_max: 1000
   active_alerts_max: 50
   update_interval: 3.0
+  # НОВОЕ (К-8): Параметры EventBus
+  event_queue_maxsize: 10000 # Максимальный размер очереди событий
+  event_stop_timeout_seconds: 5.0 # Таймаут graceful stop (секунды)
 
 # 16. OPENAPI
 openapi:
@@ -397,17 +397,6 @@ embeddings:
   cache_file: "./data/embeddings_cache.pkl"
   dimension: 768
 
-# 15. МЕТРИКИ И ИСТОРИЯ
-metrics:
-  history_max_points: 100
-  ai_action_log_max: 1000
-  active_alerts_max: 50
-  update_interval: 3.0
-  # НОВОЕ (К-8): Параметры EventBus
-  event_queue_maxsize: 10000        # Максимальный размер очереди событий
-  event_stop_timeout_seconds: 5.0   # Таймаут graceful stop (секунды)
-
-
 # ============================================================================
 # HTTP CLIENT MANAGER (С-15: единый менеджер HTTP клиентов)
 # ============================================================================
@@ -420,31 +409,31 @@ http_client:
   default_max_connections: 20
   default_max_keepalive: 10
   default_keepalive_expiry: 30
-  
+
   # N.I.N.A. Advanced API
   nina:
     timeout_seconds: 10.0
     max_connections: 20
     max_keepalive: 10
     keepalive_expiry: 30
-  
+
   # Ollama LLM
   ollama:
     timeout_seconds: 30.0
     max_connections: 10
     max_keepalive: 5
     keepalive_expiry: 30
-  
+
   # Prometheus Scraper
   prometheus:
     timeout_seconds: 5.0
     max_connections: 5
     max_keepalive: 3
     keepalive_expiry: 30
-  
+
   # InfluxDB (не используется напрямую, через influxdb-client)
   # Qdrant (не используется напрямую, через qdrant-client)
-  
+
   # Embeddings (Ollama /api/embed)
   embeddings:
     timeout_seconds: 30.0
@@ -457,12 +446,12 @@ http_client:
 # ============================================================================
 # Веса факторов качества (должны суммироваться в 1.0)
 quality_weights:
-  hfr_weight: 0.30              # Half Flux Radius — основной показатель резкости
-  eccentricity_weight: 0.20     # Эксцентричность звёзд — качество гидирования
-  acceptance_rate_weight: 0.15  # Процент принятых кадров — стабильность системы
-  rms_weight: 0.15              # RMS гидирования — стабильность монтировки
-  hfr_trend_weight: 0.10       # Тренд HFR — стабильность во времени
-  problems_weight: 0.10         # Количество проблем — общее здоровье сессии
+  hfr_weight: 0.30 # Half Flux Radius — основной показатель резкости
+  eccentricity_weight: 0.20 # Эксцентричность звёзд — качество гидирования
+  acceptance_rate_weight: 0.15 # Процент принятых кадров — стабильность системы
+  rms_weight: 0.15 # RMS гидирования — стабильность монтировки
+  hfr_trend_weight: 0.10 # Тренд HFR — стабильность во времени
+  problems_weight: 0.10 # Количество проблем — общее здоровье сессии
 
 # Пороговые значения для расчёта штрафов/бонусов
 quality_thresholds:
