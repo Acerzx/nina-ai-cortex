@@ -599,8 +599,8 @@ class WatcherAgent(BaseAgent):
         }
         await event_bus.publish("ALERT", alert)
 
-        # Логируем действие
-        observatory_state.log_ai_action(
+        # ИСПРАВЛЕНО (К-1): log_ai_action — async метод, используем await
+        await observatory_state.log_ai_action(
             agent=self.name,
             action=f"Generate Alert [{level}]",
             reason=message,

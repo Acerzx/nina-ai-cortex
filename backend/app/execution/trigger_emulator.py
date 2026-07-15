@@ -289,6 +289,7 @@ class TriggerEmulator:
             "blocked_by_critical_phase": 0,
             "blocked_by_hal": 0,
             "blocked_by_validation": 0,
+            "blocked_by_manual_mode": 0,
             "protected_params_rejected": 0,
             "openapi_calls": 0,
             "direct_calls": 0,
@@ -562,8 +563,24 @@ class TriggerEmulator:
         trigger_name: str,
         reason: str = "AI Agent Decision",
         extra_params: Optional[Dict[str, Any]] = None,
+        source: str = "agent",  # ← НОВОЕ (К-2): "agent" или "api"
     ) -> bool:
-        """Эмулирует срабатывание триггера через Advanced API."""
+        """
+        Эмулирует срабатывание триггера через Advanced API.
+
+        Args:
+            trigger_name: Имя триггера
+            reason: Причина вызова
+            extra_params: Дополнительные параметры
+            source: Источник вызова:
+                - "agent" (default): вызов от AI-агента.
+                В MANUAL режиме ЗАПРЕЩЁН.
+                - "api": вызов от пользователя через API.
+                В MANUAL режиме РАЗРЕШЁН.
+
+        Returns:
+            True если триггер успешно выполнен
+        """
         self._stats["total_triggers_fired"] += 1
 
         # Разрешаем алиасы
@@ -574,8 +591,26 @@ class TriggerEmulator:
             else ""
         )
         logger.info(
-            f"🔥 Firing trigger: '{trigger_name}'{alias_note} (Reason: {reason})"
+            f"🔥 Firing trigger: '{trigger_name}'{alias_note} "
+            f"(Reason: {reason}, Source: {source})"
         )
+
+        # === НОВАЯ ПРОВЕРКА (К-2): Режим MANUAL блокирует agent-триггеры ===
+        from app.core.mode_manager import mode_manager, OperationMode
+
+        if mode_manager.current_mode == OperationMode.MANUAL and source != "api":
+            logger.warning(
+                f"🛑 BLOCKED: Trigger '{trigger_name}' ignored — "
+                f"system in MANUAL mode (source: {source}). "
+                f"Use API with source='api' for manual overrides."
+            )
+            self._stats["blocked_by_manual_mode"] = (
+                self._stats.get("blocked_by_manual_mode", 0) + 1
+            )
+            self._add_to_history(
+                trigger_name, actual_trigger, reason, "BLOCKED_MANUAL_MODE"
+            )
+            return False
 
         # === ПРОВЕРКА 1: FLAT_MODE ===
         if state_tracker.state.is_flat_mode:

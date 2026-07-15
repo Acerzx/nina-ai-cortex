@@ -434,11 +434,9 @@ async def lifespan(app: FastAPI):
     # ███  SHUTDOWN PHASE — ВСЁ ПОСЛЕ yield (в обратном порядке)       ███
     # ████████████████████████████████████████████████████████████████████
     # ====================================================================
-
     logger.info("=" * 70)
     logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
-
     try:
         # 1. Отписка от EventBus
         for event_type, handler in _event_handlers.items():
@@ -446,7 +444,6 @@ async def lifespan(app: FastAPI):
                 event_bus.unsubscribe(event_type, handler)
             except Exception as e:
                 logger.debug(f"Failed to unsubscribe from {event_type}: {e}")
-
         try:
             event_bus.unsubscribe("DECISION_MADE", _on_decision_made)
             event_bus.unsubscribe("TRIGGER_FIRED", _on_trigger_fired)
@@ -484,11 +481,14 @@ async def lifespan(app: FastAPI):
         # 8. Закрываем trigger emulator
         await trigger_emulator.close()
 
-        # 9. Даем время на закрытие всех соединений
+        # НОВОЕ (К-7): 9. Закрываем thread pool executors
+        from app.core.executors import shutdown_executors
+
+        await shutdown_executors()
+
+        # 10. Даем время на закрытие всех соединений
         await asyncio.sleep(0.5)
-
         logger.info("✅ Cortex stopped gracefully.")
-
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
 
@@ -975,8 +975,12 @@ async def get_metrics_history(
 async def fire_trigger(request: Request, body: TriggerRequest):
     """Ручной вызов триггера через API."""
     logger.info(f"API Request: Fire trigger '{body.trigger_name}'")
-    success = await trigger_emulator.fire_trigger(body.trigger_name, body.reason)
-
+    # НОВОЕ (К-2): source="api" — пользовательские триггеры разрешены в MANUAL
+    success = await trigger_emulator.fire_trigger(
+        body.trigger_name,
+        body.reason,
+        source="api",  # ← API вызовы разрешены в MANUAL режиме
+    )
     if success:
         observatory_state.log_ai_action(
             "API",
