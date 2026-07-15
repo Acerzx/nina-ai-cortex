@@ -1031,7 +1031,7 @@ async def set_variable(request: Request, body: VariableRequest):
     success = await global_var_injector.set_variable(body.name, body.value, body.reason)
 
     if success:
-        observatory_state.log_ai_action(
+        await observatory_state.log_ai_action(
             "API",
             f"Set Var: {body.name}={body.value}",
             body.reason,
@@ -1550,7 +1550,7 @@ async def start_langgraph_workflow(
             max_retries=max_retries,
         )
 
-        observatory_state.log_ai_action(
+        await observatory_state.log_ai_action(
             agent="LangGraphOrchestrator",
             action=f"Start Workflow: {workflow_type}",
             reason=f"Manual trigger: {trigger_event}",
@@ -1695,7 +1695,7 @@ async def force_rag_update(request: Request):
     logger.info("API Request: Force RAG update")
     result = await rag_updater.force_update()
 
-    observatory_state.log_ai_action(
+    await observatory_state.log_ai_action(
         agent="API",
         action="Force RAG Update",
         reason="Manual API call",

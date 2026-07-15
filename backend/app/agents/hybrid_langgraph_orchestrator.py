@@ -26,7 +26,7 @@ import logging
 from app.agents.base_agent import AgentDecision, BaseAgent
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
-from app.storage.decision_audit import decision_audit
+from app.storage.decision_audit import decision_audit, DecisionRecord
 from app.shadow_engine.state_tracker import state_tracker  # ← ДОБАВЛЕНО (v4.1)
 
 logger = logging.getLogger(__name__)
@@ -390,6 +390,13 @@ class HybridLangGraphOrchestrator:
         return state
 
     async def _finalize_node(self, state: HybridWorkflowState) -> HybridWorkflowState:
+        """
+        Финализирует workflow: сохраняет решение в Decision Audit Trail.
+
+        ИСПРАВЛЕНО:
+        - Используется DecisionRecord вместо AgentDecision (у AgentDecision нет session_id)
+        - outputs гарантированно является dict (не set с Ellipsis)
+        """
         logger.info(f"✅ Finalizing workflow {state['workflow_id']}")
 
         if state["errors"]:
@@ -401,30 +408,56 @@ class HybridLangGraphOrchestrator:
 
         state["updated_at"] = datetime.now().isoformat()
 
-        decision = AgentDecision(
+        # ИСПРАВЛЕНО: Используем DecisionRecord вместо AgentDecision
+        # DecisionRecord имеет поле session_id, которого нет у AgentDecision
+        outputs_dict = {
+            "workflow_id": state["workflow_id"],
+            "recommendations": state.get("recommendations", []),
+            "executed_actions": state.get("executed_actions", []),
+            "final_outcome": state["final_outcome"],
+        }
+
+        # Добавляем специфичные поля в зависимости от типа workflow
+        wf_type = state["workflow_type"]
+        if wf_type == WorkflowType.DIAGNOSTIC:
+            outputs_dict["symptoms"] = state.get("symptoms", [])
+            outputs_dict["root_causes"] = state.get("root_causes", [])
+            outputs_dict["diagnostic_confidence"] = state.get(
+                "diagnostic_confidence", 0.0
+            )
+        elif wf_type == WorkflowType.POST_MORTEM:
+            outputs_dict["session_id"] = state.get("session_id")
+            outputs_dict["lessons_learned"] = state.get("lessons_learned", [])
+        elif wf_type == WorkflowType.ADAPTIVE:
+            outputs_dict["current_conditions"] = state.get("current_conditions", {})
+            outputs_dict["adaptation_actions"] = state.get("adaptation_actions", [])
+
+        record = DecisionRecord(
             agent="HybridLangGraphOrchestrator",
-            decision_type=f"WORKFLOW_{state['workflow_type'].upper()}_COMPLETED",
-            inputs={"trigger": state["trigger_event"]},
-            outputs={
-                "workflow_id": state["workflow_id"],
-                "recommendations": state["recommendations"],
-                "executed_actions": state["executed_actions"],
-                "final_outcome": state["final_outcome"],
-            },
-            rationale=f"Hybrid {state['workflow_type']} workflow completed",
+            decision_type=f"WORKFLOW_{state['workflow_type'].value.upper()}_COMPLETED",
+            inputs={"trigger": state.get("trigger_event", {})},
+            outputs=outputs_dict,  # Гарантированно dict
+            rationale=f"Hybrid {state['workflow_type'].value} workflow completed",
             confidence=0.8 if state["final_outcome"] == "success" else 0.3,
+            session_id=state.get("session_id"),
+            context={
+                "workflow_id": state["workflow_id"],
+                "workflow_type": state["workflow_type"].value,
+                "errors": state.get("errors", []),
+                "retry_count": state.get("retry_count", 0),
+            },
         )
 
-        await decision_audit.log_decision(decision)
+        await decision_audit.log_decision(record)
 
         await event_bus.publish(
             "WORKFLOW_COMPLETED",
             {
                 "workflow_id": state["workflow_id"],
-                "workflow_type": state["workflow_type"],
-                "status": state["status"],
+                "workflow_type": state["workflow_type"].value,
+                "status": state["status"].value,
                 "outcome": state["final_outcome"],
-                "recommendations": state["recommendations"],
+                "recommendations": state.get("recommendations", []),
             },
         )
 

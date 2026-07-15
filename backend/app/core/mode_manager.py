@@ -140,7 +140,7 @@ class ModeManager:
         # Логируем в ObservatoryState
         from app.agents.observatory_state import observatory_state
 
-        observatory_state.log_ai_action(
+        await observatory_state.log_ai_action(
             agent="ModeManager",
             action=f"Mode changed to {mode.value}",
             reason=reason,

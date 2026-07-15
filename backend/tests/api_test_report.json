@@ -1,0 +1,668 @@
+{
+  "timestamp": "2026-07-15T14:32:43.572167",
+  "summary": {
+    "total": 64,
+    "skipped": 0,
+    "tested": 64,
+    "successful": 64,
+    "failed": 0,
+    "success_rate_percent": 100.0,
+    "status_2xx": 54,
+    "status_4xx": 10,
+    "status_5xx": 0,
+    "timeouts": 0,
+    "errors": 0,
+    "avg_duration_ms": 1151.48
+  },
+  "discovered_values": {
+    "session_ids": [],
+    "trigger_names": [],
+    "task_names": [
+      "decision_audit_cleanup",
+      "disk_monitor",
+      "rag_cleanup"
+    ]
+  },
+  "results": [
+    {
+      "path": "/health",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 286.97,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/ws/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 283.78,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sequence/shadow",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 282.86,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sequence/state",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 273.9,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/observatory/state",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 280.55,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/observatory/session-summary",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 281.77,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/agents/status",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 283.09,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/agents/mode",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 279.8,
+      "error": null,
+      "request_info": "params={mode=full_ai}"
+    },
+    {
+      "path": "/api/v1/agents/decisions",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 276.75,
+      "error": null,
+      "request_info": "params={limit=20}"
+    },
+    {
+      "path": "/api/v1/agents/llm-status",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 279.01,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/agents/test-llm",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 10552.34,
+      "error": null,
+      "request_info": "params={prompt=Explain Hocus Focus, agent=Copilot}"
+    },
+    {
+      "path": "/api/v1/metrics",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 295.65,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/metrics/unified",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 268.84,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/metrics/sources-status",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 279.58,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/metrics/history",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 281.28,
+      "error": null,
+      "request_info": "params={metric=hfr, limit=100}"
+    },
+    {
+      "path": "/api/v1/execution/trigger",
+      "method": "POST",
+      "status_code": 422,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 268.75,
+      "error": null,
+      "request_info": "body=\"test_value\""
+    },
+    {
+      "path": "/api/v1/execution/variable",
+      "method": "POST",
+      "status_code": 422,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 279.13,
+      "error": null,
+      "request_info": "body=\"test_value\""
+    },
+    {
+      "path": "/api/v1/rag/search",
+      "method": "POST",
+      "status_code": 422,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 277.42,
+      "error": null,
+      "request_info": "body=\"test_value\""
+    },
+    {
+      "path": "/api/v1/rag/context",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 3052.14,
+      "error": null,
+      "request_info": "params={query=autofocus configuration, max_tokens=2000}"
+    },
+    {
+      "path": "/api/v1/rag/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 284.77,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/plugins",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 272.14,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/masters/catalog",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 281.67,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/masters/find",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 285.4,
+      "error": null,
+      "request_info": "params={image_type=DARK, temperature=-15.0, offset=0}"
+    },
+    {
+      "path": "/api/v1/safety/preflight",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 370.99,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/storage/disk-usage",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 287.95,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/storage/recommendations",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 434.14,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/storage/recommendations/{policy_name}",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 556.07,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/audit/decisions",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 289.36,
+      "error": null,
+      "request_info": "params={agent=Watcher, limit=50, offset=0}"
+    },
+    {
+      "path": "/api/v1/audit/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.51,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/audit/archives",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.44,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/audit/archives/{filename}",
+      "method": "GET",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 279.79,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/simulation/start",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 286.9,
+      "error": null,
+      "request_info": "params={target=M31, frames=10}"
+    },
+    {
+      "path": "/api/v1/simulation/stop",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 2418.68,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/simulation/inject-anomaly",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 292.37,
+      "error": null,
+      "request_info": "params={anomaly_type=hfr_spike}"
+    },
+    {
+      "path": "/api/v1/simulation/trigger-autofocus",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 10295.6,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/simulation/trigger-meridian-flip",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 30289.85,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/simulation/reset-cooldowns",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.23,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/triggers",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 280.69,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/triggers/{trigger_name}",
+      "method": "GET",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 279.37,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/langgraph/types",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 280.06,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/langgraph/workflows",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 288.04,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/langgraph/workflow/{workflow_id}",
+      "method": "GET",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 272.19,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/langgraph/start",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 298.29,
+      "error": null,
+      "request_info": "params={workflow_type=diagnostic, max_retries=3}"
+    },
+    {
+      "path": "/api/v1/langgraph/cancel/{workflow_id}",
+      "method": "POST",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 279.31,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/langgraph/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 283.54,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/system/background-tasks",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 273.59,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/system/background-tasks/{task_name}/toggle",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 268.82,
+      "error": null,
+      "request_info": "params={enabled=True}"
+    },
+    {
+      "path": "/api/v1/rag/updater/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.08,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/rag/updater/force",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 285.67,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/analytics/agent/{agent_name}",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 287.83,
+      "error": null,
+      "request_info": "params={days=30}"
+    },
+    {
+      "path": "/api/v1/analytics/agents",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 293.99,
+      "error": null,
+      "request_info": "params={days=30}"
+    },
+    {
+      "path": "/api/v1/analytics/recommendations",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.31,
+      "error": null,
+      "request_info": "params={agent=Watcher, days=30}"
+    },
+    {
+      "path": "/api/v1/analytics/report",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.76,
+      "error": null,
+      "request_info": "params={days=30}"
+    },
+    {
+      "path": "/api/v1/analytics/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 280.13,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sessions",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 284.31,
+      "error": null,
+      "request_info": "params={target=test_value, limit=50}"
+    },
+    {
+      "path": "/api/v1/sessions/{session_id}",
+      "method": "GET",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 277.84,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sessions/{session_id}/frames",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 279.11,
+      "error": null,
+      "request_info": "params={limit=1000}"
+    },
+    {
+      "path": "/api/v1/sessions/{session_id}/export",
+      "method": "GET",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 279.25,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sessions/stats",
+      "method": "GET",
+      "status_code": 404,
+      "success": true,
+      "category": "client_error",
+      "duration_ms": 281.27,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/safety/predictive",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 274.73,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/safety/predictive/check",
+      "method": "POST",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 278.75,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sequence/shadow/mermaid",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 269.03,
+      "error": null,
+      "request_info": "params={include_details=True, max_depth=10, show_triggers=True, show_conditions=True}"
+    },
+    {
+      "path": "/api/v1/sequence/shadow/html",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 284.55,
+      "error": null,
+      "request_info": ""
+    },
+    {
+      "path": "/api/v1/sequence/shadow/visualizer/stats",
+      "method": "GET",
+      "status_code": 200,
+      "success": true,
+      "category": "success",
+      "duration_ms": 274.93,
+      "error": null,
+      "request_info": ""
+    }
+  ]
+}
