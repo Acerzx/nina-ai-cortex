@@ -1,12 +1,17 @@
 """
 Base File Watcher — базовый класс для всех файловых вотчеров.
-
 ИСПРАВЛЕНО (audit 5.1): Сохранение ссылок на debounced задачи для предотвращения
 их отмены сборщиком мусора.
+
+ИСПРАВЛЕНО (С-17): Добавлен threading.Lock для защиты _pending dict от
+race condition между watchdog thread (on_modified) и asyncio event loop
+(_safe_cb). Используется threading.Lock, а не asyncio.Lock, потому что
+конфликт возникает МЕЖДУ потоками, а не внутри одного event loop.
 """
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Callable, Awaitable, Set
 from watchdog.observers import Observer
@@ -24,6 +29,9 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
 
     ИСПРАВЛЕНО (audit 5.1): Добавлен набор _active_tasks для хранения
     ссылок на все активные debounced задачи.
+
+    ИСПРАВЛЕНО (С-17): _pending dict защищён threading.Lock для
+    thread-safe доступа между watchdog thread и asyncio event loop.
     """
 
     def __init__(self, loop, callback, target_files, debounce):
@@ -35,10 +43,22 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
         # Debouncing state
         self._pending = {}
 
+        # ИСПРАВЛЕНО (С-17): Lock для thread-safe доступа к _pending
+        # Критично: on_modified() вызывается из watchdog thread,
+        # _safe_cb() — из asyncio event loop thread.
+        # threading.Lock работает между потоками, asyncio.Lock — нет.
+        self._pending_lock = threading.Lock()
+
         # ИСПРАВЛЕНО (audit 5.1): Хранение ссылок на активные задачи
         self._active_tasks: Set[asyncio.Task] = set()
 
     def on_modified(self, event: FileSystemEvent):
+        """
+        Вызывается из WATCHDOG THREAD при модификации файла.
+
+        ИСПРАВЛЕНО (С-17): Доступ к _pending защищён threading.Lock,
+        чтобы избежать race condition с _safe_cb() из event loop.
+        """
         if event.is_directory:
             return
 
@@ -50,17 +70,23 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
         ):
             return
 
-        # Отменяем предыдущую debounced задачу для этого файла
-        if path.name in self._pending:
-            self._pending[path.name].cancel()
+        # ИСПРАВЛЕНО (С-17): Защищённый доступ к _pending
+        with self._pending_lock:
+            # Отменяем предыдущую debounced задачу для этого файла
+            if path.name in self._pending:
+                self._pending[path.name].cancel()
 
-        # Создаем новую debounced задачу
-        self._pending[path.name] = self.loop.call_later(
-            self.debounce, self._schedule_task, path
-        )
+            # Создаем новую debounced задачу
+            self._pending[path.name] = self.loop.call_later(
+                self.debounce, self._schedule_task, path
+            )
 
     def _schedule_task(self, path: Path):
-        """Создает задачу и сохраняет ссылку на неё."""
+        """
+        Создаёт задачу и сохраняет ссылку на неё.
+
+        Вызывается из asyncio event loop через loop.call_later().
+        """
         task = asyncio.create_task(self._safe_cb(path))
 
         # ИСПРАВЛЕНО (audit 5.1): Сохраняем ссылку на задачу
@@ -68,15 +94,22 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
         task.add_done_callback(self._active_tasks.discard)
 
     async def _safe_cb(self, path: Path):
-        """Безопасный вызов callback с обработкой ошибок."""
+        """
+        Безопасный вызов callback с обработкой ошибок.
+
+        Вызывается из ASYNCIO EVENT LOOP THREAD.
+
+        ИСПРАВЛЕНО (С-17): Доступ к _pending защищён threading.Lock.
+        """
         try:
             await self.callback(path)
         except Exception as e:
             logger.error(f"Error processing {path}: {e}")
         finally:
-            # Удаляем из pending после выполнения
-            if path.name in self._pending:
-                del self._pending[path.name]
+            # ИСПРАВЛЕНО (С-17): Защищённое удаление из _pending
+            with self._pending_lock:
+                if path.name in self._pending:
+                    del self._pending[path.name]
 
             # ИСПРАВЛЕНО (v4.0 — проблема #51): удаляем задачу из active_tasks
             current_task = asyncio.current_task()
@@ -84,11 +117,24 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
                 self._active_tasks.discard(current_task)
 
     def cancel_all_pending(self):
-        """Отменяет все pending и active задачи."""
-        # Отменяем pending задачи
-        for timer in self._pending.values():
+        """
+        Отменяет все pending и active задачи.
+
+        Вызывается из asyncio event loop при остановке watcher'а.
+
+        ИСПРАВЛЕНО (С-17): Доступ к _pending защищён threading.Lock.
+        Делаем snapshot под lock, затем отменяем timer'ы вне lock
+        (timer.cancel() — быстрая операция, но лучше не держать lock
+        во время итерации).
+        """
+        # ИСПРАВЛЕНО (С-17): Snapshot под lock
+        with self._pending_lock:
+            pending_timers = list(self._pending.values())
+            self._pending.clear()
+
+        # Отменяем timer'ы вне lock (thread-safe operation)
+        for timer in pending_timers:
             timer.cancel()
-        self._pending.clear()
 
         # Отменяем active задачи
         for task in list(self._active_tasks):
@@ -116,7 +162,6 @@ class BaseFileWatcher:
         self.registry = registry
         self.observer = Observer()
         self.loop = asyncio.get_running_loop()
-
         self.handler = AsyncDebouncedEventHandler(
             self.loop,
             self.process_file,
@@ -137,11 +182,9 @@ class BaseFileWatcher:
     def stop(self):
         """
         Останавливает мониторинг.
-
         ИСПРАВЛЕНО (audit 5.1): Отменяет все pending и active задачи.
         """
         # ИСПРАВЛЕНО (audit 5.1): Отменяем все задачи перед остановкой
         self.handler.cancel_all_pending()
-
         self.observer.stop()
         self.observer.join()
