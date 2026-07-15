@@ -182,6 +182,9 @@ class MetricsConfig(BaseModel):
     ai_action_log_max: int = 1000
     active_alerts_max: int = 50
     update_interval: float = 3.0
+    # НОВОЕ (К-8): Параметры EventBus
+    event_queue_maxsize: int = 10000
+    event_stop_timeout_seconds: float = 5.0
 
 
 class SimulationConfig(BaseModel):

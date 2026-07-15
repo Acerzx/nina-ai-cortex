@@ -432,3 +432,13 @@ embeddings:
   model: "nomic-embed-text"
   cache_file: "./data/embeddings_cache.pkl"
   dimension: 768
+
+# 15. МЕТРИКИ И ИСТОРИЯ
+metrics:
+  history_max_points: 100
+  ai_action_log_max: 1000
+  active_alerts_max: 50
+  update_interval: 3.0
+  # НОВОЕ (К-8): Параметры EventBus
+  event_queue_maxsize: 10000        # Максимальный размер очереди событий
+  event_stop_timeout_seconds: 5.0   # Таймаут graceful stop (секунды)
