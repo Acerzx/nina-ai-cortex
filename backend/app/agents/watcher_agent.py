@@ -93,6 +93,8 @@ class WatcherAgent(BaseAgent):
             event_bus.subscribe("NEW_FRAME", self._on_new_frame)
             event_bus.subscribe("PROMETHEUS_UPDATE", self._on_prometheus_update)
             event_bus.subscribe("LOG_EVENT", self._on_log_event)
+            # ИСПРАВЛЕНО (С-9): подписываем _on_livestack_enhanced
+            event_bus.subscribe("LIVESTACK_ENHANCED", self._on_livestack_enhanced)
             self._subscribed = True
 
         logger.info("✅ Watcher Agent initialized with thresholds:")
@@ -106,40 +108,10 @@ class WatcherAgent(BaseAgent):
             event_bus.unsubscribe("NEW_FRAME", self._on_new_frame)
             event_bus.unsubscribe("PROMETHEUS_UPDATE", self._on_prometheus_update)
             event_bus.unsubscribe("LOG_EVENT", self._on_log_event)
+            # ИСПРАВЛЕНО (С-9): отписываем _on_livestack_enhanced
+            event_bus.unsubscribe("LIVESTACK_ENHANCED", self._on_livestack_enhanced)
             self._subscribed = False
         await super().shutdown()
-
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует контекст и принимает решение.
-        Вызывается Orchestrator'ом при необходимости.
-        """
-        # Проверяем метрики
-        anomalies = await self._check_all_metrics()
-        if anomalies:
-            # Создаем решение для обработки аномалий
-            decision = AgentDecision(
-                agent=self.name,
-                decision_type="ANOMALY_DETECTED",
-                inputs={"anomalies_count": len(anomalies)},
-                outputs={"anomalies": [a.model_dump() for a in anomalies]},
-                rationale=f"Обнаружено {len(anomalies)} аномалий",
-                confidence=0.95,
-            )
-            self.log_decision(decision)
-            return decision
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет принятое решение."""
-        if decision.decision_type == "ANOMALY_DETECTED":
-            anomalies = decision.outputs.get("anomalies", [])
-            # Обрабатываем каждую аномалию
-            for anomaly_data in anomalies:
-                anomaly = AnomalyReport(**anomaly_data)
-                await self._handle_anomaly(anomaly)
-            return True
-        return False
 
     async def _on_new_frame(self, data: Dict[str, Any]):
         """Обработка нового кадра."""

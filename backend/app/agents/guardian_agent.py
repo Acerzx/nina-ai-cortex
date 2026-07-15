@@ -62,35 +62,6 @@ class GuardianAgent(BaseAgent):
 
         await super().shutdown()
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """Анализирует контекст безопасности."""
-        if await self._check_critical_conditions():
-            decision = AgentDecision(
-                agent=self.name,
-                decision_type="EMERGENCY_PARK",
-                inputs={"reason": "Critical safety conditions detected"},
-                outputs={"action": "park_mount"},
-                rationale="Критические условия безопасности - необходима немедленная парковка",
-                confidence=1.0,
-            )
-            self.log_decision(decision)
-            return decision
-
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет решение безопасности."""
-        if decision.decision_type == "EMERGENCY_PARK":
-            return await self._emergency_park()
-        elif decision.decision_type == "TRIGGER_AUTOFOCUS":
-            return await self._trigger_autofocus(
-                decision.inputs.get("reason", "AI decision")
-            )
-        elif decision.decision_type == "TRIGGER_DITHER":
-            return await self._trigger_dither(
-                decision.inputs.get("reason", "AI decision")
-            )
-
         return False
 
     async def _handle_alert(self, data: Dict[str, Any]) -> None:

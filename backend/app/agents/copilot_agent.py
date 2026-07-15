@@ -68,44 +68,6 @@ class CopilotAgent(BaseAgent):
 
         await super().shutdown()
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует текущий шаг и генерирует инструкцию.
-        """
-        sequence_state = observatory_state.current_metrics.get("sequence", {})
-
-        # Проверяем, есть ли активный MessageBox
-        if observatory_state.current_metrics.get("is_message_box_active"):
-            guide = await self._generate_messagebox_guide()
-            if guide:
-                decision = AgentDecision(
-                    agent=self.name,
-                    decision_type="INTERACTIVE_GUIDE_GENERATED",
-                    inputs={"step": "MessageBox"},
-                    outputs={"guide": guide.model_dump()},
-                    rationale="Сгенерирована инструкция для MessageBox",
-                    confidence=0.95,
-                )
-                self.log_decision(decision)
-                return decision
-
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет принятое решение (публикует инструкцию для UI)."""
-        if decision.decision_type == "INTERACTIVE_GUIDE_GENERATED":
-            guide_data = decision.outputs.get("guide", {})
-
-            # Публикуем инструкцию для Frontend
-            await event_bus.publish(
-                "COPILOT_GUIDE_READY",
-                {"guide": guide_data, "timestamp": datetime.now().isoformat()},
-            )
-
-            return True
-
-        return False
-
     async def _on_sequence_item_started(self, data: Dict[str, Any]) -> None:
         """Обработка начала нового шага секвенсора."""
         item_type = data.get("Type", "")

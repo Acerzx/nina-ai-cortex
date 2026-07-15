@@ -125,6 +125,8 @@ class StrategistAgent(BaseAgent):
         event_bus.subscribe(
             "DIAGNOSTIC_RECOMMENDATION", self._on_diagnostic_recommendation
         )
+        # ИСПРАВЛЕНО (С-8): подписываем _on_snr_update
+        event_bus.subscribe("SNR_UPDATE", self._on_snr_update)
 
         logger.info("✅ Strategist Agent initialized with quality targets:")
         for key, value in self.quality_targets.items():
@@ -139,59 +141,9 @@ class StrategistAgent(BaseAgent):
         event_bus.unsubscribe(
             "DIAGNOSTIC_RECOMMENDATION", self._on_diagnostic_recommendation
         )
+        # ИСПРАВЛЕНО (С-8): отписываем _on_snr_update
+        event_bus.unsubscribe("SNR_UPDATE", self._on_snr_update)
         await super().shutdown()
-
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует контекст и предлагает оптимизации.
-        Вызывается Orchestrator'ом при необходимости.
-        """
-        proposals = []
-
-        # 1. Делегируем анализ SNR и экспозиции в ParameterOptimizer
-        snr_proposal = await self._analyze_snr_and_exposure()
-        if snr_proposal:
-            proposals.append(snr_proposal)
-
-        # 2. Анализ текущих целей и погодных условий
-        target_proposal = await self._analyze_target_suitability()
-        if target_proposal:
-            proposals.append(target_proposal)
-
-        # 3. Делегируем анализ интервала автофокуса в ParameterOptimizer
-        autofocus_proposal = await self._analyze_autofocus_interval()
-        if autofocus_proposal:
-            proposals.append(autofocus_proposal)
-
-        if proposals:
-            decision = AgentDecision(
-                agent=self.name,
-                decision_type="OPTIMIZATION_PROPOSED",
-                inputs={"proposals_count": len(proposals)},
-                outputs={"proposals": [p.model_dump() for p in proposals]},
-                rationale=f"Предложено {len(proposals)} оптимизаций",
-                confidence=max(p.confidence for p in proposals),
-            )
-            self.log_decision(decision)
-            return decision
-
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет принятые оптимизации."""
-        if decision.decision_type == "OPTIMIZATION_PROPOSED":
-            proposals = decision.outputs.get("proposals", [])
-            success_count = 0
-
-            for proposal_data in proposals:
-                proposal = OptimizationProposal(**proposal_data)
-                success = await self._apply_optimization(proposal)
-                if success:
-                    success_count += 1
-
-            return success_count > 0
-
-        return False
 
     async def _on_livestack_update(self, data: Dict[str, Any]) -> None:
         """Обработка обновления LiveStack статуса."""

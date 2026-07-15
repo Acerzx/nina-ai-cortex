@@ -76,51 +76,6 @@ class CalibratorAgent(BaseAgent):
         event_bus.unsubscribe("MASTERS_INDEXED", self._on_masters_indexed)
         await super().shutdown()
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """Проверяет калибровки для текущих параметров съемки."""
-        checks = await self._check_all_calibrations()
-        stale_calibrations = [c for c in checks if not c.is_fresh]
-
-        if stale_calibrations:
-            decision = AgentDecision(
-                agent=self.name,
-                decision_type="CALIBRATION_STALE",
-                inputs={"stale_count": len(stale_calibrations)},
-                outputs={"checks": [c.model_dump() for c in checks]},
-                rationale=(
-                    f"Обнаружено {len(stale_calibrations)} устаревших калибровок"
-                ),
-                confidence=1.0,
-            )
-            self.log_decision(decision)
-            return decision
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет действия по обновлению калибровок."""
-        if decision.decision_type == "CALIBRATION_STALE":
-            checks = decision.outputs.get("checks", [])
-            for check_data in checks:
-                check = CalibrationCheck(**check_data)
-                if not check.is_fresh:
-                    # Проверяем throttling перед публикацией
-                    alert_key = f"{check.master_type}_{check.recommendation}"
-                    if not self._is_alert_in_cooldown(alert_key):
-                        await event_bus.publish(
-                            "ALERT",
-                            {
-                                "level": "WARNING",
-                                "message": (
-                                    f"Калибровка {check.master_type} "
-                                    f"устарела: {check.recommendation}"
-                                ),
-                                "agent": self.name,
-                                "timestamp": datetime.now().isoformat(),
-                            },
-                        )
-                        self._recent_alerts[alert_key] = datetime.now()
-            return True
-        return False
 
     async def _on_new_frame(self, data: Dict[str, Any]) -> None:
         """Проверяет калибровки для каждого нового кадра."""

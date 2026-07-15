@@ -157,60 +157,6 @@ class AuditorAgent(BaseAgent):
         event_bus.unsubscribe("SEQUENCE_STOPPED", self._on_sequence_stopped)
         await super().shutdown()
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует завершенную сессию.
-        Вызывается Orchestrator'ом при завершении сессии.
-        """
-        # Генерируем Session Digest
-        digest = await self._generate_session_digest()
-
-        if digest:
-            decision = AgentDecision(
-                agent=self.name,
-                decision_type="SESSION_DIGEST_GENERATED",
-                inputs={"session_id": digest.session_id},
-                outputs={"digest": digest.model_dump()},
-                rationale=f"Session Digest generated for {digest.target}",
-                confidence=1.0,
-            )
-            self.log_decision(decision)
-            return decision
-
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет индексацию Session Digest в RAG."""
-        if decision.decision_type == "SESSION_DIGEST_GENERATED":
-            digest_data = decision.outputs.get("digest", {})
-
-            try:
-                # Индексируем в RAG
-                chunks_added = await rag_engine.add_session_digest(digest_data)
-                logger.info(f"✅ Session Digest indexed in RAG: {chunks_added} chunks")
-
-                # Сохраняем в историю
-                digest = SessionDigest(**digest_data)
-                self._session_history.append(digest)
-
-                # Публикуем событие для UI
-                await event_bus.publish(
-                    "SESSION_DIGEST_READY",
-                    {
-                        "session_id": digest.session_id,
-                        "quality_score": digest.quality_score,
-                        "recommendations": digest.recommendations,
-                    },
-                )
-
-                return True
-
-            except Exception as e:
-                logger.error(f"Failed to index Session Digest: {e}")
-                return False
-
-        return False
-
     async def _on_sequence_stopped(self, data: Dict[str, Any]) -> None:
         """Обработка события завершения сессии."""
         logger.info("📊 Sequence stopped, generating Session Digest...")

@@ -83,64 +83,6 @@ class DiagnosticianAgent(BaseAgent):
         event_bus.unsubscribe("ALERT", self._on_alert)
         await super().shutdown()
 
-    async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
-        """
-        Анализирует контекст и определяет root cause проблемы.
-        Вызывается Orchestrator'ом при получении алерта от Watcher.
-        """
-        # Получаем активные алерты
-        active_alerts = observatory_state.active_alerts
-        if not active_alerts:
-            return None
-
-        # Анализируем последний алерт
-        latest_alert = active_alerts[-1]
-        alert_context = latest_alert.get("context", {})
-
-        # Выполняем root cause analysis
-        analysis = await self._perform_root_cause_analysis(
-            problem=latest_alert.get("message", "Unknown problem"),
-            context=alert_context,
-        )
-
-        if analysis:
-            decision = AgentDecision(
-                agent=self.name,
-                decision_type="ROOT_CAUSE_IDENTIFIED",
-                inputs={"problem": analysis.problem, "context": alert_context},
-                outputs={
-                    "root_cause": analysis.root_cause,
-                    "confidence": analysis.confidence,
-                    "recommended_actions": analysis.recommended_actions,
-                },
-                rationale=f"Root cause identified: {analysis.root_cause}",
-                confidence=analysis.confidence,
-            )
-            self.log_decision(decision)
-            return decision
-        return None
-
-    async def execute(self, decision: AgentDecision) -> bool:
-        """Выполняет принятое решение (публикует рекомендации)."""
-        if decision.decision_type == "ROOT_CAUSE_IDENTIFIED":
-            root_cause = decision.outputs.get("root_cause", "")
-            recommended_actions = decision.outputs.get("recommended_actions", [])
-
-            # Публикуем рекомендации для других агентов
-            await event_bus.publish(
-                "DIAGNOSTIC_RECOMMENDATION",
-                {
-                    "root_cause": root_cause,
-                    "confidence": decision.confidence,
-                    "recommended_actions": recommended_actions,
-                    "timestamp": datetime.now().isoformat(),
-                },
-            )
-            logger.info(f"🔍 Diagnostic recommendation: {root_cause}")
-            logger.info(f"   Recommended actions: {recommended_actions}")
-            return True
-        return False
-
     async def _on_alert(self, data: Dict[str, Any]) -> None:
         """Обработка алерта от Watcher."""
         level = data.get("level", "INFO")
