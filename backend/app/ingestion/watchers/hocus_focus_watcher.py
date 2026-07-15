@@ -28,7 +28,7 @@ from app.ingestion.parsers.hocus_focus import (
 )
 from app.core.capability_registry import CapabilityRegistry
 
-from app.core.math_utils import calculate_trend
+from backend.app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("HocusFocusWatcher")
 

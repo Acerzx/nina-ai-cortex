@@ -11,11 +11,12 @@ Prometheus Scraper
 
 import asyncio
 import logging
-import httpx
+
 from datetime import datetime, timedelta
 from app.core.config import settings
 from app.core.events import event_bus
 from app.ingestion.parsers.prometheus_metrics import parse_prometheus_text
+from app.core.http_client import http_client_manager
 
 logger = logging.getLogger("PrometheusScraper")
 
@@ -88,68 +89,78 @@ class PrometheusScraper:
                 pass
 
     async def _scrape_loop(self):
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            while self._running:
-                try:
-                    response = await client.get(self.url)
+        """
+        Основной цикл опроса Prometheus.
 
-                    if response.status_code == 200:
-                        # Успешный запрос - сбрасываем счетчик ошибок
-                        if self._consecutive_errors > 0:
-                            logger.info(
-                                f"✅ Prometheus connection восстановлено после "
-                                f"{self._consecutive_errors} ошибок"
-                            )
-                            self._consecutive_errors = 0
-                            self._last_error_time = None
+        ИСПРАВЛЕНО (С-15 + Н-10): использует http_client_manager для connection pooling.
+        Клиент для Prometheus кэшируется по ключу "prometheus:{url}" и переиспользуется
+        между всеми итерациями loop. Таймауты из settings.http_client.prometheus.
+        """
+        # ИСПРАВЛЕНО (С-15): Получаем клиент через менеджер один раз
+        # service="prometheus" — использует конфигурацию из settings.http_client.prometheus
+        # (timeout=5.0s, max_connections=5, max_keepalive=3)
+        client = await http_client_manager.get_client(
+            base_url=self.url,
+            service="prometheus",
+        )
 
+        while self._running:
+            try:
+                response = await client.get(self.url)
+                if response.status_code == 200:
+                    # Успешный запрос - сбрасываем счетчик ошибок
+                    if self._consecutive_errors > 0:
+                        logger.info(
+                            f"✅ Prometheus подключение восстановлено после "
+                            f"{self._consecutive_errors} ошибок"
+                        )
+                        self._consecutive_errors = 0
+                        self._last_error_time = None
                         self._was_connected = True
-                        metrics = parse_prometheus_text(response.text)
-                        await event_bus.publish(
-                            "PROMETHEUS_UPDATE", metrics.model_dump()
-                        )
-                    else:
-                        self._log_error_throttled(
-                            f"Prometheus returned статус {response.status_code}",
-                            level="WARNING",
-                        )
 
-                except httpx.ConnectError:
+                    metrics = parse_prometheus_text(response.text)
+                    await event_bus.publish("PROMETHEUS_UPDATE", metrics.model_dump())
+                else:
+                    self._log_error_throttled(
+                        f"Prometheus вернула статус {response.status_code}",
+                        level="WARNING",
+                    )
+
+            except Exception as e:
+                # Обработка всех ошибок подключения
+                error_type = type(e).__name__
+
+                if "Connect" in error_type:
                     # N.I.N.A. закрыта или Prometheus Exporter плагин отключен
                     self._log_error_throttled(
                         "Prometheus exporter недоступен (N.I.N.A. закрыта или плагин отключен)",
                         level="DEBUG",
                     )
-
-                except httpx.ReadError:
+                elif "Read" in error_type:
                     # "Server disconnected without sending a response"
                     self._log_error_throttled(
                         "Prometheus разорвал соединение (ReadError)", level="DEBUG"
                     )
-
-                except httpx.RemoteProtocolError:
+                elif "RemoteProtocol" in error_type:
                     # Сервер закрыл соединение преждевременно
                     self._log_error_throttled(
                         "Prometheus закрыл соединение преждевременно", level="DEBUG"
                     )
-
-                except httpx.TimeoutException:
-                    self._log_error_throttled("Prometheus timeout (5s)", level="DEBUG")
-
-                except httpx.HTTPError as e:
+                elif "Timeout" in error_type:
+                    self._log_error_throttled("Prometheus timeout", level="DEBUG")
+                elif "HTTP" in error_type:
                     # Любая другая HTTP ошибка
                     self._log_error_throttled(
-                        f"HTTP ошибка Prometheus: {type(e).__name__}", level="DEBUG"
+                        f"HTTP ошибка Prometheus: {error_type}", level="DEBUG"
                     )
-
-                except Exception as e:
-                    # Неожиданные ошибки (не httpx)
+                else:
+                    # Неожиданные ошибки
                     self._log_error_throttled(
-                        f"Неожиданная ошибка Prometheus: {type(e).__name__}: {e}",
+                        f"Неожиданная ошибка Prometheus: {error_type}: {e}",
                         level="WARNING",
                     )
 
-                await asyncio.sleep(self.interval)
+            await asyncio.sleep(self.interval)
 
     def _log_error_throttled(self, message: str, level: str = "DEBUG"):
         """

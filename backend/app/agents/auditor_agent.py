@@ -46,7 +46,7 @@ from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
 
-from app.core.math_utils import calculate_trend
+from backend.app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("AuditorAgent")
 
@@ -497,7 +497,7 @@ class AuditorAgent(BaseAgent):
         Рассчитывает quality score через единый модуль app.core.quality.
         ИСПРАВЛЕНО (С-10): устранено дублирование формулы.
         """
-        from app.core.quality import calculate_quality_score
+        from backend.app.core.quality import calculate_quality_score
 
         # Получаем eccentricity из observatory_state (если доступно)
         avg_eccentricity = observatory_state.current_metrics.get("eccentricity")

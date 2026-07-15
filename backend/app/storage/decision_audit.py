@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field
+from app.core.executors import run_io
 
 logger = logging.getLogger("DecisionAudit")
 
@@ -492,9 +493,12 @@ class DecisionAuditTrail:
         filename = f"decisions_archive_{reason}_{timestamp}.json"
         filepath = archive_path / filename
 
-        # Синхронная запись файла (редкая операция, допустимо)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(archive_data, f, indent=2, ensure_ascii=False)
+        # ИСПРАВЛЕНО (С-12): асинхронная запись через run_io
+        def _write_archive():
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(archive_data, f, indent=2, ensure_ascii=False)
+
+        await run_io(_write_archive)
 
         self._last_archive_path = str(filepath)
         logger.info(f"📦 Archived {len(rows)} decisions to {filepath}")
@@ -552,8 +556,12 @@ class DecisionAuditTrail:
         filename = f"decisions_archive_count_{timestamp}.json"
         filepath = archive_path / filename
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(archive_data, f, indent=2, ensure_ascii=False)
+        # ИСПРАВЛЕНО (С-12): асинхронная запись через run_io
+        def _write_archive():
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(archive_data, f, indent=2, ensure_ascii=False)
+
+        await run_io(_write_archive)
 
         self._last_archive_path = str(filepath)
         logger.info(f"📦 Archived {len(rows)} decisions to {filepath}")

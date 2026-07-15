@@ -21,7 +21,7 @@ import aiofiles
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
 from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
-from app.core.math_utils import calculate_trend
+from backend.app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("LiveStackWatcher")
 

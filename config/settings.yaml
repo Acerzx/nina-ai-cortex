@@ -407,7 +407,52 @@ metrics:
   event_queue_maxsize: 10000        # Максимальный размер очереди событий
   event_stop_timeout_seconds: 5.0   # Таймаут graceful stop (секунды)
 
-  # ============================================================================
+
+# ============================================================================
+# HTTP CLIENT MANAGER (С-15: единый менеджер HTTP клиентов)
+# ============================================================================
+# Архитектура: отдельный httpx.AsyncClient на каждый base_url
+# Кэширование клиентов по base_url для connection pooling
+# Конфигурация таймаутов и лимитов для каждого сервиса
+http_client:
+  # Глобальные настройки
+  default_timeout_seconds: 30.0
+  default_max_connections: 20
+  default_max_keepalive: 10
+  default_keepalive_expiry: 30
+  
+  # N.I.N.A. Advanced API
+  nina:
+    timeout_seconds: 10.0
+    max_connections: 20
+    max_keepalive: 10
+    keepalive_expiry: 30
+  
+  # Ollama LLM
+  ollama:
+    timeout_seconds: 30.0
+    max_connections: 10
+    max_keepalive: 5
+    keepalive_expiry: 30
+  
+  # Prometheus Scraper
+  prometheus:
+    timeout_seconds: 5.0
+    max_connections: 5
+    max_keepalive: 3
+    keepalive_expiry: 30
+  
+  # InfluxDB (не используется напрямую, через influxdb-client)
+  # Qdrant (не используется напрямую, через qdrant-client)
+  
+  # Embeddings (Ollama /api/embed)
+  embeddings:
+    timeout_seconds: 30.0
+    max_connections: 5
+    max_keepalive: 3
+    keepalive_expiry: 30
+
+# ============================================================================
 # QUALITY SCORE CONFIGURATION (С-10: единый модуль расчёта)
 # ============================================================================
 # Веса факторов качества (должны суммироваться в 1.0)

@@ -23,8 +23,8 @@ import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
-import httpx
 from qdrant_client import AsyncQdrantClient
+
 from qdrant_client.models import (
     Distance,
     VectorParams,
@@ -33,6 +33,7 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
 )
+from app.core.http_client import http_client_manager
 from app.core.config import settings
 from app.core.events import event_bus
 from app.core.ttl_lru_cache import AsyncTTLCache  # ← ИМПОРТ НОВОГО КЭША
@@ -61,7 +62,7 @@ class RAGEngine:
         self.ollama_host = settings.ai_settings.ollama_host
 
         self._client: Optional[AsyncQdrantClient] = None
-        self._http_client: Optional[httpx.AsyncClient] = None
+
         self._initialized = False
         self._vector_size = 384
         self._embedding_backend: str = "unknown"
@@ -139,8 +140,6 @@ class RAGEngine:
                     ),
                 )
 
-            self._http_client = httpx.AsyncClient(timeout=30.0)
-
             event_bus.subscribe("SESSION_COMPLETED", self._on_session_completed)
             event_bus.subscribe("NIGHT_SUMMARY", self._on_night_summary)
 
@@ -159,20 +158,21 @@ class RAGEngine:
             logger.error(f"Failed to initialize RAG Engine: {e}")
 
     async def close(self):
-        """Корректно закрывает все подключения и очищает кэш."""
+        """
+        Корректно закрывает все подключения и очищает кэш.
+
+        ИСПРАВЛЕНО (С-15):
+        - HTTP клиент больше не закрывается здесь (это делает http_client_manager)
+        - Закрывается только Qdrant клиент и очищается кэш эмбеддингов
+        """
         try:
             event_bus.unsubscribe("SESSION_COMPLETED", self._on_session_completed)
             event_bus.unsubscribe("NIGHT_SUMMARY", self._on_night_summary)
         except Exception:
             pass
 
-        if self._http_client:
-            try:
-                await self._http_client.aclose()
-            except Exception as e:
-                logger.debug(f"Error closing HTTP client: {e}")
-            finally:
-                self._http_client = None
+        # ИСПРАВЛЕНО (С-15): HTTP клиент закрывается через менеджер при shutdown
+        # Здесь только закрываем Qdrant и очищаем кэш
 
         if self._client:
             try:
@@ -234,8 +234,14 @@ class RAGEngine:
             logger.debug(f"LocalEmbeddings failed: {e}")
 
         # Попытка 2: Ollama HTTP fallback
-        if not self._http_client:
-            logger.error("HTTP client not available for Ollama fallback")
+        # ИСПРАВЛЕНО (С-15): Получаем клиент через http_client_manager
+        try:
+            client = await http_client_manager.get_client(
+                base_url=self.ollama_host,
+                service="embeddings",
+            )
+        except Exception as e:
+            logger.error(f"Failed to get HTTP client for Ollama fallback: {e}")
             self._stats["embedding_failures"] += 1
             return None
 
@@ -251,8 +257,8 @@ class RAGEngine:
                     if use_input
                     else {"model": self.embedding_model, "prompt": text}
                 )
+                response = await client.post(endpoint, json=payload)
 
-                response = await self._http_client.post(endpoint, json=payload)
                 response.raise_for_status()
                 data = response.json()
 

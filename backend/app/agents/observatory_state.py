@@ -65,7 +65,7 @@ from app.core.unified_metric import (
     UnitRegistry,
     is_prometheus_unique,
 )
-from app.core.math_utils import calculate_trend
+from backend.app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("MetricsAggregator")
 
@@ -128,6 +128,10 @@ class MetricsAggregator:
             "gain": None,
             "filter": None,
             "snr": None,
+            # ИСПРАВЛЕНО (С-16): Целевые координаты для точного расчёта MF
+            "target_ra_deg": None,  # Right Ascension цели в градусах
+            "target_dec_deg": None,  # Declination цели в градусах
+            "target_name": None,  # Имя цели (для логов)
         }
 
         # === Unified metrics (новый формат с приоритетами) ===
@@ -322,7 +326,9 @@ class MetricsAggregator:
                 self.current_metrics["rotator_angle"] = data["rotator_angle"]
 
             # === Filter ===
-            if "filter_current" in data and data["filter_current"]:
+            # ИСПРАВЛЕНО (С-7): явная проверка is not None
+            # Пустая строка "" — валидное значение (например, "No Filter")
+            if "filter_current" in data and data["filter_current"] is not None:
                 filter_value = data["filter_current"]
                 if isinstance(filter_value, str):
                     self.current_metrics["filter"] = filter_value
@@ -786,6 +792,35 @@ class MetricsAggregator:
     # ========================================================================
     # PUBLIC API: Full State (для API и агентов)
     # ========================================================================
+
+    async def update_target_coordinates(
+        self,
+        ra_deg: Optional[float],
+        dec_deg: Optional[float],
+        target_name: Optional[str] = None,
+    ) -> None:
+        """
+        Обновляет целевые координаты для точного расчёта Meridian Flip.
+
+        ИСПРАВЛЕНО (С-16): Вызывается при старте новой цели или загрузке секвенсора.
+
+        Args:
+            ra_deg: Right Ascension в градусах (0-360)
+            dec_deg: Declination в градусах (-90 до +90)
+            target_name: Имя цели (для логов)
+        """
+        async with self._metrics_lock:
+            self.current_metrics["target_ra_deg"] = ra_deg
+            self.current_metrics["target_dec_deg"] = dec_deg
+            if target_name:
+                self.current_metrics["target_name"] = target_name
+
+        if ra_deg is not None and dec_deg is not None:
+            logger.info(
+                f"🎯 Target coordinates updated: "
+                f"RA={ra_deg:.4f}°, Dec={dec_deg:.4f}°"
+                f"{f' ({target_name})' if target_name else ''}"
+            )
 
     def get_full_state(self) -> Dict[str, Any]:
         """

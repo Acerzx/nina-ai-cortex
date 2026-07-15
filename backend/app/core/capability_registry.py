@@ -687,6 +687,84 @@ class CapabilityRegistry:
             if cap.installed
         }
 
+    def get_observatory_location(self) -> Optional[tuple]:
+        """
+        Извлекает координаты обсерватории из AstrometrySettings XML профиля.
+
+        ИСПРАВЛЕНО (С-16): Нужен для точного расчёта Hour Angle в PredictiveHAL.
+
+        Ищет в XML-профиле узел:
+        <AstrometrySettings>
+            <Elevation>367</Elevation>
+            <Latitude>56.662121666666664</Latitude>
+            <Longitude>59.574112166666666</Longitude>
+            <Observatory>Mobile</Observatory>
+            <Observer>NoobAstroTeam</Observer>
+            <Site>Sverdlovsk region</Site>
+        </AstrometrySettings>
+
+        Returns:
+            Tuple (latitude, longitude, elevation) в градусах и метрах,
+            или None если координаты не найдены
+        """
+        if not self._registry:
+            logger.debug("Registry is empty, cannot get observatory location")
+            return None
+
+        # Ищем AstrometrySettings в любом плагине или в корне профиля
+        # Обычно они находятся в корне профиля N.I.N.A.
+        try:
+            # Берём самый свежий профиль
+            profiles = list(
+                Path(settings.nina_environment.profiles_dir).glob("*.profile")
+            )
+            if not profiles:
+                logger.debug("No profiles found")
+                return None
+
+            active_profile = max(profiles, key=lambda p: p.stat().st_mtime)
+
+            with open(active_profile, "r", encoding="utf-8") as f:
+                doc = xmltodict.parse(f.read())
+
+            # Ищем AstrometrySettings рекурсивно
+            astro_settings = self._find_key(doc, "AstrometrySettings")
+            if not astro_settings:
+                logger.debug("AstrometrySettings not found in profile")
+                return None
+
+            # Извлекаем координаты
+            lat_str = astro_settings.get("Latitude")
+            lon_str = astro_settings.get("Longitude")
+            elev_str = astro_settings.get("Elevation")
+
+            if lat_str is None or lon_str is None:
+                logger.debug("Latitude or Longitude not found in AstrometrySettings")
+                return None
+
+            try:
+                lat = float(lat_str)
+                lon = float(lon_str)
+                elevation = float(elev_str) if elev_str is not None else 0.0
+
+                # Валидация координат
+                if not (-90.0 <= lat <= 90.0):
+                    logger.warning(f"Invalid latitude: {lat}")
+                    return None
+                if not (-180.0 <= lon <= 180.0):
+                    logger.warning(f"Invalid longitude: {lon}")
+                    return None
+
+                return (lat, lon, elevation)
+
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse observatory coordinates: {e}")
+                return None
+
+        except Exception as e:
+            logger.debug(f"Failed to get observatory location: {e}")
+            return None
+
     def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику Capability Registry."""
         installed_count = sum(

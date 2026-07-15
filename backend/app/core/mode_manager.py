@@ -3,6 +3,10 @@ Mode Manager — управление режимами работы систем
 Обеспечивает graceful degradation при потере LLM API или других компонентов.
 ИСПРАВЛЕНО: Убран спам логов httpx при health check.
 ИСПРАВЛЕНО (проблема #6): model_name → primary_model
+
+ИСПРАВЛЕНО (С-15):
+- Миграция на единый HttpClientManager
+- Health check использует http_client_manager вместо создания нового клиента
 """
 
 import asyncio
@@ -10,9 +14,9 @@ import logging
 from typing import Dict, Any, Optional
 from enum import Enum
 from datetime import datetime
-import httpx
 from app.core.config import settings
 from app.core.events import event_bus
+from app.core.http_client import http_client_manager
 
 logger = logging.getLogger("ModeManager")
 
@@ -29,11 +33,15 @@ class OperationMode(Enum):
 class ModeManager:
     """
     Менеджер режимов работы системы.
+
     Responsibilities:
     - Мониторинг здоровья LLM API (Ollama)
     - Автоматическое переключение в SAFE_AUTONOMOUS при потере LLM
     - Управление разрешениями для агентов в зависимости от режима
     - Публикация событий смены режима
+
+    ИСПРАВЛЕНО (С-15):
+    - Health check использует http_client_manager для connection pooling
     """
 
     def __init__(self):
@@ -161,67 +169,77 @@ class ModeManager:
     async def _check_llm_health(self):
         """
         Проверяет доступность LLM API (Ollama).
-        ИСПРАВЛЕНО: Используем контекстный менеджер для автоматического закрытия.
-        ИСПРАВЛЕНО (проблема #6): model_name → primary_model
+
+        ИСПРАВЛЕНО (С-15):
+        - Использует http_client_manager вместо создания нового клиента
+        - Connection pooling через менеджер
         """
         try:
             ollama_host = settings.ai_settings.ollama_host
 
-            # ИСПРАВЛЕНО: async with гарантирует закрытие клиента
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{ollama_host}/api/tags")
-                is_healthy = response.status_code == 200
+            # ИСПРАВЛЕНО (С-15): Получаем клиент через менеджер
+            client = await http_client_manager.get_client(
+                base_url=ollama_host,
+                service="ollama",
+            )
 
-                if is_healthy != self.llm_healthy:
-                    self.llm_healthy = is_healthy
-                    if is_healthy:
-                        logger.info("✅ LLM API восстановлен")
-                        if self.current_mode == OperationMode.SAFE_AUTONOMOUS:
-                            await self.set_mode(
-                                OperationMode.FULL_AI, reason="LLM API восстановлен"
-                            )
-                    else:
-                        logger.warning("⚠️ LLM API недоступен")
-                        if self.current_mode == OperationMode.FULL_AI:
-                            await self.set_mode(
-                                OperationMode.SAFE_AUTONOMOUS,
-                                reason="LLM API недоступен",
-                            )
-                            await event_bus.publish(
-                                "ALERT",
-                                {
-                                    "level": "WARNING",
-                                    "message": "LLM API недоступен, переключение в safe-autonomous режим",
-                                    "agent": "ModeManager",
-                                    "timestamp": datetime.now().isoformat(),
-                                },
-                            )
+            response = await client.get(
+                f"{ollama_host}/api/tags",
+                timeout=5.0,  # Per-request timeout для health check
+            )
+            is_healthy = response.status_code == 200
 
-                now = datetime.now()
-                should_log_periodic = (
-                    self._last_health_log_time is None
-                    or (now - self._last_health_log_time).total_seconds()
-                    >= self._health_log_interval
+            if is_healthy != self.llm_healthy:
+                self.llm_healthy = is_healthy
+                if is_healthy:
+                    logger.info("✅ LLM API восстановлен")
+                    if self.current_mode == OperationMode.SAFE_AUTONOMOUS:
+                        await self.set_mode(
+                            OperationMode.FULL_AI, reason="LLM API восстановлен"
+                        )
+                else:
+                    logger.warning("⚠️ LLM API недоступен")
+                    if self.current_mode == OperationMode.FULL_AI:
+                        await self.set_mode(
+                            OperationMode.SAFE_AUTONOMOUS,
+                            reason="LLM API недоступен",
+                        )
+                        await event_bus.publish(
+                            "ALERT",
+                            {
+                                "level": "WARNING",
+                                "message": "LLM API недоступен, переключение в safe-autonomous режим",
+                                "agent": "ModeManager",
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        )
+
+            now = datetime.now()
+            should_log_periodic = (
+                self._last_health_log_time is None
+                or (now - self._last_health_log_time).total_seconds()
+                >= self._health_log_interval
+            )
+
+            # ИСПРАВЛЕНО (проблема #6): Используем primary_model вместо model_name
+            if should_log_periodic and is_healthy:
+                logger.debug(
+                    f"LLM health check: OK (model: {settings.ai_settings.primary_model})"
                 )
+                self._last_health_log_time = now
 
-                # ИСПРАВЛЕНО (проблема #6): Используем primary_model вместо model_name
-                if should_log_periodic and is_healthy:
-                    logger.debug(
-                        f"LLM health check: OK (model: {settings.ai_settings.primary_model})"
-                    )
-                    self._last_health_log_time = now
-
-        except httpx.ConnectError:
+        except Exception as e:
+            # Любая ошибка подключения
             if self.llm_healthy:
                 self.llm_healthy = False
-                logger.warning("⚠️ Невозможно подключиться к LLM API")
+                logger.warning(
+                    f"⚠️ Невозможно подключиться к LLM API: {type(e).__name__}"
+                )
                 if self.current_mode == OperationMode.FULL_AI:
                     await self.set_mode(
                         OperationMode.SAFE_AUTONOMOUS,
                         reason="LLM API connection failed",
                     )
-        except Exception as e:
-            logger.debug(f"LLM health check error: {type(e).__name__}")
 
     def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику Mode Manager."""

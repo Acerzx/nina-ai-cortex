@@ -19,8 +19,8 @@ import logging
 from typing import Optional, Dict, Any, List, Set, Tuple
 from datetime import datetime
 from pydantic import BaseModel, Field
-import httpx
 from app.core.config import settings
+from app.core.http_client import http_client_manager
 from app.shadow_engine.state_tracker import state_tracker
 from app.core.events import event_bus
 from app.execution.openapi_client import get_nina_api_client, DynamicAPIClient
@@ -786,74 +786,88 @@ class TriggerEmulator:
         rejected: List[str],
         reason: str,
     ) -> bool:
-        """Выполняет прямой HTTP запрос (fallback без OpenAPI)."""
+        """
+        Выполняет прямой HTTP запрос (fallback без OpenAPI).
+
+        ИСПРАВЛЕНО (С-15): использует http_client_manager для connection pooling.
+        Клиент кэшируется по ключу "nina:{base_url}" и переиспользуется
+        между всеми вызовами триггеров.
+        """
         self._stats["direct_calls"] += 1
-
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                if method == "GET":
-                    response = await client.get(url, params=params)
-                elif method == "POST":
-                    response = await client.post(url, json=params)
-                else:
-                    logger.error(f"❌ Unsupported method: {method}")
-                    self._add_to_history(
-                        trigger_name,
-                        actual_trigger,
-                        reason,
-                        "FAILED_UNSUPPORTED_METHOD",
-                    )
-                    return False
+            # ИСПРАВЛЕНО (С-15): Получаем клиент через менеджер
+            # service="nina" — использует конфигурацию таймаутов из settings.http_client.nina
+            client = await http_client_manager.get_client(
+                base_url=self.base_url,
+                service="nina",
+            )
 
-                # Преобразуем response в dict-формат
-                if response.status_code == 200:
-                    try:
-                        result = response.json()
-                    except Exception:
-                        result = {"status": "success", "data": response.text}
-                else:
-                    result = {
-                        "status": "error",
-                        "code": response.status_code,
-                        "message": response.text[:500],
-                    }
-
-                return self._process_http_result(
-                    result,
+            if method == "GET":
+                response = await client.get(url, params=params)
+            elif method == "POST":
+                response = await client.post(url, json=params)
+            else:
+                logger.error(f"❌ Unsupported method: {method}")
+                self._add_to_history(
                     trigger_name,
                     actual_trigger,
-                    params,
-                    rejected,
                     reason,
+                    "FAILED_UNSUPPORTED_METHOD",
                 )
+                return False
 
-        except httpx.ConnectError:
-            logger.error(
-                f"❌ Cannot connect to N.I.N.A. Advanced API at {self.base_url}\n"
-                f"   Проверьте, что N.I.N.A. запущена и Advanced API включен."
-            )
-            self._stats["failed_triggers"] += 1
-            self._add_to_history(
-                trigger_name, actual_trigger, reason, "FAILED_CONNECTION_ERROR"
-            )
-            return False
+            # Преобразуем response в dict-формат
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                except Exception:
+                    result = {"status": "success", "data": response.text}
+            else:
+                result = {
+                    "status": "error",
+                    "code": response.status_code,
+                    "message": response.text[:500],
+                }
 
-        except httpx.TimeoutException:
-            logger.error(f"❌ Timeout firing trigger '{trigger_name}'")
-            self._stats["failed_triggers"] += 1
-            self._add_to_history(trigger_name, actual_trigger, reason, "FAILED_TIMEOUT")
-            return False
-
-        except Exception as e:
-            logger.error(f"❌ Unexpected error firing trigger '{trigger_name}': {e}")
-            self._stats["failed_triggers"] += 1
-            self._add_to_history(
+            return self._process_http_result(
+                result,
                 trigger_name,
                 actual_trigger,
+                params,
+                rejected,
                 reason,
-                "FAILED_UNEXPECTED",
-                {"error": str(e)},
             )
+
+        except Exception as e:
+            # Обработка всех ошибок подключения (ConnectError, TimeoutException, etc.)
+            error_type = type(e).__name__
+
+            if "Connect" in error_type:
+                logger.error(
+                    f"❌ Cannot connect to N.I.N.A. Advanced API at {self.base_url}\n"
+                    f"   Проверьте, что N.I.N.A. запущена и Advanced API включен."
+                )
+                self._add_to_history(
+                    trigger_name, actual_trigger, reason, "FAILED_CONNECTION_ERROR"
+                )
+            elif "Timeout" in error_type:
+                logger.error(f"❌ Timeout firing trigger '{trigger_name}'")
+                self._add_to_history(
+                    trigger_name, actual_trigger, reason, "FAILED_TIMEOUT"
+                )
+            else:
+                logger.error(
+                    f"❌ Unexpected error firing trigger '{trigger_name}': {e}"
+                )
+                self._add_to_history(
+                    trigger_name,
+                    actual_trigger,
+                    reason,
+                    "FAILED_UNEXPECTED",
+                    {"error": str(e)},
+                )
+
+            self._stats["failed_triggers"] += 1
             return False
 
     def _process_http_result(

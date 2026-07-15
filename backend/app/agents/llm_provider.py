@@ -1,17 +1,20 @@
 """
 LLM Provider — работа с Ollama (локальная + облачная модели).
-
 Архитектура:
 - Основная модель: gemma4:31b-cloud (облачная, мощная)
 - Fallback модель: gemma4:e4b (локальная, быстрая)
 - Обе модели вызываются через Ollama API
-
 Ollama автоматически маршрутизирует cloud модели на свои серверы,
 а локальные модели выполняются на вашем железе.
 
 ИСПРАВЛЕНО (audit 10.1): добавлено корректное управление жизненным циклом
 HTTP-клиента через методы start()/close() и контекстный менеджер.
 Клиент теперь имеет явное состояние и корректно закрывается при shutdown.
+
+ИСПРАВЛЕНО (С-15):
+- Миграция на единый HttpClientManager
+- Убрано самостоятельное создание httpx.AsyncClient
+- Connection pooling через http_client_manager
 """
 
 import logging
@@ -21,9 +24,8 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import httpx
 from pydantic import BaseModel, Field
-
-# ← ДОБАВЬТЕ ЭТУ СТРОКУ:
 from app.core.config import settings
+from app.core.http_client import http_client_manager
 
 logger = logging.getLogger("LLMProvider")
 
@@ -44,10 +46,6 @@ class LLMConfig(BaseModel):
     temperature: float = 0.3
     # Fallback включен
     fallback_enabled: bool = True
-    # Connection pool limits
-    max_connections: int = 10
-    max_keepalive_connections: int = 5
-    keepalive_expiry: int = 30
 
 
 class LLMResponse(BaseModel):
@@ -63,24 +61,20 @@ class LLMResponse(BaseModel):
 class LLMProvider:
     """
     LLM провайдер через Ollama с автоматическим fallback.
-
     Workflow:
     1. Пытается использовать gemma4:31b-cloud (облачная)
     2. При таймауте или ошибке → fallback на gemma4:e4b (локальная)
     3. Если и fallback не работает → возвращает None
 
-    ИСПРАВЛЕНО (audit 10.1):
-    - Явное управление жизненным циклом клиента через start()/close()
-    - Проверка состояния клиента перед каждым запросом
-    - Graceful закрытие при shutdown приложения
+    ИСПРАВЛЕНО (С-15):
+    - Использует http_client_manager для connection pooling
+    - Убраны _client, _client_lock, _is_started
     """
 
     def __init__(self, config: Optional[LLMConfig] = None):
         self.config = config or self._load_config()
-        self._client: Optional[httpx.AsyncClient] = None
-        self._client_lock = asyncio.Lock()  # Защита от race conditions
-        self._is_started: bool = False
-
+        # ИСПРАВЛЕНО (С-15): http_client_manager управляет клиентами
+        # self._client, self._client_lock, self._is_started — удалены
         self._stats = {
             "total_requests": 0,
             "primary_success": 0,
@@ -114,61 +108,40 @@ class LLMProvider:
 
     async def start(self):
         """
-        Запускает LLM Provider и инициализирует HTTP-клиент.
-        Вызывается при старте приложения.
+        Запускает LLM Provider.
+        ИСПРАВЛЕНО (С-15): pre-creates клиент через менеджер.
         """
-        if self._is_started:
-            return
-
-        async with self._client_lock:
-            if self._client is None or self._client.is_closed:
-                self._client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.config.primary_timeout),
-                    limits=httpx.Limits(
-                        max_connections=self.config.max_connections,
-                        max_keepalive_connections=self.config.max_keepalive_connections,
-                        keepalive_expiry=self.config.keepalive_expiry,
-                    ),
-                )
-            self._is_started = True
-            logger.info("✅ LLM Provider started")
+        await http_client_manager.get_client(
+            base_url=self.config.ollama_host,
+            service="ollama",
+        )
+        logger.info("✅ LLM Provider started (via HttpClientManager)")
 
     async def _get_client(self, timeout: float) -> httpx.AsyncClient:
         """
-        Получает или создаёт HTTP клиент с нужным таймаутом.
-        Thread-safe через _client_lock.
+        Получает HTTP клиент через менеджер.
+        ИСПРАВЛЕНО (С-15): делегирует http_client_manager.
+
+        Args:
+            timeout: Таймаут для запроса (используется per-request,
+                     не влияет на конфигурацию клиента в менеджере)
         """
-        async with self._client_lock:
-            if self._client is None or self._client.is_closed:
-                self._client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(timeout),
-                    limits=httpx.Limits(
-                        max_connections=self.config.max_connections,
-                        max_keepalive_connections=self.config.max_keepalive_connections,
-                        keepalive_expiry=self.config.keepalive_expiry,
-                    ),
-                )
-                self._is_started = True
-            # Обновляем таймаут если нужно
-            if self._client.timeout.connect != timeout:
-                self._client.timeout = httpx.Timeout(timeout)
-            return self._client
+        return await http_client_manager.get_client(
+            base_url=self.config.ollama_host,
+            service="ollama",
+        )
 
     async def close(self):
         """
         Корректно закрывает HTTP клиент.
-        Вызывается при shutdown приложения.
+        ИСПРАВЛЕНО (С-15): делегирует http_client_manager.
         """
-        async with self._client_lock:
-            if self._client and not self._client.is_closed:
-                try:
-                    await self._client.aclose()
-                    logger.info("✅ LLM Provider HTTP client closed")
-                except Exception as e:
-                    logger.debug(f"Error closing LLM client: {e}")
-                finally:
-                    self._client = None
-                    self._is_started = False
+        closed = await http_client_manager.close_client(
+            base_url=self.config.ollama_host,
+            service="ollama",
+        )
+        if closed:
+            logger.info("✅ LLM Provider HTTP client closed")
 
     async def generate(
         self,
@@ -180,10 +153,6 @@ class LLMProvider:
         """
         Генерирует ответ от LLM с автоматическим fallback.
         """
-        # Auto-start при первом вызове
-        if not self._is_started:
-            await self.start()
-
         self._stats["total_requests"] += 1
         start_time = datetime.now()
 
@@ -258,9 +227,11 @@ class LLMProvider:
         max_tokens: int,
         temperature: float,
     ) -> Optional[LLMResponse]:
-        """Вызывает Ollama API."""
+        """
+        Вызывает Ollama API.
+        ИСПРАВЛЕНО (С-15): Таймаут применяется per-request через httpx.Timeout.
+        """
         client = await self._get_client(timeout)
-
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -276,9 +247,13 @@ class LLMProvider:
             },
         }
 
+        # ИСПРАВЛЕНО (С-15): Таймаут применяется per-request
+        # httpx.AsyncClient поддерживает timeout в каждом request,
+        # что позволяет переопределить дефолтный таймаут клиента
         response = await client.post(
             f"{self.config.ollama_host}/api/chat",
             json=payload,
+            timeout=httpx.Timeout(timeout),  # Per-request timeout
         )
         response.raise_for_status()
         data = response.json()
@@ -303,6 +278,10 @@ class LLMProvider:
             if total_success > 0
             else 0.0
         )
+        # ИСПРАВЛЕНО (С-15): Читаем статус клиента из менеджера
+        cache_key = f"ollama:{self.config.ollama_host}"
+        manager_stats = http_client_manager.get_stats()
+        client_active = cache_key in manager_stats.get("client_keys", [])
 
         return {
             **self._stats,
@@ -318,8 +297,8 @@ class LLMProvider:
                 "fallback_enabled": self.config.fallback_enabled,
             },
             "client_state": {
-                "is_started": self._is_started,
-                "client_alive": self._client is not None and not self._client.is_closed,
+                "client_active": client_active,
+                "http_client_manager": "active",
             },
         }
 
@@ -332,15 +311,13 @@ class LLMProvider:
             "primary": False,
             "fallback": False,
         }
-
         try:
-            # Auto-start если не запущен
-            if not self._is_started:
-                await self.start()
-
             client = await self._get_client(5.0)
-            response = await client.get(f"{self.config.ollama_host}/api/tags")
-
+            # ИСПРАВЛЕНО (С-15): Per-request timeout для health check
+            response = await client.get(
+                f"{self.config.ollama_host}/api/tags",
+                timeout=httpx.Timeout(5.0),
+            )
             if response.status_code == 200:
                 data = response.json()
                 models = [m["name"] for m in data.get("models", [])]
@@ -350,14 +327,12 @@ class LLMProvider:
                 result["fallback"] = any(
                     self.config.fallback_model in m for m in models
                 )
-
                 logger.info(
                     f"🔍 Model availability: "
                     f"primary={result['primary']}, fallback={result['fallback']}"
                 )
             else:
                 logger.warning(f"⚠️ Ollama /api/tags returned {response.status_code}")
-
         except httpx.ConnectError:
             logger.warning("⚠️ Cannot connect to Ollama (check if it's running)")
         except Exception as e:

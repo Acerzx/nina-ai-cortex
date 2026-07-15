@@ -37,12 +37,23 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.events import event_bus
 from app.agents.observatory_state import observatory_state
+from app.shadow_engine.state_tracker import state_tracker
 
-from app.core.math_utils import (
+from backend.app.core.math_utils import (
     linear_regression,
     calculate_r_squared,
     pearson_correlation,
 )
+
+# ИСПРАВЛЕНО (С-16): Импорты для точного расчёта Meridian Flip
+try:
+    from astropy.time import Time
+    from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+    import astropy.units as u
+
+    ASTROPY_AVAILABLE = True
+except ImportError:
+    ASTROPY_AVAILABLE = False
 
 logger = logging.getLogger("PredictiveHAL")
 
@@ -500,6 +511,102 @@ class PredictiveHAL:
         return None
 
     # ========================================================================
+    # ASTROPY / OBSERVATORY LOCATION (С-16)
+    # ========================================================================
+    def _get_observatory_location(self) -> Optional[object]:
+        """
+        Возвращает EarthLocation для текущей обсерватории.
+        ИСПРАВЛЕНО (С-16): Извлекает координаты из профиля N.I.N.A.
+        Кэширует результат для производительности.
+
+        Returns:
+            astropy.coordinates.EarthLocation или None если astropy недоступен
+            или координаты не определены
+        """
+        if not ASTROPY_AVAILABLE:
+            return None
+
+        # Кэш EarthLocation (координаты не меняются во время сессии)
+        if (
+            hasattr(self, "_cached_earth_location")
+            and self._cached_earth_location is not None
+        ):
+            return self._cached_earth_location
+
+        try:
+            from app.ingestion.watchers.manager import watcher_manager
+
+            if not watcher_manager.registry:
+                logger.debug(
+                    "CapabilityRegistry not available for observatory location"
+                )
+                return None
+
+            # Получаем координаты из AstrometrySettings XML профиля
+            obs_location = watcher_manager.registry.get_observatory_location()
+            if not obs_location:
+                logger.debug("Observatory coordinates not found in N.I.N.A. profile")
+                return None
+
+            lat, lon, elevation = obs_location
+
+            # Создаём EarthLocation (с проверкой валидности)
+            location = EarthLocation(
+                lat=lat * u.deg,
+                lon=lon * u.deg,
+                height=elevation * u.m,
+            )
+
+            self._cached_earth_location = location
+            logger.info(
+                f"📍 Observatory location loaded: "
+                f"lat={lat:.4f}°, lon={lon:.4f}°, elevation={elevation:.0f}m"
+            )
+            return location
+
+        except Exception as e:
+            logger.debug(f"Failed to get observatory location: {e}")
+            return None
+
+    def _calculate_hour_angle(self, target_ra_deg: float) -> Optional[float]:
+        """
+        Вычисляет текущий Hour Angle цели в часах.
+
+        Args:
+            target_ra_deg: Right Ascension цели в градусах
+
+        Returns:
+            Hour Angle в часах ([-12, +12]) или None при ошибке
+        """
+        location = self._get_observatory_location()
+        if location is None:
+            return None
+
+        try:
+            now = Time.now()
+            # Local Sidereal Time (LST)
+            lst = now.sidereal_time("mean", longitude=location.lon)
+            lst_hours = lst.hour + lst.minute / 60.0 + lst.second / 3600.0
+
+            # Целевое RA в часах
+            target_ra_hours = target_ra_deg / 15.0
+
+            # Hour Angle = LST - RA
+            ha_hours = lst_hours - target_ra_hours
+
+            # Нормализуем к диапазону [-12, +12]
+            while ha_hours > 12.0:
+                ha_hours -= 24.0
+            while ha_hours < -12.0:
+                ha_hours += 24.0
+
+            return ha_hours
+
+        except Exception as e:
+            logger.debug(f"Failed to calculate Hour Angle: {e}")
+            return None
+
+    # ========================================================================
     # НОВЫЕ МОДЕЛИ (ЭТАП 5)
     # ========================================================================
 
@@ -507,54 +614,104 @@ class PredictiveHAL:
         """
         Предсказывает конфликт Meridian Flip с критической фазой.
 
+        ИСПРАВЛЕНО (С-16): Гибридный подход:
+        - Primary: Точный расчёт через astropy (Hour Angle → время до MF)
+        - Fallback: Упрощённая логика по mount_ra_hours если astropy недоступен
+        - WebSocket: Детекция MERIDIAN_FLIP_STARTED для синхронизации
+
         NINA делает MF автоматически, но:
         - Не предупреждает, если AF в процессе
         - Не учитывает, что guider calibration теряется при MF
         - Не оптимизирует время MF относительно exposures
-
-        Логика:
-        1. Получаем текущий Hour Angle монтировки
-        2. Вычисляем время до MF (HA ≈ 0 или 12h)
-        3. Проверяем конфликты: AF running, guiding active, незавершённые exposures
-        4. Генерируем предупреждение если конфликт найден
         """
-        # Получаем mount_ra_hours из метрик
-        mount_ra = observatory_state.current_metrics.get("mount_ra_hours")
-        if mount_ra is None:
-            return None
-
         # Получаем текущее состояние
         is_autofocus_running = observatory_state.is_autofocus_running
         is_guiding_active = observatory_state.is_guiding_active
         is_sequence_running = state_tracker.state.is_running
 
-        # Упрощённо: если RA > 11h или < 1h — MF может быть скоро
-        hours_to_flip = None
+        # Получаем координаты цели из observatory_state
+        target_ra_deg = observatory_state.current_metrics.get("target_ra_deg")
+        target_dec_deg = observatory_state.current_metrics.get("target_dec_deg")
 
-        if mount_ra > 11.0:
-            hours_to_flip = 12.0 - mount_ra
-        elif mount_ra < 1.0:
-            hours_to_flip = mount_ra
+        hours_to_flip = None
+        calculation_method = "fallback"
+
+        # === PRIMARY: Точный расчёт через astropy (С-16) ===
+        if ASTROPY_AVAILABLE and target_ra_deg is not None:
+            ha_hours = self._calculate_hour_angle(target_ra_deg)
+            if ha_hours is not None:
+                # Meridian Flip происходит при пересечении HA = 0h
+                # Если HA < 0 → цель ещё не дошла до меридиана
+                # Если HA > 0 → цель уже прошла меридиан (NINA должна была сделать MF)
+                calculation_method = "astropy"
+
+                if ha_hours < 0:
+                    # Цель приближается к меридиану (HA идёт от отрицательного к 0)
+                    hours_to_flip = abs(ha_hours)
+                    logger.debug(
+                        f"🔭 MF prediction (astropy): HA={ha_hours:.3f}h, "
+                        f"time_to_flip={hours_to_flip:.3f}h"
+                    )
+                elif ha_hours > 0 and ha_hours < 0.5:
+                    # Цель уже прошла меридиан, но MF мог не случиться
+                    # NINA обычно делает MF в районе HA=0
+                    hours_to_flip = 0.0
+                    logger.debug(
+                        f"🔭 MF prediction (astropy): HA={ha_hours:.3f}h — "
+                        f"meridian already crossed!"
+                    )
+
+        # === FALLBACK: Упрощённая логика по mount_ra_hours ===
+        if hours_to_flip is None:
+            mount_ra = observatory_state.current_metrics.get("mount_ra_hours")
+            if mount_ra is None:
+                return None
+
+            calculation_method = "fallback"
+
+            # Упрощённо: если RA > 11h или < 1h — MF может быть скоро
+            if mount_ra > 11.0:
+                hours_to_flip = 12.0 - mount_ra
+            elif mount_ra < 1.0:
+                hours_to_flip = mount_ra
+            else:
+                return None  # MF далеко
+
+            logger.debug(
+                f"🔭 MF prediction (fallback): mount_ra={mount_ra:.3f}h, "
+                f"time_to_flip={hours_to_flip:.3f}h"
+            )
 
         if hours_to_flip is None or hours_to_flip > 1.0:
-            return None  # MF далеко
+            return None  # MF далеко (> 1 часа)
 
-        # Проверяем конфликты
+        # === Проверка конфликтов ===
         conflicts = []
         if is_autofocus_running:
-            conflicts.append("autofocus running")
+            conflicts.append("autofocus running (will be interrupted)")
         if is_guiding_active:
-            conflicts.append("guiding active (will need recalibration)")
+            conflicts.append("guiding active (calibration lost after MF)")
         if is_sequence_running:
-            conflicts.append("sequence in progress")
+            conflicts.append("sequence in progress (exposure may be affected)")
+
+        # === Дополнительные конфликты для узкополосных фильтров ===
+        current_filter = observatory_state.current_metrics.get("filter", "")
+        if current_filter:
+            narrowband_filters = ["Ha", "OIII", "SII", "H-alpha"]
+            if any(nf.lower() in current_filter.lower() for nf in narrowband_filters):
+                conflicts.append(
+                    f"narrowband filter ({current_filter}) — long exposure may be "
+                    f"interrupted"
+                )
 
         if not conflicts:
-            return None
+            return None  # Нет конфликтов — MF пройдёт гладко
 
-        # Confidence зависит от количества конфликтов и времени до MF
-        confidence = min(0.95, 0.5 + len(conflicts) * 0.15)
+        # === Confidence зависит от количества конфликтов и точности расчёта ===
+        base_confidence = 0.6 if calculation_method == "astropy" else 0.4
+        confidence = min(0.95, base_confidence + len(conflicts) * 0.12)
 
-        # Severity зависит от времени до MF
+        # === Severity зависит от времени до MF ===
         if hours_to_flip < 0.25:  # < 15 минут
             severity = PredictionSeverity.HIGH
         elif hours_to_flip < 0.5:  # < 30 минут
@@ -562,25 +719,45 @@ class PredictiveHAL:
         else:
             severity = PredictionSeverity.LOW
 
+        # === Формируем recommended_action ===
+        time_str = (
+            f"{int(hours_to_flip * 60)} мин"
+            if hours_to_flip < 1.0
+            else f"{hours_to_flip:.1f} ч"
+        )
+
+        action_text = (
+            f"Meridian flip через {time_str} "
+            f"(расчёт: {calculation_method}). "
+            f"Конфликты: {', '.join(conflicts)}. "
+            f"Рекомендуется: завершить текущие операции "
+        )
+
+        if is_autofocus_running:
+            action_text += "дождаться окончания автофокуса, "
+        if is_guiding_active:
+            action_text += "подготовиться к перекалибровке гида после MF, "
+
+        action_text = action_text.rstrip(", ") + "."
+
         return Prediction(
             prediction_type="meridian_flip_conflict",
             severity=severity,
             confidence=confidence,
             time_to_event_minutes=hours_to_flip * 60,
-            recommended_action=(
-                f"Meridian flip через {hours_to_flip:.1f}h. Конфликты: "
-                f"{', '.join(conflicts)}. "
-                "Рекомендуется: завершить текущие операции, "
-                "подготовиться к перекалибровке гида после MF."
-            ),
+            recommended_action=action_text,
             action_type=ActionType.MEDIUM,
             evidence={
-                "mount_ra_hours": mount_ra,
-                "hours_to_flip": hours_to_flip,
+                "calculation_method": calculation_method,
+                "hours_to_flip": round(hours_to_flip, 4),
                 "conflicts": conflicts,
                 "is_autofocus_running": is_autofocus_running,
                 "is_guiding_active": is_guiding_active,
                 "is_sequence_running": is_sequence_running,
+                "current_filter": current_filter,
+                "target_ra_deg": target_ra_deg,
+                "target_dec_deg": target_dec_deg,
+                "astropy_available": ASTROPY_AVAILABLE,
             },
         )
 

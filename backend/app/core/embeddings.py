@@ -1,6 +1,5 @@
 """
 Embeddings через Ollama.
-
 Использует модель nomic-embed-text через Ollama API.
 Поддерживает оба эндпоинта:
 - /api/embed (новые версии Ollama >= 0.1.26)
@@ -10,6 +9,11 @@ Embeddings через Ollama.
 - Нет дополнительных зависимостей (torch не нужен)
 - Единый источник для LLM и embeddings
 - Работает с Python 3.14 без проблем
+
+ИСПРАВЛЕНО (С-15):
+- Миграция на единый HttpClientManager
+- Убрано самостоятельное создание httpx.AsyncClient
+- Connection pooling через http_client_manager
 """
 
 import logging
@@ -18,8 +22,8 @@ from typing import List, Optional, Dict
 from pathlib import Path
 import pickle
 import httpx
-
 from app.core.config import settings
+from app.core.http_client import http_client_manager
 
 logger = logging.getLogger("Embeddings")
 
@@ -27,9 +31,11 @@ logger = logging.getLogger("Embeddings")
 class OllamaEmbeddings:
     """
     Генерация embeddings через Ollama.
-
     Модель: nomic-embed-text (768 dim)
     Кэширование: pickle на диск для быстрого рестарта
+
+    ИСПРАВЛЕНО (С-15):
+    - Использует http_client_manager для connection pooling
     """
 
     MODEL = "nomic-embed-text"
@@ -40,9 +46,9 @@ class OllamaEmbeddings:
         self._dimension = 768  # nomic-embed-text = 768 dim
         self._cache: Dict[str, List[float]] = {}
         self._initialized = False
-        self._http_client: Optional[httpx.AsyncClient] = None
+        # ИСПРАВЛЕНО (С-15): http_client_manager управляет клиентами
+        # self._http_client — удалён
         self._embedding_backend = "ollama"
-
         self._load_cache()
 
     def _load_cache(self):
@@ -66,18 +72,28 @@ class OllamaEmbeddings:
             logger.debug(f"Failed to save embeddings cache: {e}")
 
     async def initialize(self):
-        """Инициализирует HTTP клиент и проверяет доступность модели."""
+        """
+        Инициализирует HTTP клиент и проверяет доступность модели.
+        ИСПРАВЛЕНО (С-15): pre-creates клиент через менеджер.
+        """
         if self._initialized:
             return
 
         try:
-            self._http_client = httpx.AsyncClient(timeout=30.0)
             ollama_host = settings.ai_settings.ollama_host
 
-            # Проверяем доступность модели
-            response = await self._http_client.get(f"{ollama_host}/api/tags")
-            response.raise_for_status()
+            # ИСПРАВЛЕНО (С-15): Получаем клиент через менеджер
+            client = await http_client_manager.get_client(
+                base_url=ollama_host,
+                service="embeddings",
+            )
 
+            # Проверяем доступность модели
+            response = await client.get(
+                f"{ollama_host}/api/tags",
+                timeout=httpx.Timeout(30.0),
+            )
+            response.raise_for_status()
             models = response.json().get("models", [])
             model_names = [m["name"] for m in models]
 
@@ -106,7 +122,6 @@ class OllamaEmbeddings:
     async def embed(self, text: str) -> Optional[List[float]]:
         """
         Генерирует embedding для текста через Ollama.
-
         Returns:
             Вектор embedding (768 dim) или None при ошибке
         """
@@ -116,15 +131,22 @@ class OllamaEmbeddings:
             except Exception:
                 return None
 
-        if not self._http_client:
-            return None
-
         # Проверяем кэш
         cache_key = self._get_cache_key(text)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
         ollama_host = settings.ai_settings.ollama_host
+
+        # ИСПРАВЛЕНО (С-15): Получаем клиент через менеджер
+        try:
+            client = await http_client_manager.get_client(
+                base_url=ollama_host,
+                service="embeddings",
+            )
+        except Exception as e:
+            logger.error(f"Failed to get HTTP client: {e}")
+            return None
 
         # Пробуем оба эндпоинта Ollama
         endpoints = [
@@ -139,8 +161,11 @@ class OllamaEmbeddings:
                     if use_input
                     else {"model": self.model_name, "prompt": text}
                 )
-
-                response = await self._http_client.post(endpoint, json=payload)
+                response = await client.post(
+                    endpoint,
+                    json=payload,
+                    timeout=httpx.Timeout(30.0),
+                )
                 response.raise_for_status()
                 data = response.json()
 
@@ -156,7 +181,6 @@ class OllamaEmbeddings:
                     if len(self._cache) % 100 == 0:
                         self._save_cache()
                     return embedding
-
                 continue
 
             except httpx.HTTPStatusError as e:
@@ -196,23 +220,34 @@ class OllamaEmbeddings:
 
     def get_stats(self) -> Dict:
         """Возвращает статистику embeddings."""
+        # ИСПРАВЛЕНО (С-15): Читаем статус клиента из менеджера
+        ollama_host = settings.ai_settings.ollama_host
+        cache_key = f"embeddings:{ollama_host}"
+        manager_stats = http_client_manager.get_stats()
+        client_active = cache_key in manager_stats.get("client_keys", [])
+
         return {
             "model": self.model_name,
             "backend": self._embedding_backend,
             "dimension": self._dimension,
             "initialized": self._initialized,
             "cached_embeddings": len(self._cache),
+            "client_active": client_active,
+            "http_client_manager": "active",
         }
 
     async def close(self):
-        """Закрывает HTTP клиент."""
-        if self._http_client:
-            try:
-                await self._http_client.aclose()
-            except Exception:
-                pass
-            finally:
-                self._http_client = None
+        """
+        Закрывает HTTP клиент.
+        ИСПРАВЛЕНО (С-15): делегирует http_client_manager.
+        """
+        ollama_host = settings.ai_settings.ollama_host
+        closed = await http_client_manager.close_client(
+            base_url=ollama_host,
+            service="embeddings",
+        )
+        if closed:
+            logger.info("✅ Embeddings HTTP client closed")
 
 
 # Singleton instance

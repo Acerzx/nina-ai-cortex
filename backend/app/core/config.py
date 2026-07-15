@@ -608,6 +608,62 @@ class EmbeddingsConfig(BaseModel):
     dimension: int = 768
 
 
+class HttpClientServiceConfig(BaseModel):
+    """Конфигурация HTTP клиента для одного сервиса."""
+
+    timeout_seconds: float = 30.0
+    max_connections: int = 20
+    max_keepalive: int = 10
+    keepalive_expiry: int = 30
+
+
+class HttpClientConfig(BaseModel):
+    """
+    Конфигурация HttpClientManager (С-15).
+    Архитектура: отдельный httpx.AsyncClient на каждый base_url.
+    """
+
+    # Глобальные дефолты
+    default_timeout_seconds: float = 30.0
+    default_max_connections: int = 20
+    default_max_keepalive: int = 10
+    default_keepalive_expiry: int = 30
+
+    # Конфигурации по сервисам
+    nina: HttpClientServiceConfig = Field(
+        default_factory=lambda: HttpClientServiceConfig(
+            timeout_seconds=10.0,
+            max_connections=20,
+            max_keepalive=10,
+            keepalive_expiry=30,
+        )
+    )
+    ollama: HttpClientServiceConfig = Field(
+        default_factory=lambda: HttpClientServiceConfig(
+            timeout_seconds=30.0,
+            max_connections=10,
+            max_keepalive=5,
+            keepalive_expiry=30,
+        )
+    )
+    prometheus: HttpClientServiceConfig = Field(
+        default_factory=lambda: HttpClientServiceConfig(
+            timeout_seconds=5.0,
+            max_connections=5,
+            max_keepalive=3,
+            keepalive_expiry=30,
+        )
+    )
+    embeddings: HttpClientServiceConfig = Field(
+        default_factory=lambda: HttpClientServiceConfig(
+            timeout_seconds=30.0,
+            max_connections=5,
+            max_keepalive=3,
+            keepalive_expiry=30,
+        )
+    )
+
+
 class TriggersConfig(BaseModel):
     """Конфигурация Trigger Emulator."""
 
@@ -702,6 +758,9 @@ class Settings(BaseSettings):
         default_factory=ShadowVisualizerConfig
     )
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+
+    # HTTP Client Manager (С-15)
+    http_client: HttpClientConfig = Field(default_factory=HttpClientConfig)
 
     # Quality Score (С-10: единый модуль расчёта)
     quality_weights: QualityWeightsConfig = Field(default_factory=QualityWeightsConfig)

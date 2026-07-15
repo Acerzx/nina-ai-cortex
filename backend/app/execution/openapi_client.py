@@ -6,9 +6,12 @@ OpenAPI Client Generator для N.I.N.A. Advanced API.
 ЭТАП 7 (упрощение):
 - Удалена поддержка YAML (только JSON)
 - Удалена загрузка из URL (только локальный файл)
-- Удалено кэширование (файл и так на диске)
-- Упрощена динамическая генерация методов
 - Сохранена валидация параметров из OpenAPI схемы
+
+ИСПРАВЛЕНО (С-15):
+- Миграция на единый HttpClientManager
+- Убрано самостоятельное создание httpx.AsyncClient
+- Connection pooling через http_client_manager
 """
 
 import logging
@@ -19,6 +22,7 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 import httpx
 from app.core.config import settings
+from backend.app.core.http_client import http_client_manager
 
 logger = logging.getLogger("OpenAPIClient")
 
@@ -65,19 +69,16 @@ class APIParameter:
                     f"Parameter '{self.name}' must be numeric, "
                     f"got {type(value).__name__}"
                 )
-
             if self.min_value is not None and numeric_value < self.min_value:
                 return False, (
                     f"Parameter '{self.name}' = {numeric_value} "
                     f"is below minimum {self.min_value}"
                 )
-
             if self.max_value is not None and numeric_value > self.max_value:
                 return False, (
                     f"Parameter '{self.name}' = {numeric_value} "
                     f"exceeds maximum {self.max_value}"
                 )
-
             # Integer constraint
             if self.param_type == "integer":
                 try:
@@ -149,7 +150,6 @@ class APIEndpoint:
             elif p.location == "query":
                 req = "*" if p.required else "?"
                 params_str.append(f"{p.name}{req}:{p.param_type}")
-
         params_part = ", ".join(params_str) if params_str else ""
         return f"{self.method:6s} {self.path} ({params_part})"
 
@@ -173,8 +173,7 @@ class APIEndpoint:
             if p.required and p.location == "query":
                 if p.name not in params:
                     if p.default is not None:
-                        # Есть default — не ошибка
-                        continue
+                        continue  # Есть default — не ошибка
                     errors.append(f"Required parameter '{p.name}' is missing")
 
         # Валидация значений
@@ -213,7 +212,6 @@ class OpenAPILoader:
         """Загружает спецификацию из локального JSON файла."""
         if not file_path.exists():
             raise FileNotFoundError(f"OpenAPI spec not found: {file_path}")
-
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -227,6 +225,10 @@ class DynamicAPIClient:
     """
     Динамический API клиент на основе OpenAPI спецификации.
     Автоматически генерирует методы для всех эндпоинтов с валидацией.
+
+    ИСПРАВЛЕНО (С-15):
+    - Использует http_client_manager для connection pooling
+    - Убраны _client, _client_lock
     """
 
     def __init__(
@@ -250,8 +252,9 @@ class DynamicAPIClient:
             self.base_url = ""
 
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
-        self._client_lock = asyncio.Lock()
+
+        # ИСПРАВЛЕНО (С-15): http_client_manager управляет клиентами
+        # self._client, self._client_lock — удалены
 
         # Парсим эндпоинты
         self._endpoints: List[APIEndpoint] = []
@@ -268,7 +271,13 @@ class DynamicAPIClient:
         """Парсит все эндпоинты из спецификации."""
         for path, methods in self.paths.items():
             for method, details in methods.items():
-                if method.lower() not in ("get", "post", "put", "delete", "patch"):
+                if method.lower() not in (
+                    "get",
+                    "post",
+                    "put",
+                    "delete",
+                    "patch",
+                ):
                     continue
 
                 endpoint = APIEndpoint(
@@ -309,45 +318,36 @@ class DynamicAPIClient:
                 # Индексы для быстрого поиска
                 if endpoint.operation_id:
                     self._by_operation_id[endpoint.operation_id] = endpoint
-
                 for tag in endpoint.tags:
                     if tag not in self._by_tag:
                         self._by_tag[tag] = []
                     self._by_tag[tag].append(endpoint)
 
     # ====================================================================
-    # HTTP КЛИЕНТ
+    # HTTP КЛИЕНТ (ИСПРАВЛЕНО С-15)
     # ====================================================================
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Возвращает или создаёт HTTP клиент (thread-safe)."""
-        async with self._client_lock:
-            # Закрываем старый если есть
-            if self._client is not None and not self._client.is_closed:
-                return self._client
-
-            if self._client is not None and self._client.is_closed:
-                logger.debug("Old OpenAPI client was closed, creating new one")
-                self._client = None
-
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.timeout),
-                base_url=self.base_url,
-                headers={"Content-Type": "application/json"},
-            )
-            return self._client
+        """
+        Возвращает HTTP клиент через менеджер (thread-safe).
+        ИСПРАВЛЕНО (С-15): делегирует http_client_manager.
+        """
+        return await http_client_manager.get_client(
+            base_url=self.base_url,
+            service="nina",
+        )
 
     async def close(self):
-        """Закрывает HTTP клиент."""
-        async with self._client_lock:
-            if self._client and not self._client.is_closed:
-                try:
-                    await self._client.aclose()
-                    logger.info("✅ OpenAPI client closed")
-                except Exception as e:
-                    logger.debug(f"Error closing OpenAPI client: {e}")
-                finally:
-                    self._client = None
+        """
+        Закрывает HTTP клиент через менеджер.
+        ИСПРАВЛЕНО (С-15): делегирует http_client_manager.
+        """
+        closed = await http_client_manager.close_client(
+            base_url=self.base_url,
+            service="nina",
+        )
+        if closed:
+            logger.info("✅ OpenAPI client closed")
 
     # ====================================================================
     # ПОИСК ЭНДПОИНТОВ
@@ -411,9 +411,7 @@ class DynamicAPIClient:
         path_params: Optional[Dict[str, Any]] = None,
         validate: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Вызывает эндпоинт по operationId с валидацией параметров.
-        """
+        """Вызывает эндпоинт по operationId с валидацией параметров."""
         endpoint = self.find_by_operation_id(operation_id)
         if not endpoint:
             return {
@@ -421,7 +419,6 @@ class DynamicAPIClient:
                 "code": "NOT_FOUND",
                 "message": f"Endpoint with operationId '{operation_id}' not found",
             }
-
         return await self._call_endpoint_internal(
             endpoint, params, body, path_params, validate
         )
@@ -437,9 +434,7 @@ class DynamicAPIClient:
         """Вызывает эндпоинт по методу и path."""
         endpoint = self.find_by_path(method, path)
         if not endpoint:
-            # Если эндпоинт не в spec, пытаемся вызвать напрямую
             return await self._call_raw(method, path, params, body)
-
         return await self._call_endpoint_internal(
             endpoint, params, body, None, validate
         )
@@ -473,8 +468,9 @@ class DynamicAPIClient:
         for key, value in path_params.items():
             url = url.replace(f"{{{key}}}", str(value))
 
-        # 3. HTTP запрос
+        # 3. HTTP запрос через менеджер
         client = await self._get_client()
+
         try:
             if endpoint.method == "GET":
                 response = await client.get(url, params=params)
@@ -494,7 +490,6 @@ class DynamicAPIClient:
 
             response.raise_for_status()
 
-            # Пытаемся распарсить JSON
             try:
                 return response.json()
             except Exception:
@@ -505,7 +500,6 @@ class DynamicAPIClient:
                 f"HTTP error {e.response.status_code} "
                 f"calling {endpoint.method} {endpoint.path}: {e}"
             )
-            # Пытаемся получить тело ошибки
             error_body = None
             try:
                 error_body = e.response.json()
@@ -531,6 +525,7 @@ class DynamicAPIClient:
     ) -> Dict[str, Any]:
         """Прямой вызов без спецификации (fallback)."""
         client = await self._get_client()
+
         try:
             response = await client.request(
                 method.upper(), path, params=params, json=body
@@ -585,7 +580,7 @@ class DynamicAPIClient:
 
 
 # ============================================================================
-# SINGLETON FACTORY
+# SINGLETON FACTORY (ИСПРАВЛЕНО С-15)
 # ============================================================================
 
 _api_client: Optional[DynamicAPIClient] = None
@@ -600,6 +595,8 @@ async def get_nina_api_client(
     """
     Получает или создаёт API клиент для N.I.N.A.
     Использует singleton паттерн с thread-safe инициализацией.
+
+    ИСПРАВЛЕНО (С-15): клиент использует http_client_manager внутри.
     """
     global _api_client
 
@@ -621,7 +618,6 @@ async def get_nina_api_client(
             if configured_path.exists():
                 spec_path = configured_path
             else:
-                # Fallback paths
                 possible_paths = [
                     Path("config/nina_api_spec.json"),
                     Path("../config/nina_api_spec.json"),
@@ -646,7 +642,11 @@ async def get_nina_api_client(
 
 
 async def close_nina_api_client():
-    """Закрывает singleton клиент."""
+    """
+    Закрывает singleton клиент.
+    ИСПРАВЛЕНО (С-15): делегирует закрытие DynamicAPIClient.close(),
+    который использует http_client_manager.
+    """
     global _api_client
     if _api_client is not None:
         await _api_client.close()

@@ -430,7 +430,7 @@ class SessionsMetadataStorage:
         Рассчитывает quality score через единый модуль app.core.quality.
         ИСПРАВЛЕНО (С-10): устранено дублирование формулы.
         """
-        from app.core.quality import calculate_quality_score
+        from backend.app.core.quality import calculate_quality_score
 
         # Вычисляем RMS total из компонент
         avg_rms_total = None

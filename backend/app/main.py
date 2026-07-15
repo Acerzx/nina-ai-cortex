@@ -44,6 +44,7 @@ from app.core.rag_engine import rag_engine
 from app.core.ws_broadcast import ws_broadcast_manager
 from app.core.metrics import cortex_metrics
 from app.core.background_tasks import background_tasks
+from app.core.http_client import http_client_manager
 from app.ingestion.watchers.manager import WatcherManager
 from app.shadow_engine.state_tracker import state_tracker
 from app.agents.observatory_state import observatory_state
@@ -268,6 +269,21 @@ async def lifespan(app: FastAPI):
         event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
         event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
 
+        # 10.1. ИСПРАВЛЕНО (С-16): Сброс кэша EarthLocation при изменении профиля
+        # (не критично, но хорошая практика)
+
+        async def _on_meridian_flip_started(data: Dict[str, Any]):
+            """
+            С-16: Детекция события Meridian Flip Started.
+            Используется PredictiveHAL для синхронизации состояния.
+            """
+            logger.info("🔄 Meridian Flip Started (detected via WebSocket)")
+            # PredictiveHAL получит это событие и может скорректировать предсказания
+            # Дополнительная логика может быть добавлена в будущем
+
+        _event_handlers["MERIDIAN_FLIP_STARTED_sync"] = _on_meridian_flip_started
+        event_bus.subscribe("MERIDIAN_FLIP_STARTED", _on_meridian_flip_started)
+
         # 11. Background Task Manager
         logger.info("⏰ Initializing Background Task Manager...")
         await background_tasks.start()
@@ -484,6 +500,11 @@ async def lifespan(app: FastAPI):
 
         # 8. Закрываем trigger emulator
         await trigger_emulator.close()
+
+        # 9. ИСПРАВЛЕНО (С-15): Закрываем все HTTP клиенты через HttpClientManager
+        # Это закрывает кэшированные httpx.AsyncClient для всех сервисов:
+        # nina, ollama, prometheus, embeddings
+        await http_client_manager.close_all()
 
         # НОВОЕ (К-7): 9. Закрываем thread pool executors
         from app.core.executors import shutdown_executors
