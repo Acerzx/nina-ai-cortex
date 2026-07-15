@@ -45,7 +45,8 @@ from app.agents.base_agent import BaseAgent, AgentDecision, AgentContext
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
-from app.storage.sessions_metadata import sessions_metadata
+
+from app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("AuditorAgent")
 
@@ -409,39 +410,25 @@ class AuditorAgent(BaseAgent):
     async def _calculate_hfr_trend(self, session_id: str) -> Optional[float]:
         """
         Вычисляет тренд HFR для сессии (наклон линейной регрессии).
-
+        ИСПРАВЛЕНО (С-4): использует calculate_trend из core.math_utils.
         Returns:
-            Положительный тренд → деградация
-            Отрицательный тренд → улучшение
-            None → недостаточно данных
+        Положительный тренд → деградация
+        Отрицательный тренд → улучшение
+        None → недостаточно данных
         """
         try:
             frames = await sessions_metadata.get_frames(session_id, limit=10000)
-
             if not frames or len(frames) < 5:
                 return None
-
             hfr_values = [f.hfr for f in frames if f.hfr is not None]
-
             if len(hfr_values) < 5:
                 return None
-
-            # Линейная регрессия
-            n = len(hfr_values)
-            x_mean = (n - 1) / 2
-            y_mean = sum(hfr_values) / n
-
-            numerator = sum((i - x_mean) * (hfr_values[i] - y_mean) for i in range(n))
-            denominator = sum((i - x_mean) ** 2 for i in range(n))
-
-            if denominator == 0:
-                return 0.0
-
-            return numerator / denominator
-
+            # ИСПРАВЛЕНО (С-4): единая функция из math_utils
+            trend = calculate_trend(hfr_values)
+            return trend
         except Exception as e:
             logger.debug(f"Could not calculate HFR trend: {e}")
-            return None
+        return None
 
     async def _generate_recommendations(
         self,

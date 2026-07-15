@@ -67,7 +67,7 @@ from app.agents.llm_client import llm_client
 from app.agents.hybrid_langgraph_orchestrator import (
     hybrid_orchestrator,
     WorkflowType,
-    WorkflowStatus,
+    set_agents_for_hybrid_orchestrator,  # ← ДОБАВИТЬ (С-5)
 )
 
 # Storage
@@ -224,6 +224,10 @@ async def lifespan(app: FastAPI):
         orchestrator.register_agent("Auditor", auditor_agent)
         orchestrator.register_agent("Calibrator", calibrator_agent)
         orchestrator.register_agent("Copilot", copilot_agent)
+
+        # 8.1. ИСПРАВЛЕНО (С-5): Внедрение агентов в HybridLangGraphOrchestrator
+        set_agents_for_hybrid_orchestrator(orchestrator.agents)
+        logger.info("✅ Agents injected into HybridLangGraphOrchestrator")
 
         # 9. Запуск Orchestrator
         await orchestrator.start()

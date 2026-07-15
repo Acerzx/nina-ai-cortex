@@ -37,7 +37,12 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.events import event_bus
 from app.agents.observatory_state import observatory_state
-from app.shadow_engine.state_tracker import state_tracker
+
+from app.core.math_utils import (
+    linear_regression,
+    calculate_r_squared,
+    pearson_correlation,
+)
 
 logger = logging.getLogger("PredictiveHAL")
 
@@ -257,7 +262,7 @@ class PredictiveHAL:
             else []
         )
 
-        trend_ra, intercept_ra = self._linear_regression(recent_ra)
+        trend_ra, intercept_ra = linear_regression(recent_ra)
         current_ra = recent_ra[-1]
 
         points_per_minute = 20.0
@@ -277,7 +282,7 @@ class PredictiveHAL:
             else:
                 time_to_event = None
 
-            r_squared = self._calculate_r_squared(recent_ra, trend_ra, intercept_ra)
+            r_squared = calculate_r_squared(recent_ra, trend_ra, intercept_ra)
             proximity = current_ra / critical_rms
             confidence = min(0.99, (r_squared * 0.6 + proximity * 0.4))
 
@@ -326,16 +331,16 @@ class PredictiveHAL:
         recent_temp = temp_history[-window_size:]
         recent_hfr = hfr_history[-window_size:]
 
-        correlation = self._pearson_correlation(recent_temp, recent_hfr)
+        correlation = pearson_correlation(recent_temp, recent_hfr)
 
         if abs(correlation) < 0.6:
             return None
 
-        temp_trend, temp_intercept = self._linear_regression(recent_temp)
+        temp_trend, temp_intercept = linear_regression(recent_temp)
         if abs(temp_trend) < 0.01:
             return None
 
-        hfr_trend, hfr_intercept = self._linear_regression(recent_hfr)
+        hfr_trend, hfr_intercept = linear_regression(recent_hfr)
 
         current_hfr = recent_hfr[-1]
         current_temp = recent_temp[-1]
@@ -407,7 +412,7 @@ class PredictiveHAL:
         window_size = min(len(hfr_history), self.WINDOW_MEDIUM)
         recent_hfr = hfr_history[-window_size:]
 
-        trend, intercept = self._linear_regression(recent_hfr)
+        trend, intercept = linear_regression(recent_hfr)
         current_hfr = recent_hfr[-1]
 
         points_per_minute = 20.0
@@ -423,7 +428,7 @@ class PredictiveHAL:
             and predicted_hfr > hfr_target * 1.5
             and current_hfr < hfr_target * 1.5
         ):
-            r_squared = self._calculate_r_squared(recent_hfr, trend, intercept)
+            r_squared = calculate_r_squared(recent_hfr, trend, intercept)
             confidence = min(0.90, r_squared * 0.8 + min(trend * 5, 0.2))
 
             return Prediction(
@@ -457,7 +462,7 @@ class PredictiveHAL:
         window_size = min(len(temp_history), self.WINDOW_MEDIUM)
         recent_temp = temp_history[-window_size:]
 
-        trend, intercept = self._linear_regression(recent_temp)
+        trend, intercept = linear_regression(recent_temp)
         current_temp = recent_temp[-1]
 
         if trend <= 0:
@@ -599,7 +604,7 @@ class PredictiveHAL:
         window_size = min(len(hfr_history), self.WINDOW_MEDIUM)
         recent_hfr = hfr_history[-window_size:]
 
-        trend, intercept = self._linear_regression(recent_hfr)
+        trend, intercept = linear_regression(recent_hfr)
         current_hfr = recent_hfr[-1]
 
         # Порог деградации из конфига
@@ -611,7 +616,7 @@ class PredictiveHAL:
 
         # Если тренд положительный и превышает порог
         if trend > degradation_threshold:
-            r_squared = self._calculate_r_squared(recent_hfr, trend, intercept)
+            r_squared = calculate_r_squared(recent_hfr, trend, intercept)
 
             # Confidence зависит от R² и силы тренда
             trend_strength = min(1.0, trend / (degradation_threshold * 2))
@@ -932,70 +937,6 @@ class PredictiveHAL:
             f"{prediction.prediction_type} "
             f"(confidence: {prediction.confidence:.2f})"
         )
-
-    # ========================================================================
-    # МАТЕМАТИЧЕСКИЕ МЕТОДЫ
-    # ========================================================================
-
-    def _linear_regression(self, values: List[float]) -> tuple:
-        """Простая линейная регрессия. Returns: (slope, intercept)"""
-        n = len(values)
-        if n < 2:
-            return 0.0, values[0] if values else 0.0
-
-        x_mean = (n - 1) / 2.0
-        y_mean = sum(values) / n
-
-        numerator = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
-        denominator = sum((i - x_mean) ** 2 for i in range(n))
-
-        if denominator == 0:
-            return 0.0, y_mean
-
-        slope = numerator / denominator
-        intercept = y_mean - slope * x_mean
-
-        return slope, intercept
-
-    def _calculate_r_squared(
-        self, values: List[float], slope: float, intercept: float
-    ) -> float:
-        """Вычисляет R² (коэффициент детерминации)."""
-        n = len(values)
-        if n < 2:
-            return 0.0
-
-        y_mean = sum(values) / n
-
-        ss_res = sum((values[i] - (slope * i + intercept)) ** 2 for i in range(n))
-        ss_tot = sum((values[i] - y_mean) ** 2 for i in range(n))
-
-        if ss_tot == 0:
-            return 0.0
-
-        return max(0.0, 1.0 - ss_res / ss_tot)
-
-    def _pearson_correlation(self, x: List[float], y: List[float]) -> float:
-        """Вычисляет коэффициент корреляции Пирсона."""
-        n = min(len(x), len(y))
-        if n < 3:
-            return 0.0
-
-        x = x[:n]
-        y = y[:n]
-
-        x_mean = sum(x) / n
-        y_mean = sum(y) / n
-
-        numerator = sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(n))
-
-        x_std = (sum((xi - x_mean) ** 2 for xi in x)) ** 0.5
-        y_std = (sum((yi - y_mean) ** 2 for yi in y)) ** 0.5
-
-        if x_std == 0 or y_std == 0:
-            return 0.0
-
-        return numerator / (x_std * y_std)
 
     # ========================================================================
     # API

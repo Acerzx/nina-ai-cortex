@@ -27,7 +27,8 @@ from app.ingestion.parsers.hocus_focus import (
     filter_anomalies,
 )
 from app.core.capability_registry import CapabilityRegistry
-from app.core.config import settings
+
+from app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("HocusFocusWatcher")
 
@@ -538,29 +539,21 @@ class HocusFocusWatcher(BaseFileWatcher):
             self._quality_history = self._quality_history[-self._max_history_size :]
 
     def get_quality_trend(self, window: int = 10) -> Optional[Dict[str, Any]]:
-        """Тренд качества за последние N кадров."""
+        """Тренд качества за последние N кадров.
+        ИСПРАВЛЕНО (С-4): использует calculate_trend из core.math_utils.
+        """
         if len(self._quality_history) < window:
             return None
         recent = self._quality_history[-window:]
         scores = [h["quality_score"] for h in recent]
         fwhm_vals = [h["median_fwhm"] for h in recent if h["median_fwhm"]]
         hfr_vals = [h["median_hfr"] for h in recent if h["median_hfr"]]
-
-        def _trend(vals: List[float]) -> float:
-            n = len(vals)
-            if n < 2:
-                return 0.0
-            xm = (n - 1) / 2
-            ym = sum(vals) / n
-            num = sum((i - xm) * (vals[i] - ym) for i in range(n))
-            den = sum((i - xm) ** 2 for i in range(n))
-            return num / den if den else 0.0
-
+        # ИСПРАВЛЕНО (С-4): единая функция из math_utils вместо inline helper
         return {
             "window": window,
-            "quality_trend": _trend(scores),
-            "fwhm_trend": _trend(fwhm_vals) if fwhm_vals else None,
-            "hfr_trend": _trend(hfr_vals) if hfr_vals else None,
+            "quality_trend": calculate_trend(scores),
+            "fwhm_trend": calculate_trend(fwhm_vals) if fwhm_vals else None,
+            "hfr_trend": calculate_trend(hfr_vals) if hfr_vals else None,
             "avg_quality": sum(scores) / len(scores),
         }
 

@@ -21,6 +21,7 @@ import aiofiles
 from app.ingestion.watchers.base import BaseFileWatcher, event_bus
 from app.core.capability_registry import CapabilityRegistry
 from app.core.config import settings
+from app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("LiveStackWatcher")
 
@@ -264,37 +265,24 @@ class LiveStackWatcher(BaseFileWatcher):
     def _calculate_trend(self, history: List[float]) -> Optional[str]:
         """
         Расчет тренда на основе истории значений.
-
+        ИСПРАВЛЕНО (С-4): использует calculate_trend из core.math_utils.
         Returns:
-            "improving" - значения растут (для SNR) или падают (для rejection)
-            "degrading" - значения падают (для SNR) или растут (для rejection)
-            "stable" - значения стабильны
-            None - недостаточно данных
+        "improving" - значения растут (для SNR) или падают (для rejection)
+        "degrading" - значения падают (для SNR) или растут (для rejection)
+        "stable" - значения стабильны
+        None - недостаточно данных
         """
         if len(history) < 5:
             return None
-
         # Берем последние 10 значений (или все, если меньше)
         recent = history[-10:]
         if len(recent) < 5:
             return None
-
-        # Линейная регрессия для определения тренда
-        n = len(recent)
-        x_mean = (n - 1) / 2.0
-        y_mean = sum(recent) / n
-
-        numerator = sum((i - x_mean) * (recent[i] - y_mean) for i in range(n))
-        denominator = sum((i - x_mean) ** 2 for i in range(n))
-
-        if denominator == 0:
-            return "stable"
-
-        slope = numerator / denominator
-
+        # ИСПРАВЛЕНО (С-4): единая функция из math_utils
+        slope = calculate_trend(recent)
         # Порог для определения тренда (5% от среднего значения)
+        y_mean = sum(recent) / len(recent)
         threshold = abs(y_mean) * 0.05 if y_mean != 0 else 0.1
-
         if slope > threshold:
             return "improving"
         elif slope < -threshold:

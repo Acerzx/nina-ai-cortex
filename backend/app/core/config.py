@@ -241,6 +241,18 @@ class WatcherThresholds(BaseModel):
     anomaly_cooldown_seconds: int = 300
 
 
+class CalibrationFreshnessConfig(BaseModel):
+    """
+    Общие пороги свежести калибровочных мастеров.
+    С-2: Единый источник правды для Calibrator и Pre-flight.
+    Используется через YAML anchor &calibration_freshness.
+    """
+
+    bias_freshness_days: int = 90
+    dark_freshness_days: int = 30
+    flat_freshness_days: int = 7
+
+
 class CalibratorThresholds(BaseModel):
     """Пороговые значения для Calibrator Agent."""
 
@@ -289,6 +301,11 @@ class GuardianThresholds(BaseModel):
 class ThresholdsConfig(BaseModel):
     """Конфигурация всех пороговых значений."""
 
+    # С-2: Общие пороги свежести калибровок (источник правды)
+    calibration_freshness: CalibrationFreshnessConfig = Field(
+        default_factory=CalibrationFreshnessConfig
+    )
+
     watcher: WatcherThresholds = Field(default_factory=WatcherThresholds)
     calibrator: CalibratorThresholds = Field(default_factory=CalibratorThresholds)
     preflight: PreflightThresholds = Field(default_factory=PreflightThresholds)
@@ -303,6 +320,9 @@ class DataSourcesConfig(BaseModel):
     primary_metrics_source: str = "influxdb"
     enable_fallback_source: bool = True
     metrics_poll_interval: float = 3.0
+    # С-6: Порог "InfluxDB stale" — если InfluxDB не обновлялся
+    # дольше этого значения, активируется Prometheus FALLBACK
+    stale_threshold_seconds: float = 30.0
 
 
 # ============================================================================

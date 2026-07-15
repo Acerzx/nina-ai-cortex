@@ -65,6 +65,7 @@ from app.core.unified_metric import (
     UnitRegistry,
     is_prometheus_unique,
 )
+from app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("MetricsAggregator")
 
@@ -186,7 +187,14 @@ class MetricsAggregator:
         # === Статус источников (для fallback логики) ===
         self._influxdb_last_update: Optional[datetime] = None
         self._prometheus_last_update: Optional[datetime] = None
-        self._source_stale_threshold: float = 30.0  # секунд
+
+        # С-6: Порог "stale" читается из settings.data_sources
+        data_sources_cfg = getattr(settings, "data_sources", None)
+        self._source_stale_threshold: float = (
+            getattr(data_sources_cfg, "stale_threshold_seconds", 30.0)
+            if data_sources_cfg
+            else 30.0
+        )
 
         self._subscribed = False
 
@@ -710,19 +718,14 @@ class MetricsAggregator:
         """
         Вычисляет тренд метрики (наклон линейной регрессии).
         Read-only — делает snapshot copy под блокировкой.
+        ИСПРАВЛЕНО (С-4): использует calculate_trend из core.math_utils.
         """
         history_list = getattr(self.history, metric, None)
         if not history_list or len(history_list) < window:
             return None
         recent = list(history_list[-window:])
-        n = len(recent)
-        x_mean = (n - 1) / 2
-        y_mean = sum(recent) / n
-        numerator = sum((i - x_mean) * (recent[i] - y_mean) for i in range(n))
-        denominator = sum((i - x_mean) ** 2 for i in range(n))
-        if denominator == 0:
-            return 0.0
-        return numerator / denominator
+        # ИСПРАВЛЕНО (С-4): единая функция из math_utils
+        return calculate_trend(recent)
 
     def get_metric_average(self, metric: str, window: int = 20) -> Optional[float]:
         """Возвращает среднее значение метрики за последние N точек."""

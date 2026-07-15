@@ -86,8 +86,17 @@ cors:
   allowed_headers: ["Content-Type", "X-Request-ID"]
   max_age: 3600
 
+
 # 11. ПОРОГОВЫЕ ЗНАЧЕНИЯ
 thresholds:
+  # ================================================================
+  # ОБЩИЕ ПОРОГИ СВЕЖЕСТИ КАЛИБРОВОК (С-2: YAML anchor)
+  # ================================================================
+  calibration_freshness: &calibration_freshness
+    bias_freshness_days: 90
+    dark_freshness_days: 30
+    flat_freshness_days: 7
+  
   watcher:
     hfr_increase_percent: 30.0
     fwhm_increase_percent: 30.0
@@ -99,36 +108,28 @@ thresholds:
     z_score_threshold: 3.0
     min_history_points: 5
     anomaly_cooldown_seconds: 300
-
+  
+  # ================================================================
+  # CALIBRATOR (наследует calibration_freshness через YAML merge)
+  # ================================================================
   calibrator:
-    bias_freshness_days: 90
-    dark_freshness_days: 30
-    flat_freshness_days: 7
+    <<: *calibration_freshness
     temperature_tolerance: 2.0
     alert_cooldown_seconds: 600
-
+  
   # ================================================================
-  # ПРЕРАБОТАНО v5.0 (Этап 4): 20 gates в 6 категориях
+  # PRE-FLIGHT CHECKLIST (20 gates в 6 категориях)
   # ================================================================
   preflight:
     # --- ENVIRONMENT (4 gates) ---
-    # WeatherGate
     cloud_cover_max: 80.0
     wind_speed_max: 20.0
     humidity_max: 90.0
-
-    # FocuserTempGate (proxy для ambient)
     focuser_temp_min: -30.0
     focuser_temp_max: 40.0
-
-    # DewRiskGate
-    dew_risk_threshold: 3.0 # °C разница между фокусером и камерой
-
-    # MoonInterferenceGate
-    moon_avoidance_angle: 30.0 # Минимальное угловое расстояние до Луны (°)
-
+    dew_risk_threshold: 3.0
+    moon_avoidance_angle: 30.0
     # --- HARDWARE (5 gates) ---
-    # EquipmentConnectionGate
     required_equipment:
       - "camera"
       - "mount"
@@ -141,53 +142,28 @@ thresholds:
       - "safety_monitor"
       - "weather"
       - "switch"
-
-    # CameraTempGate
     camera_cooled_threshold: -10.0
-
-    # FocusPositionGate
     focus_position_min: 0
     focus_position_max: 50000
-
     # --- CALIBRATION (2 gates) ---
-    # CalibrationGate (свежесть мастеров)
-    bias_freshness_days: 90
-    dark_freshness_days: 30
-    flat_freshness_days: 7
-
-    # GuiderCalibrationGate
+    # Наследует calibration_freshness через YAML merge (С-2)
+    <<: *calibration_freshness
     guider_calibration_max_age_hours: 24
-
     # --- STORAGE (2 gates) ---
-    # DiskSpaceGate
     min_free_disk_space_gb: 50.0
-
-    # StorageWriteGate (тестовая запись)
     write_test_enabled: true
-
     # --- SOFTWARE (4 gates) ---
-    # APIHealthGate
     api_timeout_seconds: 5.0
-
-    # LLMHealthGate
     llm_required_for_full_ai: true
-
-    # DatabaseGate
     database_check_timeout_seconds: 3.0
-
-    # TimeSyncGate (NTP)
     ntp_max_offset_seconds: 1.0
     ntp_server: "pool.ntp.org"
-
     # --- SEQUENCE (3 gates) ---
-    # SequenceValidationGate
     sequence_min_nodes: 1
-
-    # TargetVisibilityGate
-    min_altitude: 30.0 # Минимальная высота цели над горизонтом (°)
-
-    # ModeGate
+    min_altitude: 30.0
     mode_check_enabled: true
+
+
 
   strategist:
     snr_target: 20.0
@@ -215,10 +191,12 @@ thresholds:
     retention_max_records: 100000
 
 # 12. ИСТОЧНИКИ ДАННЫХ
+# С-6: Добавлен stale_threshold_seconds
 data_sources:
   primary_metrics_source: "influxdb"
   enable_fallback_source: true
   metrics_poll_interval: 3.0
+  stale_threshold_seconds: 30.0  # Порог "InfluxDB stale" (секунды)
 
 # 13. DECISION AUDIT TRAIL
 decision_audit:
@@ -285,9 +263,10 @@ feature_flags:
 
 # ============================================================================
 # SECURITY (паттерны чувствительных данных)
+# С-3: YAML anchor для переиспользования в global_var_injector
 # ============================================================================
 security:
-  sensitive_patterns:
+  sensitive_patterns: &sensitive_patterns
     - token
     - password
     - passwd
@@ -377,25 +356,10 @@ python_bridge:
 
 # ============================================================================
 # GLOBAL VAR INJECTOR (Security) CONFIGURATION
+# С-3: Использует YAML reference на security.sensitive_patterns
 # ============================================================================
 global_var_injector:
-  sensitive_patterns:
-    - token
-    - password
-    - passwd
-    - secret
-    - api_key
-    - apikey
-    - api-key
-    - private_key
-    - privatekey
-    - credentials
-    - auth
-    - bearer
-    - access_key
-    - accesskey
-    - secret_key
-    - secretkey
+  sensitive_patterns: *sensitive_patterns
 
 # ============================================================================
 # DECISION ANALYZER CONFIGURATION
