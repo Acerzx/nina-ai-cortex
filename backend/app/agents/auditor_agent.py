@@ -46,7 +46,7 @@ from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
 
-from backend.app.core.math_utils import calculate_trend
+from app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("AuditorAgent")
 

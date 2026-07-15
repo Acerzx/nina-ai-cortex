@@ -39,7 +39,7 @@ from app.core.events import event_bus
 from app.agents.observatory_state import observatory_state
 from app.shadow_engine.state_tracker import state_tracker
 
-from backend.app.core.math_utils import (
+from app.core.math_utils import (
     linear_regression,
     calculate_r_squared,
     pearson_correlation,

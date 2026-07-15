@@ -65,7 +65,7 @@ from app.core.unified_metric import (
     UnitRegistry,
     is_prometheus_unique,
 )
-from backend.app.core.math_utils import calculate_trend
+from app.core.math_utils import calculate_trend
 
 logger = logging.getLogger("MetricsAggregator")
 
@@ -207,7 +207,6 @@ class MetricsAggregator:
         self._history_lock = asyncio.Lock()
         self._alerts_lock = asyncio.Lock()
         self._ai_action_lock = asyncio.Lock()
-        self._unified_lock = asyncio.Lock()
 
     async def start(self):
         """Подписывается на все события EventBus для обновления состояния."""
@@ -236,7 +235,7 @@ class MetricsAggregator:
             f"🧠 MetricsAggregator initialized "
             f"(primary: influxdb, fallback: prometheus, "
             f"max_history: {self._max_history_points}, "
-            f"locks: 5 active, unified_metrics: enabled)"
+            f"locks: 4 active, unified_metrics: enabled)"
         )
 
     # ========================================================================
@@ -535,8 +534,9 @@ class MetricsAggregator:
     ):
         """
         Обновляет UnifiedMetric в _unified_metrics.
-
-        ДОЛЖЕН вызываться ПОД _metrics_lock (или _unified_lock)!
+        ИСПРАВЛЕНО (Проблема 4): _unified_lock удалён — _metrics_lock
+        уже защищает все write-операции с _unified_metrics.
+        ДОЛЖЕН вызываться ПОД _metrics_lock!
         """
         if value is None:
             return

@@ -1,243 +1,398 @@
-# 🌌 N.I.N.A. AI Cortex 🧠
+Создам полноценный README.md для проекта N.I.N.A. AI Cortex v5.0.
 
-**N.I.N.A. AI Cortex** — это интеллектуальная когнитивная надстройка и многоагентная система (Multi-Agent Swarm) для автономного управления, мониторинга и оптимизации астрономической обсерватории под управлением программного комплекса **N.I.N.A.** (Nighttime Imaging 'N' Astronomy).
+````markdown
+# 🌌 N.I.N.A. AI Cortex v5.0
 
-Система в реальном времени анализирует телеметрию, логи, метрики качества (HFR, FWHM, RMS) и погодные условия, принимая автономные решения для максимизации результата съемки и обеспечения абсолютной безопасности оборудования.
+**Интеллектуальная когнитивная надстройка для астрономической обсерватории на базе N.I.N.A.**
 
----
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 🚀 Ключевые возможности
+N.I.N.A. AI Cortex — это автономная Multi-Agent AI система для управления астрономической обсерваторией. Система анализирует метрики качества в реальном времени, предсказывает проблемы оборудования, оптимизирует параметры съемки и обеспечивает безопасность через Hardware Abstraction Layer.
 
-- **🤖 Multi-Agent Swarm (9 AI-агентов)**: Специализированные агенты для мониторинга, диагностики, оптимизации и обеспечения безопасности, координируемые через Dual Orchestrator System.
-- **🎭 Dual Orchestrator System**: Гибридная система оркестрации с Event-Driven Orchestrator для простых реакций и Hybrid LangGraph Orchestrator для сложных многошаговых workflow (диагностика, post-mortem анализ, адаптивные реакции).
-- **📖 OpenAPI-Driven Execution**: Динамическое построение реестра триггеров из OpenAPI спецификации N.I.N.A. API — автоматическая валидация параметров и защита от некорректных команд.
-- **👁️ Shadow Engine**: Неинвазивный парсинг `Sequence.json` N.I.N.A. для построения теневого графа (DAG) и предсказания действий секвенсора без вмешательства в его работу.
-- **🛡️ Hardware Abstraction Layer (HAL)**: Финальный барьер безопасности, блокирующий опасные команды (slew, triggers) во время критических фаз (Meridian Flip, Park, Shutdown) или при `UNSAFE` статусе.
-- **📚 RAG-система (Retrieval-Augmented Generation)**: Векторная база знаний (Qdrant) с LRU-кэшированием эмбеддингов для обучения на истории прошлых сессий, документаций и генерации Post-Mortem отчетов.
-- **🔌 Deep N.I.N.A. Integration**: Двусторонняя связь через Advanced API (HTTP) и WebSocket. Поддержка триггеров, инъекции глобальных переменных и управления Dynamic Sequencer.
-- **📊 Dual Telemetry Ingestion**: Агрегация метрик из InfluxDB 2.x (основной источник) и Prometheus (резервный), парсинг FITS-заголовков, CSV-отчетов (Hocus Focus) и логов.
-- **🎭 Simulation Mode**: Встроенные эмуляторы `FakeNina` и `FakePhd2` для безопасного тестирования агентов и инжекта аномалий без реального оборудования.
-- **📜 Decision Audit Trail**: Полная объяснимость ИИ (Explainable AI) с сохранением всех решений в SQLite, оценкой постфактум (Hindsight Verdict) и политиками ретеншена.
-- **📈 Prometheus Metrics**: Экспорт метрик самого Cortex для мониторинга через Prometheus/Grafana.
+## 📋 Содержание
 
----
+- [Возможности](#-возможности)
+- [Архитектура](#-архитектура)
+- [Быстрый старт](#-быстрый-старт)
+- [Установка](#-установка)
+- [Конфигурация](#-конфигурация)
+- [Запуск](#-запуск)
+- [API Documentation](#-api-documentation)
+- [AI Агенты](#-ai-агенты)
+- [Тестирование](#-тестирование)
+- [Troubleshooting](#-troubleshooting)
+- [Лицензия](#-лицензия)
 
-## 🏗️ Архитектура системы
+## ✨ Возможности
 
-Система построена на паттерне **Orchestrator-Worker** с асинхронным EventBus ядром и **Dual Orchestrator System**.
+### 🤖 Multi-Agent AI System
 
-### Dual Orchestrator System
+- **9 специализированных AI-агентов** с различными ролями и приоритетами
+- **Dual Orchestrator**: Event-Driven + Hybrid LangGraph для сложных сценариев
+- **Real-time мониторинг** метрик качества (HFR, FWHM, RMS, SNR)
+- **Предиктивная аналитика** для предотвращения сбоев оборудования
+- **RAG-система** для семантического поиска по истории сессий
+
+### 🛡️ Safety & Reliability
+
+- **Hardware Abstraction Layer (HAL)** — финальная валидация команд
+- **Predictive HAL** — предсказание конфликтов (Meridian Flip, перегрев)
+- **Pre-flight Checklist v2** — 20 gates в 6 категориях
+- **Emergency Park** — автоматическая парковка при критических условиях
+- **Decision Audit Trail** — полное логирование всех AI-решений
+
+### 📊 5-Layer Metrics Architecture
+
+1. **PRIMARY** (InfluxDB) — основные time-series метрики
+2. **UNIQUE** (Prometheus) — уникальные метрики (AF R², sequence status)
+3. **FALLBACK** (Prometheus) — резерв при недоступности InfluxDB
+4. **EVENTS** (WebSocket) — события секвенсора в реальном времени
+5. **ENRICHMENT** (File Watchers) — per-image детализация
+
+### 🎯 Intelligent Automation
+
+- **Autofocus optimization** — адаптивный интервал на основе тренда HFR
+- **Exposure time adjustment** — расчёт оптимальной экспозиции по SNR
+- **Dither strategy** — анализ качества дизеринга (CD², GFM, Voronoi)
+- **Calibration management** — автоматическая проверка свежести мастеров
+- **Target switching** — переключение целей при плохих условиях
+
+### 🔌 Integrations
+
+- **N.I.N.A. Advanced API** — полное управление через REST API
+- **N.I.N.A. WebSocket** — real-time события секвенсора
+- **PHD2** — интеграция с гидированием
+- **Siril** — автоматизация preprocessing (заглушка)
+- **Ollama** — локальный LLM (gemma4:31b-cloud + gemma4:e4b)
+
+## 🏗️ Архитектура
+
+### System Overview
+
+```mermaid
+graph TB
+    subgraph "External Systems"
+        NINA[N.I.N.A. Advanced API]
+        PHD2[PHD2 Guider]
+        INFLUX[InfluxDB]
+        PROM[Prometheus]
+    end
+
+    subgraph "N.I.N.A. AI Cortex"
+        subgraph "Ingestion Layer"
+            WATCHERS[File Watchers]
+            POLLERS[Metric Pollers]
+            WS[WebSocket Client]
+        end
+
+        subgraph "Shadow Engine"
+            PARSER[Sequence Parser]
+            TRACKER[State Tracker]
+        end
+
+        subgraph "Metrics Aggregator"
+            MA[5-Layer Metrics]
+            UNIFIED[Unified Metrics]
+        end
+
+        subgraph "Multi-Agent Swarm"
+            ORCH[Event-Driven Orchestrator]
+            LANG[LangGraph Orchestrator]
+            AGENTS[9 AI Agents]
+        end
+
+        subgraph "Execution Layer"
+            HAL[Hardware Abstraction Layer]
+            TRIGGER[Trigger Emulator]
+            CMD[Device Commander]
+        end
+
+        subgraph "Storage"
+            RAG[RAG Engine + Qdrant]
+            AUDIT[Decision Audit Trail]
+            SESSIONS[Sessions Metadata]
+        end
+    end
+
+    NINA -->|REST API| TRIGGER
+    NINA -->|WebSocket| WS
+    PHD2 -->|Metrics| PROM
+    INFLUX -->|Time-series| MA
+    PROM -->|Gauges| MA
+
+    WATCHERS --> MA
+    POLLERS --> MA
+    WS --> TRACKER
+
+    PARSER --> TRACKER
+    TRACKER --> HAL
+
+    MA --> AGENTS
+    ORCH --> AGENTS
+    LANG --> AGENTS
+
+    AGENTS -->|Decisions| AUDIT
+    AGENTS -->|Context| RAG
+
+    HAL --> CMD
+    CMD --> NINA
+
+    style NINA fill:#e1f5ff
+    style AGENTS fill:#c8e6c9
+    style HAL fill:#ffcdd2
+```
+````
+
+### Multi-Agent Hierarchy
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    EventBus (Events)                     │
-└──────────────────┬──────────────────────────────────────┘
-                   │
-        ┌──────────┴──────────┐
-        │                     │
-        ▼                     ▼
-┌───────────────┐    ┌─────────────────┐
-│  Orchestrator │    │ Hybrid LangGraph│
-│  (Reactive)   │    │  Orchestrator   │
-│               │    │  (Proactive)    │
-│ Простые       │    │  Сложные        │
-│ реакции:      │    │  workflow:      │
-│ - ALERT →     │    │  - Diagnostic   │
-│   Guardian    │    │  - Post-Mortem  │
-│ - NEW_FRAME → │    │  - Adaptive     │
-│   Watcher     │    │                 │
-└───────────────┘    └─────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Orchestrator Layer                        │
+│  ┌──────────────────┐  ┌──────────────────────────────────┐ │
+│  │ Event-Driven     │  │ Hybrid LangGraph Orchestrator    │ │
+│  │ Orchestrator     │  │ (Complex Workflows)              │ │
+│  └────────┬─────────┘  └────────────┬─────────────────────┘ │
+└───────────┼─────────────────────────┼───────────────────────┘
+            │                         │
+┌───────────┼─────────────────────────┼───────────────────────┐
+│           ▼         Agent Layer     ▼                        │
+│  ┌─────────────┐ ┌──────────┐ ┌─────────────┐ ┌─────────┐ │
+│  │   Watcher   │ │ Guardian │ │Diagnostician│ │Strategist│ │
+│  │  (HIGH)     │ │(CRITICAL)│ │   (HIGH)    │ │ (MEDIUM) │ │
+│  └─────────────┘ └──────────┘ └─────────────┘ └─────────┘ │
+│  ┌─────────────┐ ┌──────────┐ ┌─────────────┐            │
+│  │   Auditor   │ │Calibrator│ │   Copilot   │            │
+│  │   (LOW)     │ │  (LOW)   │ │   (INFO)    │            │
+│  └─────────────┘ └──────────┘ └─────────────┘            │
+└─────────────────────────────────────────────────────────────┘
+            │
+┌───────────┼─────────────────────────────────────────────────┐
+│           ▼         Foundation Layer                         │
+│  ┌─────────────┐ ┌──────────┐ ┌─────────────┐            │
+│  │ Observatory │ │  Shadow  │ │    HAL      │            │
+│  │   State     │ │  Engine  │ │ (Safety)    │            │
+│  └─────────────┘ └──────────┘ └─────────────┘            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Event-Driven Orchestrator** (`orchestrator.py`):
+### Agent Roles & Priorities
 
-- Реактивная маршрутизация событий
-- Простые реакции: `ALERT` → `Guardian`, `NEW_FRAME` → `Watcher`
-- Быстрая обработка с минимальной задержкой
+| Agent             | Priority | Role                                 | Trigger Events                              |
+| ----------------- | -------- | ------------------------------------ | ------------------------------------------- |
+| **Watcher**       | HIGH     | Мониторинг метрик, детекция аномалий | NEW_FRAME, PROMETHEUS_UPDATE                |
+| **Guardian**      | CRITICAL | Безопасность оборудования            | ALERT (CRITICAL), LOG_EVENT                 |
+| **Diagnostician** | HIGH     | Root cause analysis                  | ALERT (WARNING)                             |
+| **Strategist**    | MEDIUM   | Оптимизация параметров               | LIVESTACK_STATUS, DIAGNOSTIC_RECOMMENDATION |
+| **Auditor**       | LOW      | Post-mortem анализ                   | SEQUENCE_STOPPED                            |
+| **Calibrator**    | LOW      | Управление мастер-кадрами            | NEW_FRAME, MASTERS_INDEXED                  |
+| **Copilot**       | INFO     | Интерактивная помощь                 | SEQUENCE_ITEM_STARTED                       |
 
-**Hybrid LangGraph Orchestrator** (`hybrid_langgraph_orchestrator.py`):
+## 🚀 Быстрый старт
 
-- Проактивные многошаговые workflow
-- **Diagnostic Workflow**: поиск root cause через RAG + корреляции метрик
-- **Post-Mortem Workflow**: анализ завершённой сессии с генерацией Session Digest
-- **Adaptive Workflow**: адаптация к изменяющимся условиям (погода, оборудование)
-- Retry logic, checkpointing, состояние workflow
+### Предварительные требования
 
-### 1. Ingestion Layer (Сбор данных)
+1. **N.I.N.A.** с установленным плагином **Advanced API**
+2. **Python 3.11+**
+3. **Docker Desktop** (для Qdrant и InfluxDB)
+4. **Ollama** (для локального LLM)
 
-- **Watchers**: Мониторинг файловых систем (Session Metadata, Masters Library, Hocus Focus, LiveStack, AI Weather).
-- **Pollers**: Опрос InfluxDB (Flux queries) и Prometheus Exporter.
-- **Log Tailer**: Стриминг и классификация логов N.I.N.A. в реальном времени (Regex-паттерн матчинг).
-- **WebSocket Client**: Подписка на нативные события N.I.N.A. (`SequenceItemStarted`, `MeridianFlip`, и т.д.).
-
-### 2. Core (Ядро)
-
-- **EventBus**: Асинхронная шина событий с метриками и дедупликацией.
-- **ObservatoryState**: Единый in-memory стейт обсерватории (агрегатор всех источников).
-- **Mode Manager**: Управление режимами (`FULL_AI`, `SAFE_AUTONOMOUS`, `MANUAL`, `SIMULATION`) с автоматическим fallback при потере LLM.
-- **RAG Engine**: Гибридные эмбеддинги (Ollama `nomic-embed-text` + LRU-кэш 10000 записей) и векторный поиск.
-- **Cortex Metrics**: Prometheus-совместимые метрики для мониторинга системы.
-
-### 3. Execution Layer (Исполнение)
-
-- **OpenAPI-Driven Trigger Emulator**: Динамическое построение реестра триггеров из OpenAPI спецификации N.I.N.A. API с автоматической валидацией параметров.
-- **Global Var Injector**: Изменение переменных Sequencer+ с маскированием чувствительных данных в логах.
-- **Python Bridge**: Whitelist-выполнение IronPython/C# скриптов внутри N.I.N.A. (защита от произвольного кода).
-- **Safety Interceptor**: Перехват инструкций `ShutdownPc` для предотвращения внезапного отключения ПК.
-- **HAL (Hardware Abstraction Layer)**: Финальная валидация всех команд перед отправкой в N.I.N.A.
-
----
-
-## 🤖 Директория AI-Агентов
-
-| Агент             | Роль                        | Описание                                                                                        |
-| :---------------- | :-------------------------- | :---------------------------------------------------------------------------------------------- |
-| **Watcher**       | Monitor & Anomaly Detection | Непрерывный анализ трендов (Z-Score, HFR, RMS, ветер). Генерация алертов.                       |
-| **Guardian**      | Safety & Security           | Высший приоритет. Аварийная парковка (`EMERGENCY_PARK`) при порывах ветра или `UNSAFE`.         |
-| **Diagnostician** | Root Cause Analysis         | Поиск корреляций (например, HFR vs Температура) и анализ похожих кейсов через RAG/LLM.          |
-| **Strategist**    | Parameter Optimization      | Расчет оптимальной экспозиции (SNR), адаптация интервалов автофокуса, выбор подветренных целей. |
-| **Auditor**       | Post-Mortem Analysis        | Генерация `Session Digest`, индексация в RAG, расчет Quality Score.                             |
-| **Calibrator**    | Calibration Management      | Контроль свежести мастеров (Bias/Dark/Flat) и температурного допуска.                           |
-| **Scheduler**     | Session Planning            | Динамическое приоритизация целей в Dynamic Sequencer на основе видимости и погоды.              |
-| **Copilot**       | Interactive Assistant       | Генерация пошаговых UI-гайдов для ручных шагов (2PA, OAG Focus, MessageBox).                    |
-| **Orchestrator**  | Coordinator                 | Маршрутизация задач, управление очередями, приоритетами и Decision Audit.                       |
-
----
-
-## 🛠️ Технологический стек
-
-### Backend
-
-- **Python 3.11+**
-- **FastAPI** — современный async web framework
-- **Uvicorn** — ASGI server
-- **Pydantic V2** — валидация данных и settings management
-- **Asyncio** — асинхронное программирование
-
-### AI / Orchestration
-
-- **LangGraph** — state-based workflow orchestration для сложных сценариев
-- **Ollama** — локальный LLM сервер
-  - `gemma4:31b-cloud` — основная модель (облачная, мощная)
-  - `gemma4:e4b` — fallback модель (локальная, быстрая)
-  - `nomic-embed-text` — эмбеддинги для RAG (768 dim)
-
-### Databases
-
-- **Qdrant** — векторная база данных для RAG-системы (хранение эмбеддингов сессий и документации)
-- **InfluxDB 2.x** — time-series база данных для метрик (основной источник телеметрии)
-- **SQLite** — Decision Audit Trail (хранение всех решений AI-агентов)
-
-### Monitoring & Observability
-
-- **Prometheus** — экспорт метрик Cortex + резервный источник метрик N.I.N.A.
-- **WebSocket Broadcasting** — real-time события для Frontend
-
-### Infrastructure
-
-- **Docker Compose** — оркестрация контейнеров (Qdrant, InfluxDB)
-- **HTTPX** — async HTTP client для N.I.N.A. API
-- **Watchdog** — файловый monitoring
-- **Astropy** — парсинг FITS-заголовков
-
----
-
-## ⚙️ Установка и настройка
-
-### 1. Предварительные требования
-
-- **N.I.N.A.** с установленными плагинами:
-  - `Advanced API` (v2.2.15+) — REST API и WebSocket
-  - `Prometheus Exporter` (jewzaam) — метрики оборудования
-  - `InfluxDB Exporter` (daleghent) — метрики в InfluxDB
-- **Python 3.11+**
-- **Docker Desktop** (для Qdrant и InfluxDB)
-- **Ollama** (локальный LLM сервер)
-
-### 2. Клонирование репозитория
+### Установка за 5 минут
 
 ```bash
-git clone <repository-url>
+# 1. Клонируйте репозиторий
+git clone https://github.com/your-repo/nina-ai-cortex.git
 cd nina-ai-cortex
-```
 
-### 3. Инфраструктура (Docker)
+# 2. Запустите установщик
+install_deps.bat
 
-Запустите базы данных:
+# 3. Отредактируйте конфигурацию
+# Откройте config/settings.yaml и укажите пути к N.I.N.A.
 
-```bash
-docker-compose up -d
-```
-
-Это запустит:
-
-- **Qdrant** на порту `6333` (веб-интерфейс) и `6334` (gRPC)
-- **InfluxDB** на порту `8086`
-
-### 4. Установка и настройка Ollama
-
-Скачайте и установите Ollama: https://ollama.ai/download
-
-Загрузите необходимые модели:
-
-```bash
-# Эмбеддинги для RAG (обязательно)
+# 4. Загрузите LLM модели
+ollama pull gemma4:31b-cloud
+ollama pull gemma4:e4b
 ollama pull nomic-embed-text
 
-# Fallback LLM модель (обязательно, быстрая локальная)
-ollama pull gemma4:e4b
-
-# Основная LLM модель (опционально, мощная облачная)
-ollama pull gemma4:31b-cloud
+# 5. Запустите систему
+start_cortex.bat
 ```
 
-Проверьте доступность моделей:
+После запуска:
+
+- **API Docs**: http://localhost:8000/docs
+- **WebSocket**: ws://localhost:8000/ws
+- **Metrics**: http://localhost:8000/metrics
+
+## 📦 Установка
+
+### Подробная инструкция
+
+#### 1. Установка N.I.N.A. и плагинов
+
+Убедитесь, что установлены следующие плагины N.I.N.A.:
+
+**Обязательные:**
+
+- ✅ **Advanced API** — REST API для управления
+- ✅ **InfluxDB Exporter** — экспорт метрик в InfluxDB
+- ✅ **Prometheus Exporter** — экспорт метрик в Prometheus
+
+**Рекомендуемые:**
+
+- ⭐ **Session Metadata** — метаданные каждого кадра
+- ⭐ **Hocus Focus** — детальный анализ звёзд
+- ⭐ **LiveStack** — real-time стекинг
+- ⭐ **Dither Statistics** — анализ качества дизеринга
+- ⭐ **SolveEveryLight** — plate solve каждого кадра
+
+**Опциональные:**
+
+- 🔧 **Night Summary** — итоговые отчёты
+- 🔧 **Guiding Analyzer** — FFT анализ гидирования
+- 🔧 **AutoFocus Analysis** — анализ кривых автофокуса
+- 🔧 **Two Point Polar Alignment** — полярное выравнивание
+- 🔧 **OAG FocusAssist** — фокусировка OAG
+- 🔧 **Filter Selector** — интерактивный выбор фильтра
+
+#### 2. Установка Python зависимостей
 
 ```bash
+# Создайте виртуальное окружение
+python -m venv venv
+
+# Активируйте (Windows)
+venv\Scripts\activate
+
+# Активируйте (Linux/Mac)
+source venv/bin/activate
+
+# Установите зависимости
+pip install -r requirements.txt
+```
+
+#### 3. Установка Docker контейнеров
+
+```bash
+# Запустите инфраструктуру
+docker compose up -d
+
+# Проверьте статус
+docker compose ps
+```
+
+Должны быть запущены:
+
+- ✅ `nina_cortex_qdrant` — векторная БД (порт 6333)
+- ✅ `nina_cortex_influxdb` — time-series БД (порт 8086)
+
+#### 4. Установка Ollama
+
+```bash
+# Скачайте Ollama
+# https://ollama.ai/download
+
+# Загрузите модели
+ollama pull gemma4:31b-cloud  # Основная модель (облачная)
+ollama pull gemma4:e4b        # Fallback модель (локальная)
+ollama pull nomic-embed-text  # Embeddings для RAG
+
+# Проверьте
 ollama list
 ```
 
-### 5. Установка зависимостей Python
+#### 5. Конфигурация
 
-**Windows (автоматическая установка):**
+Отредактируйте `config/settings.yaml`:
 
-```cmd
-install_deps.bat
+```yaml
+nina_environment:
+  appdata_root: "C:\\Users\\YourName\\AppData\\Local\\NINA"
+  sessions_root: "D:\\Astrophotography\\Sessions"
+  masters_root: "D:\\Astrophotography\\Masters"
+  profiles_dir: "C:\\Users\\YourName\\AppData\\Local\\NINA\\Profiles"
+  sequence_template: "C:\\Users\\YourName\\Documents\\NINA\\Sequence.json"
+  logs_dir: "C:\\Users\\YourName\\AppData\\Local\\NINA\\Logs"
+  plugins_dir: "C:\\Users\\YourName\\AppData\\Local\\NINA\\Plugins\\3.0.0"
+
+network:
+  nina_api_host: "http://localhost:1888"
+  nina_ws_url: "ws://localhost:1888/v2/socket"
+  prometheus_url: "http://localhost:9876"
 ```
 
-**Ручная установка:**
+Создайте `backend/.env`:
 
 ```bash
-# Создание виртуального окружения
-python -m venv venv
-
-# Активация
-# Windows:
-venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
-
-# Установка зависимостей
-pip install -r backend/requirements.txt
+INFLUXDB_TOKEN=my-super-secret-token
+OLLAMA_HOST=http://localhost:11434
+LLM_PRIMARY_MODEL=gemma4:31b-cloud
+LLM_FALLBACK_MODEL=gemma4:e4b
 ```
 
-### 6. Конфигурация
+## ⚙️ Конфигурация
 
-#### 6.1. Переменные окружения
+### Основные параметры (settings.yaml)
 
-Скопируйте шаблон и отредактируйте:
+#### Пути N.I.N.A.
+
+```yaml
+nina_environment:
+  appdata_root: "C:\\Users\\...\\AppData\\Local\\NINA"
+  sessions_root: "D:\\Astrophotography\\Sessions"
+  masters_root: "D:\\Astrophotography\\Masters"
+  profiles_dir: "C:\\Users\\...\\AppData\\Local\\NINA\\Profiles"
+  sequence_template: "...\\Sequence.json"
+  logs_dir: "C:\\Users\\...\\AppData\\Local\\NINA\\Logs"
+  plugins_dir: "C:\\Users\\...\\AppData\\Local\\NINA\\Plugins\\3.0.0"
+```
+
+#### Пороговые значения
+
+```yaml
+thresholds:
+  watcher:
+    hfr_increase_percent: 30.0 # Аномалия если HFR вырос на 30%
+    rms_ra_critical: 2.0 # Критический RMS по RA (arcsec)
+    temperature_deviation: 2.0 # Отклонение температуры камеры (°C)
+    wind_speed_warning: 15.0 # Предупреждение о ветре (m/s)
+
+  calibrator:
+    bias_freshness_days: 90 # BIAS мастер актуален 90 дней
+    dark_freshness_days: 30 # DARK мастер актуален 30 дней
+    flat_freshness_days: 7 # FLAT мастер актуален 7 дней
+
+  preflight:
+    cloud_cover_max: 80.0 # Максимальная облачность (%)
+    wind_speed_max: 20.0 # Максимальный ветер (m/s)
+    min_altitude: 30.0 # Минимальная высота цели (°)
+```
+
+#### Feature Flags
+
+```yaml
+feature_flags:
+  rag:
+    auto_update_enabled: false # Автообновление RAG
+    multimodal_enabled: false # Мультимодальный RAG (future)
+
+  hal:
+    predictive_enabled: false # Predictive HAL
+
+  analytics:
+    decision_analyzer_enabled: true # Анализ решений агентов
+    ml_parameter_optimizer: false # ML оптимизатор (future)
+```
+
+### Переменные окружения (.env)
 
 ```bash
-cp backend/.env.example backend/.env
-```
+# InfluxDB
+INFLUXDB_TOKEN=my-super-secret-token
 
-Отредактируйте `backend/.env`:
-
-```env
-# InfluxDB токен (получить из InfluxDB UI: Data > Tokens)
-INFLUXDB_TOKEN=your-influxdb-token-here
-
-# Ollama конфигурация
+# Ollama LLM
 OLLAMA_HOST=http://localhost:11434
 LLM_PRIMARY_MODEL=gemma4:31b-cloud
 LLM_FALLBACK_MODEL=gemma4:e4b
@@ -245,562 +400,566 @@ LLM_PRIMARY_TIMEOUT=30.0
 LLM_FALLBACK_TIMEOUT=15.0
 LLM_MAX_TOKENS=1500
 LLM_TEMPERATURE=0.3
-LLM_FALLBACK_ENABLED=true
+
+# CORS
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# Logging
+LOG_LEVEL=INFO
+LOG_FORMAT=json
 ```
 
-#### 6.2. Настройки приложения
+## 🎮 Запуск
 
-Отредактируйте `config/settings.yaml`:
-
-```yaml
-# Пути к файлам N.I.N.A. (ОБЯЗАТЕЛЬНО измените под свою систему!)
-nina_environment:
-  appdata_root: "C:\\Users\\YourUser\\AppData\\Local\\NINA"
-  sessions_root: "C:\\YourPath\\Sessions"
-  masters_root: "C:\\YourPath\\Masters"
-  profiles_dir: "C:\\Users\\YourUser\\AppData\\Local\\NINA\\Profiles"
-  logs_dir: "C:\\Users\\YourUser\\AppData\\Local\\NINA\\Logs"
-  plugins_dir: "C:\\Users\\YourUser\\AppData\\Local\\NINA\\Plugins\\3.0.0"
-
-# Сетевые подключения
-network:
-  nina_api_host: "http://localhost:1888"
-  nina_ws_url: "ws://localhost:1888/v2/socket"
-  prometheus_url: "http://localhost:9876"
-
-# InfluxDB
-influxdb:
-  url: "http://localhost:8086"
-  token: "${INFLUXDB_TOKEN}" # Берётся из .env
-  org: "observatory"
-  bucket: "nina_telemetry"
-
-# Пороговые значения агентов (настройте под своё оборудование)
-thresholds:
-  watcher:
-    hfr_increase_percent: 30.0
-    rms_ra_critical: 2.0
-    # ... другие пороги
-```
-
-#### 6.3. OpenAPI спецификация N.I.N.A. API
-
-Скачайте актуальную спецификацию:
+### Запуск системы
 
 ```bash
-# Windows PowerShell
-Invoke-WebRequest -Uri "https://christian-photo.github.io/github-page/projects/ninaAPI/v2/doc/api.json" -OutFile "config/nina_api_spec.json"
-
-# Linux/macOS
-curl -o config/nina_api_spec.json https://christian-photo.github.io/github-page/projects/ninaAPI/v2/doc/api.json
-```
-
-Или используйте уже скачанную `config/nina_api_spec.json` из репозитория.
-
----
-
-## 🏃 Запуск системы
-
-**Windows:**
-
-```cmd
+# Запустите start_cortex.bat
 start_cortex.bat
 ```
 
-**Linux/macOS:**
+Скрипт автоматически:
+
+1. ✅ Проверит Python и виртуальное окружение
+2. ✅ Запустит Docker контейнеры (Qdrant, InfluxDB)
+3. ✅ Инициализирует все компоненты
+4. ✅ Запустит FastAPI сервер на порту 8000
+
+### Проверка статуса
 
 ```bash
-# Активация виртуального окружения
-source venv/bin/activate
+# Health check
+curl http://localhost:8000/health
 
-# Запуск сервера
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Prometheus metrics
+curl http://localhost:8000/metrics
+
+# WebSocket connection
+wscat -c ws://localhost:8000/ws
 ```
 
-Сервер запустится на `http://localhost:8000`.
+### Режимы работы
 
-### Доступные endpoints
+Система поддерживает 4 режима:
 
-- **Swagger UI (API Docs)**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc (альтернативная документация)**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
-- **Prometheus Metrics**: [http://localhost:8000/metrics](http://localhost:8000/metrics)
-- **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
-- **WebSocket Endpoint**: `ws://localhost:8000/ws`
+```bash
+# FULL_AI — все агенты активны
+curl -X POST "http://localhost:8000/api/v1/agents/mode?mode=full_ai"
 
----
+# SAFE_AUTONOMOUS — только Watcher + Guardian
+curl -X POST "http://localhost:8000/api/v1/agents/mode?mode=safe"
 
-## 🔐 Безопасность
+# MANUAL — только мониторинг
+curl -X POST "http://localhost:8000/api/v1/agents/mode?mode=manual"
 
-**Архитектурное решение**: N.I.N.A. AI Cortex предназначен для **локального использования** на ПК астронома в доверенной сети. Поэтому система использует упрощённую модель безопасности:
+# SIMULATION — тестовый режим
+curl -X POST "http://localhost:8000/api/v1/agents/mode?mode=simulation"
+```
 
-- ✅ **Без аутентификации**: все endpoints открыты в локальной сети
-- ✅ **CORS whitelist**: доступ только с разрешённых доменов Frontend
-- ✅ **HAL валидация**: защита от опасных команд на уровне оборудования
-- ✅ **OpenAPI валидация**: автоматическая проверка параметров триггеров
-- ✅ **Маскирование логов**: чувствительные данные (токены, пароли) маскируются как `***`
+## 📚 API Documentation
 
-**Для production развёртывания** рекомендуется:
+### System Endpoints
 
-- Использовать reverse proxy (nginx, Traefik) с HTTPS
-- Настроить firewall для ограничения доступа к порту 8000
-- Разместить систему в изолированной сети обсерватории
+| Method | Endpoint   | Description         |
+| ------ | ---------- | ------------------- |
+| GET    | `/health`  | Health check        |
+| GET    | `/metrics` | Prometheus metrics  |
+| WS     | `/ws`      | WebSocket broadcast |
 
----
+### AI Agents Endpoints
 
-## 🧪 Тестирование и Симуляция
+| Method | Endpoint                    | Description                   |
+| ------ | --------------------------- | ----------------------------- |
+| GET    | `/api/v1/observatory/state` | Полное состояние обсерватории |
+| GET    | `/api/v1/agents/status`     | Статус всех агентов           |
+| POST   | `/api/v1/agents/mode`       | Установить режим работы       |
+| GET    | `/api/v1/agents/decisions`  | Последние решения             |
+| GET    | `/api/v1/agents/llm-status` | Статус LLM                    |
 
-Проект покрыт Unit, Integration и E2E тестами. Встроенный **Simulation Mode** позволяет тестировать реакции агентов на аномалии без реального телескопа.
+### Metrics Endpoints
+
+| Method | Endpoint                         | Description               |
+| ------ | -------------------------------- | ------------------------- |
+| GET    | `/api/v1/metrics`                | Текущие метрики           |
+| GET    | `/api/v1/metrics/unified`        | Unified metrics (5-layer) |
+| GET    | `/api/v1/metrics/sources-status` | Статус источников         |
+| GET    | `/api/v1/metrics/history`        | История метрики           |
+
+### Execution Layer Endpoints
+
+| Method | Endpoint                     | Description         |
+| ------ | ---------------------------- | ------------------- |
+| POST   | `/api/v1/execution/trigger`  | Вызвать триггер     |
+| POST   | `/api/v1/execution/variable` | Изменить переменную |
+| GET    | `/api/v1/triggers`           | Список триггеров    |
+
+### RAG Engine Endpoints
+
+| Method | Endpoint              | Description               |
+| ------ | --------------------- | ------------------------- |
+| POST   | `/api/v1/rag/search`  | Семантический поиск       |
+| GET    | `/api/v1/rag/context` | Получить контекст для LLM |
+| GET    | `/api/v1/rag/stats`   | Статистика RAG            |
+
+### Safety Endpoints
+
+| Method | Endpoint                    | Description          |
+| ------ | --------------------------- | -------------------- |
+| POST   | `/api/v1/safety/preflight`  | Pre-flight check     |
+| GET    | `/api/v1/safety/predictive` | Predictive HAL stats |
+
+### Simulation Endpoints
+
+| Method | Endpoint                            | Description            |
+| ------ | ----------------------------------- | ---------------------- |
+| POST   | `/api/v1/simulation/start`          | Запустить симуляцию    |
+| POST   | `/api/v1/simulation/stop`           | Остановить симуляцию   |
+| POST   | `/api/v1/simulation/inject-anomaly` | Инжектировать аномалию |
+
+### Примеры использования
+
+#### Запуск триггера
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/execution/trigger" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "trigger_name": "autofocus",
+    "reason": "Manual API call"
+  }'
+```
+
+#### RAG поиск
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/rag/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "проблемы с гидированием при высоком ветре",
+    "top_k": 5
+  }'
+```
+
+#### Pre-flight check
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/safety/preflight"
+```
+
+## 🤖 AI Агенты
+
+### Watcher Agent (HIGH Priority)
+
+**Роль:** Непрерывный мониторинг метрик и детекция аномалий
+
+**Методы детекции:**
+
+- **Z-Score анализ** — статистические выбросы
+- **Трендовый анализ** — деградация метрик во времени
+- **Процентное отклонение** — резкие изменения
+
+**Триггеры:**
+
+- HFR вырос на >30% за последние 5 кадров
+- RMS по RA > 2.0" в течение 3 кадров подряд
+- Температура камеры отклонилась на >2°C от setpoint
+- Ветер > 15 m/s с порывами > 20 m/s
+
+### Guardian Agent (CRITICAL Priority)
+
+**Роль:** Обеспечение безопасности оборудования
+
+**Действия:**
+
+- **Emergency Park** — автоматическая парковка монтировки
+- **Trigger Autofocus** — запуск автофокуса при деградации HFR
+- **Trigger Dither** — дизеринг при высоком RMS
+- **Guider Calibration** — перекалибровка гида
+
+**Триггеры:**
+
+- Safety Monitor → UNSAFE
+- Ветер > 20 m/s
+- Облачность > 95%
+- RMS > 3.0" (требуется перекалибровка)
+
+### Diagnostician Agent (HIGH Priority)
+
+**Роль:** Root cause analysis проблем
+
+**Методы:**
+
+- **Корреляционный анализ** — связь между метриками
+- **RAG поиск** — похожие кейсы из истории
+- **LLM анализ** — gemma4:31b-cloud для сложных случаев
+
+**Примеры:**
+
+- "HFR вырос на 50%" → "Температура упала на 5°C" → "Температурный дрейф фокуса"
+- "RMS по DEC вырос" → "Ветер с севера 12 m/s" → "Ветровая нагрузка"
+
+### Strategist Agent (MEDIUM Priority)
+
+**Роль:** Оптимизация параметров съемки
+
+**Оптимизации:**
+
+- **Exposure time** — расчёт по SNR (SNR ~ √time)
+- **Autofocus interval** — адаптивный на основе тренда HFR
+- **Target switching** — переключение целей при плохих условиях
+
+**Формулы:**
+
+```
+new_exposure = old_exposure × (target_snr / current_snr)²
+
+autofocus_interval =
+  if hfr_trend > 0.10: 15 min (emergency)
+  elif hfr_trend > 0.05: 30 min (frequent)
+  else: 60 min (normal)
+```
+
+### Auditor Agent (LOW Priority)
+
+**Роль:** Post-mortem анализ завершённых сессий
+
+**Генерирует:**
+
+- **Session Digest** — структурированный отчёт
+- **Quality Score** — оценка качества (0-10)
+- **Recommendations** — рекомендации для будущих сессий
+
+**Источники данных:**
+
+- `sessions_metadata` (SQLite) — точные данные по каждому кадру
+- `observatory_state` — контекст (погода, астрономия)
+- LLM — текстовый detailed_report
+
+### Calibrator Agent (LOW Priority)
+
+**Роль:** Управление библиотекой мастер-кадров
+
+**Проверки:**
+
+- Наличие BIAS/DARK/FLAT мастеров
+- Соответствие параметров (gain, offset, temperature, filter)
+- Актуальность (BIAS: 90 дней, DARK: 30 дней, FLAT: 7 дней)
+
+### Copilot Agent (INFO Priority)
+
+**Роль:** Интерактивная помощь при ручных шагах
+
+**Сценарии:**
+
+- **MessageBox** — выбор фильтра, подтверждение
+- **Two Point Polar Alignment** — пошаговая инструкция
+- **OAG Focus Assist** — помощь при фокусировке OAG
+
+## 🧪 Тестирование
 
 ### Запуск тестов
 
-**Windows:**
-
-```cmd
-run_tests.bat
-```
-
-**Linux/macOS:**
-
 ```bash
-source venv/bin/activate
-cd backend
-pytest tests/unit tests/integration -v
+# Unit + Integration tests
+pytest tests/unit tests/integration --cov=app --cov-report=term-missing -v
+
+# E2E tests (Simulation Mode)
 pytest tests/e2e -v
+
+# Все тесты
+pytest tests/ --cov=app --cov-report=html
 ```
 
-### Симуляция через API
-
-Запустите симуляцию сессии:
+### Coverage report
 
 ```bash
+# HTML отчёт
+open htmlcov/index.html
+
+# Минимальный coverage: 80%
+pytest --cov=app --cov-fail-under=80
+```
+
+### Simulation Mode
+
+```bash
+# Запустить симуляцию
 curl -X POST "http://localhost:8000/api/v1/simulation/start?target=M31&frames=10"
-```
 
-Инжектируйте аномалию:
-
-```bash
-# Резкий рост HFR
+# Инжектировать аномалию
 curl -X POST "http://localhost:8000/api/v1/simulation/inject-anomaly?anomaly_type=hfr_spike"
 
-# Потеря гидирования
-curl -X POST "http://localhost:8000/api/v1/simulation/inject-anomaly?anomaly_type=guiding_lost"
-
-# Safety Monitor UNSAFE
-curl -X POST "http://localhost:8000/api/v1/simulation/inject-anomaly?anomaly_type=safety_unsafe"
+# Остановить симуляцию
+curl -X POST "http://localhost:8000/api/v1/simulation/stop"
 ```
 
-**Ожидаемое поведение**:
+## 🔧 Troubleshooting
 
-1. `Watcher` детектирует аномалию → генерирует `ALERT`
-2. `Diagnostician` анализирует root cause через RAG
-3. `Guardian`/`Strategist` инициирует corrective action (Autofocus, Park, etc.)
-4. Решение логируется в Decision Audit Trail
+### Проблемы подключения
 
-### Тестирование LangGraph Workflows
-
-Запустите diagnostic workflow:
+#### N.I.N.A. API недоступен
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/langgraph/start?workflow_type=diagnostic&trigger_event=HFR_degradation"
+# Проверьте, что N.I.N.A. запущена
+curl http://localhost:1888/v2/api/version
+
+# Проверьте, что Advanced API плагин установлен
+# N.I.N.A. → Options → Plugins → Advanced API
 ```
 
-Проверьте статус:
+#### InfluxDB не подключается
 
 ```bash
-curl "http://localhost:8000/api/v1/langgraph/workflows"
+# Проверьте Docker контейнер
+docker compose ps influxdb
+
+# Проверьте логи
+docker compose logs influxdb
+
+# Проверьте токен в .env
+cat backend/.env | grep INFLUXDB_TOKEN
 ```
 
----
-
-## 📡 API Endpoints
-
-### System
-
-- `GET /health` — Health check
-- `GET /metrics` — Prometheus metrics
-
-### AI Agents
-
-- `GET /api/v1/agents/status` — Статус всех агентов
-- `POST /api/v1/agents/mode` — Установка режима работы
-- `GET /api/v1/agents/decisions` — Последние решения агентов
-- `POST /api/v1/agents/test-llm` — Тест LLM генерации
-
-### Observatory State
-
-- `GET /api/v1/observatory/state` — Полное состояние обсерватории
-- `GET /api/v1/observatory/session-summary` — Сводка текущей сессии
-
-### Metrics
-
-- `GET /api/v1/metrics` — Текущие метрики
-- `GET /api/v1/metrics/history?metric=hfr&limit=100` — История метрики
-
-### Execution Layer
-
-- `POST /api/v1/execution/trigger` — Вызов триггера
-- `POST /api/v1/execution/variable` — Изменение глобальной переменной
-- `GET /api/v1/triggers` — Список доступных триггеров
-
-### LangGraph Workflows (НОВОЕ)
-
-- `GET /api/v1/langgraph/types` — Типы workflow (diagnostic, post_mortem, adaptive)
-- `GET /api/v1/langgraph/workflows` — Активные workflow
-- `GET /api/v1/langgraph/workflow/{id}` — Статус конкретного workflow
-- `POST /api/v1/langgraph/start` — Запуск нового workflow
-- `POST /api/v1/langgraph/cancel/{id}` — Отмена workflow
-- `GET /api/v1/langgraph/stats` — Статистика LangGraph оркестратора
-
-### RAG Engine
-
-- `POST /api/v1/rag/search` — Семантический поиск
-- `GET /api/v1/rag/context?query=...` — Получение контекста для LLM
-- `GET /api/v1/rag/stats` — Статистика RAG
-
-### Shadow Engine
-
-- `GET /api/v1/sequence/shadow` — Теневой граф секвенсора
-- `GET /api/v1/sequence/state` — Текущее состояние выполнения
-
-### Simulation
-
-- `POST /api/v1/simulation/start` — Запуск симуляции
-- `POST /api/v1/simulation/stop` — Остановка симуляции
-- `POST /api/v1/simulation/inject-anomaly` — Инжект аномалии
-
-### Decision Audit
-
-- `GET /api/v1/audit/decisions` — История решений
-- `GET /api/v1/audit/stats` — Статистика audit trail
-
-Полная документация доступна в Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
-
----
-
-## 📂 Структура проекта
-
-```
-nina-ai-cortex/
-├── backend/
-│   ├── app/
-│   │   ├── agents/                      # 9 AI-агентов + оркестраторы
-│   │   │   ├── orchestrator.py          # Event-Driven Orchestrator
-│   │   │   ├── hybrid_langgraph_orchestrator.py  # LangGraph Orchestrator (НОВОЕ)
-│   │   │   ├── watcher_agent.py        # Monitor & Anomaly Detection
-│   │   │   ├── guardian_agent.py        # Safety & Security
-│   │   │   ├── diagnostician_agent.py   # Root Cause Analysis
-│   │   │   ├── strategist_agent.py      # Parameter Optimization
-│   │   │   ├── auditor_agent.py         # Post-Mortem Analysis
-│   │   │   ├── calibrator_agent.py      # Calibration Management
-│   │   │   ├── scheduler_agent.py       # Session Planning
-│   │   │   ├── copilot_agent.py         # Interactive Assistant
-│   │   │   ├── base_agent.py            # Базовый класс агентов
-│   │   │   ├── observatory_state.py     # Единое состояние обсерватории
-│   │   │   ├── llm_client.py            # LLM клиент
-│   │   │   └── llm_provider.py          # LLM провайдер (Ollama)
-│   │   │
-│   │   ├── core/                        # Ядро системы
-│   │   │   ├── config.py                # Конфигурация (Pydantic Settings)
-│   │   │   ├── events.py                # EventBus
-│   │   │   ├── rag_engine.py            # RAG система (Qdrant)
-│   │   │   ├── embeddings.py            # Эмбеддинги (Ollama)
-│   │   │   ├── metrics.py               # Prometheus метрики
-│   │   │   ├── mode_manager.py          # Управление режимами
-│   │   │   ├── ws_broadcast.py          # WebSocket broadcasting
-│   │   │   └── capability_registry.py   # Реестр возможностей плагинов
-│   │   │
-│   │   ├── execution/                   # Исполнительный слой
-│   │   │   ├── trigger_emulator.py      # OpenAPI-driven триггеры (НОВОЕ)
-│   │   │   ├── openapi_client.py        # OpenAPI клиент (НОВОЕ)
-│   │   │   ├── nina_client.py           # N.I.N.A. API клиент
-│   │   │   ├── global_var_injector.py   # Инъекция глобальных переменных
-│   │   │   ├── hal.py                   # Hardware Abstraction Layer
-│   │   │   ├── python_bridge.py         # Python скрипты в N.I.N.A.
-│   │   │   ├── safety_interceptor.py    # Перехват Shutdown
-│   │   │   ├── device_commander.py      # Команды оборудованию
-│   │   │   └── dynamic_editor.py        # Редактор Dynamic Sequencer
-│   │   │
-│   │   ├── ingestion/                   # Сбор данных
-│   │   │   ├── watchers/                # Файловые вотчеры
-│   │   │   │   ├── session_watcher.py
-│   │   │   │   ├── masters_auditor.py
-│   │   │   │   ├── hocus_focus_watcher.py
-│   │   │   │   ├── livestack_watcher.py
-│   │   │   │   ├── log_tailer.py
-│   │   │   │   ├── websocket_client.py
-│   │   │   │   └── ...
-│   │   │   ├── parsers/                 # Парсеры данных
-│   │   │   │   ├── fits_header.py
-│   │   │   │   ├── hocus_focus.py
-│   │   │   │   ├── prometheus_metrics.py
-│   │   │   │   └── session_metadata.py
-│   │   │   ├── providers/               # Поставщики данных
-│   │   │   │   └── influxdb_metrics.py
-│   │   │   └── subscribers/             # Подписчики
-│   │   │       └── influxdb_subscriber.py
-│   │   │
-│   │   ├── shadow_engine/               # Теневой движок
-│   │   │   ├── sequence_parser.py       # Парсер Sequence.json
-│   │   │   └── state_tracker.py         # Трекер состояния
-│   │   │
-│   │   ├── simulation/                  # Симуляция
-│   │   │   ├── fake_nina.py             # Эмулятор N.I.N.A.
-│   │   │   └── fake_phd2.py             # Эмулятор PHD2
-│   │   │
-│   │   ├── safety/                      # Безопасность
-│   │   │   └── preflight.py             # Pre-flight checklist
-│   │   │
-│   │   ├── storage/                     # Хранилище
-│   │   │   ├── decision_audit.py        # Decision Audit Trail (SQLite)
-│   │   │   └── disk_monitor.py          # Мониторинг диска
-│   │   │
-│   │   └── main.py                      # FastAPI приложение
-│   │
-│   ├── data/                            # Данные (runtime)
-│   │   ├── decision_audit.db            # SQLite БД решений
-│   │   └── vector_db/                   # Локальная vector DB (fallback)
-│   │
-│   ├── tests/                           # Тесты
-│   │   ├── unit/                        # Unit тесты
-│   │   ├── integration/                 # Integration тесты
-│   │   ├── e2e/                         # End-to-End тесты
-│   │   └── fixtures/                    # Тестовые данные
-│   │
-│   ├── scripts/                         # Вспомогательные скрипты
-│   │   └── analyze_nina_api.py          # Анализатор OpenAPI spec
-│   │
-│   ├── requirements.txt                 # Python зависимости
-│   ├── pytest.ini                       # Pytest конфигурация
-│   └── .env.example                     # Шаблон переменных окружения
-│
-├── config/                              # Конфигурация
-│   ├── settings.yaml                    # Основные настройки
-│   ├── nina_api_spec.json               # OpenAPI спецификация N.I.N.A.
-│   └── nina_trigger_mapping.json        # Маппинг триггеров
-│
-├── docs/                                # Документация
-│   └── nina_api_reference.md            # Справочник API
-│
-├── docker-compose.yml                   # Docker конфигурация
-├── install_deps.bat                     # Скрипт установки (Windows)
-├── start_cortex.bat                     # Скрипт запуска (Windows)
-├── run_tests.bat                        # Скрипт тестов (Windows)
-└── README.md                            # Этот файл
-```
-
----
-
-## 🔄 Режимы работы
-
-Система поддерживает 4 режима работы:
-
-### 1. `FULL_AI` (по умолчанию)
-
-- Все 9 агентов активны
-- LLM используется для сложного анализа
-- Полная автономность
-
-### 2. `SAFE_AUTONOMOUS`
-
-- Активны только `Watcher` и `Guardian`
-- LLM отключён (fallback при потере связи)
-- Только критические реакции
-
-### 3. `MANUAL`
-
-- Только мониторинг, без автодействий
-- Все триггеры заблокированы
-- Для отладки и наблюдения
-
-### 4. `SIMULATION`
-
-- Режим симуляции с `FakeNina` и `FakePhd2`
-- Для тестирования без реального оборудования
-- Инжект аномалий через API
-
-Переключение режимов:
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/agents/mode?mode=safe"
-```
-
----
-
-## 📊 Мониторинг
-
-### Prometheus Metrics
-
-Cortex экспортирует метрики в Prometheus формате на `/metrics`:
-
-```bash
-curl http://localhost:8000/metrics
-```
-
-**Основные метрики**:
-
-- `cortex_events_total` — количество обработанных событий
-- `cortex_decisions_total` — количество решений агентов
-- `cortex_llm_requests_total` — запросы к LLM
-- `cortex_api_requests_total` — HTTP запросы к API
-- `cortex_triggers_fired_total` — срабатывания триггеров
-- `cortex_active_ws_connections` — активные WebSocket подключения
-- `cortex_sequence_running` — статус выполнения секвенсора
-- `cortex_safety_status` — статус Safety Monitor
-
-### Grafana Dashboard
-
-Импортируйте метрики в Grafana для визуализации:
-
-1. Добавьте Prometheus data source: `http://localhost:8000/metrics`
-2. Создайте dashboard с метриками Cortex
-3. Настройте алерты на критические события
-
----
-
-## 🐛 Troubleshooting
-
-### Проблема: `Cannot connect to Ollama`
-
-**Решение**:
+#### Ollama не отвечает
 
 ```bash
 # Проверьте, что Ollama запущен
 ollama list
 
-# Запустите Ollama если не запущен
-# Windows: Ollama должен быть в системном трее
-# Linux/macOS: ollama serve
+# Проверьте доступность моделей
+curl http://localhost:11434/api/tags
+
+# Перезапустите Ollama
+# Windows: перезапустите службу Ollama
+# Linux: systemctl restart ollama
 ```
 
-### Проблема: `InfluxDB 401 Unauthorized`
+### Проблемы с агентами
 
-**Решение**:
-
-1. Получите токен из InfluxDB UI: http://localhost:8086 → Data → Tokens
-2. Обновите `backend/.env`:
-   ```env
-   INFLUXDB_TOKEN=your-actual-token-here
-   ```
-3. Перезапустите Cortex
-
-### Проблема: `N.I.N.A. API not reachable`
-
-**Решение**:
-
-1. Убедитесь, что N.I.N.A. запущена
-2. Проверьте, что Advanced API плагин установлен и включён
-3. Проверьте порт в `config/settings.yaml`:
-   ```yaml
-   network:
-     nina_api_host: "http://localhost:1888"
-   ```
-
-### Проблема: `Qdrant connection failed`
-
-**Решение**:
+#### LLM недоступен
 
 ```bash
-# Проверьте, что Qdrant запущен
-docker ps | grep qdrant
+# Проверьте статус LLM
+curl http://localhost:8000/api/v1/agents/llm-status
 
-# Перезапустите если нужно
-docker-compose restart qdrant
+# Переключитесь в SAFE режим
+curl -X POST "http://localhost:8000/api/v1/agents/mode?mode=safe"
 ```
 
----
+#### Агенты не реагируют на события
 
-## 📝 Changelog
+```bash
+# Проверьте статус агентов
+curl http://localhost:8000/api/v1/agents/status
 
-### v3.0.0 (2026-07-09) — Major Refactoring
+# Проверьте логи
+tail -f logs/cortex.log | grep "Agent"
 
-**Архитектурные изменения**:
+# Проверьте EventBus
+curl http://localhost:8000/api/v1/system/background-tasks
+```
 
-- ✅ Добавлен **Hybrid LangGraph Orchestrator** для сложных workflow
-- ✅ Реализована **Dual Orchestrator System** (Event-Driven + LangGraph)
-- ✅ Переписан **Trigger Emulator** на OpenAPI-driven архитектуру
-- ✅ Добавлена автоматическая валидация параметров из OpenAPI spec
+### Проблемы с метриками
 
-**Удалённые компоненты** (упрощение для локального использования):
+#### Метрики не обновляются
 
-- ❌ JWT аутентификация (`auth.py`)
-- ❌ Credential Vault (`vault.py`)
-- ❌ Rate limiting (`slowapi`, `limits`)
-- ❌ Home Assistant bridge (`home_assistant_bridge.py`)
-- ❌ External launcher (`external_launcher.py`)
-- ❌ Memory Manager agent (`memory_manager_agent.py`)
+```bash
+# Проверьте статус источников
+curl http://localhost:8000/api/v1/metrics/sources-status
 
-**Упрощения**:
+# Проверьте InfluxDB
+curl http://localhost:8086/api/v2/ping
 
-- ✅ Убрана избыточная безопасность (JWT, API keys, Vault)
-- ✅ Все endpoints открыты в локальной сети
-- ✅ Упрощена конфигурация (убраны секции auth, security)
+# Проверьте Prometheus
+curl http://localhost:9876/metrics
+```
 
-**Новые возможности**:
+#### High memory usage
 
-- ✅ LangGraph workflow endpoints (`/api/v1/langgraph/*`)
-- ✅ OpenAPI-driven trigger validation
-- ✅ Динамическое построение реестра триггеров
-- ✅ LRU-кэш эмбеддингов (10000 записей)
-- ✅ Prometheus метрики Cortex
+```bash
+# Проверьте размер очередей
+curl http://localhost:8000/api/v1/system/background-tasks
 
-**Оптимизации**:
+# Очистите старые решения
+curl -X POST "http://localhost:8000/api/v1/audit/cleanup"
 
-- ✅ Удалены неиспользуемые зависимости
-- ✅ Уменьшен размер кодовой базы
-- ✅ Улучшена производительность RAG (кэширование)
+# Перезапустите систему
+# Ctrl+C в терминале с start_cortex.bat
+# Запустите снова start_cortex.bat
+```
 
-### v2.0.0 (2026-07-07) — Initial Release
+### Производительность
 
-- ✅ 10 AI-агентов (Multi-Agent Swarm)
-- ✅ Shadow Engine (Sequence.json парсинг)
-- ✅ RAG система (Qdrant + Ollama)
-- ✅ Dual Telemetry (InfluxDB + Prometheus)
-- ✅ Decision Audit Trail (SQLite)
-- ✅ Simulation Mode (FakeNina, FakePhd2)
-- ✅ HAL (Hardware Abstraction Layer)
-- ✅ WebSocket broadcasting
+#### Медленный RAG поиск
 
----
+```bash
+# Проверьте размер коллекции
+curl http://localhost:8000/api/v1/rag/stats
+
+# Очистите старые документы
+curl -X POST "http://localhost:8000/api/v1/rag/cleanup"
+
+# Увеличьте кэш embeddings
+# settings.yaml → rag.embedding_cache_max_size: 10000
+```
+
+#### Высокая загрузка CPU
+
+```bash
+# Отключите Predictive HAL
+# settings.yaml → feature_flags.hal.predictive_enabled: false
+
+# Увеличьте интервал опроса
+# settings.yaml → data_sources.metrics_poll_interval: 5.0
+```
+
+## 📊 Мониторинг
+
+### Prometheus Metrics
+
+Система экспортирует 28+ метрик в Prometheus формате:
+
+```bash
+# Все метрики
+curl http://localhost:8000/metrics
+
+# Фильтр по имени
+curl http://localhost:8000/metrics | grep cortex_
+```
+
+**Основные метрики:**
+
+| Metric                         | Type    | Description                 |
+| ------------------------------ | ------- | --------------------------- |
+| `cortex_events_total`          | Counter | Количество событий EventBus |
+| `cortex_decisions_total`       | Counter | Количество AI решений       |
+| `cortex_llm_requests_total`    | Counter | LLM запросы                 |
+| `cortex_api_requests_total`    | Counter | API запросы                 |
+| `cortex_triggers_fired_total`  | Counter | Срабатывания триггеров      |
+| `cortex_rag_searches_total`    | Counter | RAG поиски                  |
+| `cortex_uptime_seconds`        | Gauge   | Время работы                |
+| `cortex_active_ws_connections` | Gauge   | Активные WebSocket          |
+
+### Grafana Dashboard
+
+Импортируйте предустановленный dashboard:
+
+```bash
+# Скачайте dashboard
+curl -o cortex_dashboard.json \
+  https://raw.githubusercontent.com/your-repo/nina-ai-cortex/main/dashboards/cortex.json
+
+# Импортируйте в Grafana
+# Grafana → Dashboards → Import → Upload JSON file
+```
+
+### Логи
+
+```bash
+# Все логи
+tail -f logs/cortex.log
+
+# Только ошибки
+tail -f logs/cortex.log | grep ERROR
+
+# Только AI агенты
+tail -f logs/cortex.log | grep "Agent"
+
+# Только триггеры
+tail -f logs/cortex.log | grep "Trigger"
+```
 
 ## 🤝 Contributing
 
-Приветствуются:
+### Разработка
 
-- 🐛 Bug reports
-- 💡 Feature requests
-- 🔧 Pull requests
-- 📖 Documentation improvements
+```bash
+# Fork репозитория
+git clone https://github.com/your-username/nina-ai-cortex.git
+cd nina-ai-cortex
 
----
+# Создайте ветку
+git checkout -b feature/your-feature
 
-## 📄 License
+# Внесите изменения
+# ...
 
-[Your License Here]
+# Запустите тесты
+pytest tests/
 
----
+# Commit
+git commit -m "feat: add your feature"
+
+# Push
+git push origin feature/your-feature
+
+# Создайте Pull Request
+```
+
+### Code Style
+
+- **Python**: Black formatter
+- **Imports**: isort
+- **Type hints**: обязательно для всех функций
+- **Docstrings**: Google style
+
+```bash
+# Format code
+black app/ tests/
+isort app/ tests/
+
+# Check types
+mypy app/
+```
+
+## 📝 Лицензия
+
+MIT License - см. [LICENSE](LICENSE)
 
 ## 🙏 Acknowledgments
 
-- **N.I.N.A.** — Nighttime Imaging 'N' Astronomy (https://nighttime-imaging.eu/)
-- **Advanced API Plugin** by Christian Photo
-- **Prometheus Exporter** by jewzaam
-- **InfluxDB Exporter** by daleghent
-- **Ollama** — Local LLM server (https://ollama.ai/)
-- **LangGraph** — State-based workflow orchestration
-- **Qdrant** — Vector database (https://qdrant.tech/)
-- **FastAPI** — Modern web framework (https://fastapi.tiangolo.com/)
-
----
+- **N.I.N.A.** - Nighttime Imaging 'N' Astronomy
+- **LangChain** - LLM orchestration framework
+- **FastAPI** - Modern web framework
+- **Ollama** - Local LLM server
+- **Qdrant** - Vector database
+- **InfluxDB** - Time-series database
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](your-repo-url/issues)
-- **Discussions**: [GitHub Discussions](your-repo-url/discussions)
-- **N.I.N.A. Discord**: [discord.gg/nina](https://discord.gg/nina)
+- **GitHub Issues**: [Report bugs](https://github.com/your-repo/nina-ai-cortex/issues)
+- **Discussions**: [Ask questions](https://github.com/your-repo/nina-ai-cortex/discussions)
+- **Email**: support@example.com
+
+## 🗺️ Roadmap
+
+### v5.1 (Q3 2026)
+
+- [ ] ML Parameter Optimizer (sklearn/PyTorch)
+- [ ] Multimodal RAG (CLIP embeddings)
+- [ ] Siril integration
+- [ ] Reinforcement Learning pipeline
+
+### v6.0 (Q4 2026)
+
+- [ ] Multi-observatory support
+- [ ] Cloud deployment (AWS/GCP)
+- [ ] Mobile app (React Native)
+- [ ] Advanced analytics dashboard
 
 ---
 
-**Made with ❤️ for astrophotographers**
+**Made with ❤️ for astrophotography enthusiasts**
 
-Тесты
+⭐ Star us on GitHub if this project helped you!
+
+Документация включает:
+
+✅ **Полное описание проекта** — возможности, архитектура, компоненты
+✅ **Диаграммы Mermaid** — визуализация системы и иерархии агентов
+✅ **Подробные инструкции** — установка, конфигурация, запуск
+✅ **API Reference** — все endpoints с примерами
+✅ **Описание AI агентов** — роли, приоритеты, триггеры
+✅ **Troubleshooting** — решение типичных проблем
+✅ **Мониторинг** — Prometheus metrics, Grafana, логи
+✅ **Contributing guide** — как внести вклад в проект

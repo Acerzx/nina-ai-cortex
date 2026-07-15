@@ -19,7 +19,7 @@ import random
 from typing import Dict, Any, Optional
 import httpx
 from app.core.config import settings
-from backend.app.core.http_client import http_client_manager
+from app.core.http_client import http_client_manager
 
 logger = logging.getLogger("NinaAdvancedClient")
 
