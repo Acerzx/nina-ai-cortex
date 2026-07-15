@@ -561,66 +561,28 @@ class AuditorAgent(BaseAgent):
         problems_count: int,
     ) -> float:
         """
-        Собственная формула quality score (0-10).
-
-        Веса:
-        - avg_hfr: 25% (целевой < 2.5px)
-        - avg_fwhm: 15% (целевой < 3.0px)
-        - hfr_std: 10% (стабильность)
-        - acceptance_rate: 25% (целевой > 90%)
-        - hfr_trend: 15% (деградация = плохо)
-        - problems: 10% (меньше проблем = лучше)
+        Рассчитывает quality score через единый модуль app.core.quality.
+        ИСПРАВЛЕНО (С-10): устранено дублирование формулы.
         """
-        score = 10.0
+        from app.core.quality import calculate_quality_score
 
-        # === 1. HFR penalty (25%) ===
-        if avg_hfr:
-            hfr_target = self.quality_targets["hfr_target"]
-            if avg_hfr > hfr_target * 1.4:
-                score -= 2.5
-            elif avg_hfr > hfr_target * 1.2:
-                score -= 1.5
-            elif avg_hfr > hfr_target:
-                score -= 0.5
+        # Получаем eccentricity из observatory_state (если доступно)
+        avg_eccentricity = observatory_state.current_metrics.get("eccentricity")
 
-        # === 2. FWHM penalty (15%) ===
-        if avg_fwhm:
-            fwhm_target = self.quality_targets["fwhm_target"]
-            if avg_fwhm > fwhm_target * 1.5:
-                score -= 1.5
-            elif avg_fwhm > fwhm_target:
-                score -= 0.5
+        # Получаем RMS total из истории
+        rms_history = observatory_state.history.rms_ra
+        avg_rms_total = None
+        if rms_history:
+            avg_rms_total = sum(rms_history) / len(rms_history)
 
-        # === 3. HFR stability bonus/penalty (10%) ===
-        if hfr_std:
-            if hfr_std < 0.3:
-                score += 1.0  # Very stable
-            elif hfr_std > 1.0:
-                score -= 1.0  # Unstable
-
-        # === 4. Acceptance rate (25%) ===
-        acceptance_target = self.quality_targets["acceptance_rate_target"]
-        if acceptance_rate > acceptance_target * 1.05:
-            score += 1.0
-        elif acceptance_rate < acceptance_target * 0.8:
-            score -= 1.5
-        elif acceptance_rate < acceptance_target * 0.6:
-            score -= 2.5
-
-        # === 5. Trend (15%) ===
-        if hfr_trend is not None:
-            if hfr_trend > 0.05:
-                score -= 1.5  # Degrading
-            elif hfr_trend < -0.02:
-                score += 0.5  # Improving
-
-        # === 6. Problems penalty (10%) ===
-        if problems_count > 5:
-            score -= 1.0
-        elif problems_count > 2:
-            score -= 0.5
-
-        return max(0.0, min(10.0, score))
+        return calculate_quality_score(
+            avg_hfr=avg_hfr,
+            avg_eccentricity=avg_eccentricity,
+            acceptance_rate=acceptance_rate,
+            avg_rms_total=avg_rms_total,
+            hfr_trend=hfr_trend,
+            problems_count=problems_count,
+        )
 
     async def generate_session_digest(self, data: Dict[str, Any]) -> None:
         """Генерирует Session Digest (вызывается Orchestrator'ом)."""

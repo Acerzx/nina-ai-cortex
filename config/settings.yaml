@@ -442,3 +442,45 @@ metrics:
   # НОВОЕ (К-8): Параметры EventBus
   event_queue_maxsize: 10000        # Максимальный размер очереди событий
   event_stop_timeout_seconds: 5.0   # Таймаут graceful stop (секунды)
+
+  # ============================================================================
+# QUALITY SCORE CONFIGURATION (С-10: единый модуль расчёта)
+# ============================================================================
+# Веса факторов качества (должны суммироваться в 1.0)
+quality_weights:
+  hfr_weight: 0.30              # Half Flux Radius — основной показатель резкости
+  eccentricity_weight: 0.20     # Эксцентричность звёзд — качество гидирования
+  acceptance_rate_weight: 0.15  # Процент принятых кадров — стабильность системы
+  rms_weight: 0.15              # RMS гидирования — стабильность монтировки
+  hfr_trend_weight: 0.10       # Тренд HFR — стабильность во времени
+  problems_weight: 0.10         # Количество проблем — общее здоровье сессии
+
+# Пороговые значения для расчёта штрафов/бонусов
+quality_thresholds:
+  # HFR (pixels) — меньше = лучше
+  hfr_excellent: 2.0
+  hfr_good: 2.5
+  hfr_acceptable: 3.0
+  hfr_poor: 3.5
+  # Eccentricity (0-1) — ближе к 0 = лучше
+  eccentricity_excellent: 0.3
+  eccentricity_good: 0.4
+  eccentricity_acceptable: 0.5
+  eccentricity_poor: 0.7
+  # Acceptance Rate (0-1) — больше = лучше
+  acceptance_excellent: 0.95
+  acceptance_good: 0.90
+  acceptance_acceptable: 0.80
+  acceptance_poor: 0.70
+  # RMS Total (arcsec) — меньше = лучше
+  rms_excellent: 1.0
+  rms_good: 1.5
+  rms_acceptable: 2.0
+  rms_poor: 3.0
+  # HFR Trend (pixels/frame)
+  hfr_trend_degrading: 0.05
+  hfr_trend_stable: 0.02
+  hfr_trend_improving: -0.02
+  # Problems count
+  problems_few: 2
+  problems_many: 5

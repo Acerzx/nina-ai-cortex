@@ -139,6 +139,27 @@ class CalibratorAgent(BaseAgent):
             self._recent_alerts[alert_key] = datetime.now()
             logger.warning(f"Stale calibration for frame: {check.recommendation}")
 
+            # ИСПРАВЛЕНО (К-5): Публикация ALERT в EventBus
+            # Раньше только логировалось — Diagnostician/Guardian не узнавали о проблеме
+            await event_bus.publish(
+                "ALERT",
+                {
+                    "level": "WARNING",
+                    "message": (
+                        f"Калибровка {check.master_type} устарела: "
+                        f"{check.recommendation}"
+                    ),
+                    "agent": self.name,
+                    "timestamp": datetime.now().isoformat(),
+                    "context": {
+                        "master_type": check.master_type,
+                        "age_days": check.age_days,
+                        "params": check.params,
+                        "matching_master": check.matching_master,
+                    },
+                },
+            )
+
     def _is_alert_in_cooldown(self, alert_key: str) -> bool:
         """Проверяет, находится ли алерт в cooldown периоде."""
         last_time = self._recent_alerts.get(alert_key)

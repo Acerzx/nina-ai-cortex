@@ -537,6 +537,49 @@ class ShadowVisualizerConfig(BaseModel):
     )
 
 
+class QualityWeightsConfig(BaseModel):
+    """Веса факторов качества (С-10: единый модуль)."""
+
+    hfr_weight: float = 0.30
+    eccentricity_weight: float = 0.20
+    acceptance_rate_weight: float = 0.15
+    rms_weight: float = 0.15
+    hfr_trend_weight: float = 0.10
+    problems_weight: float = 0.10
+
+
+class QualityThresholdsConfig(BaseModel):
+    """Пороговые значения для расчёта quality score (С-10)."""
+
+    # HFR (pixels)
+    hfr_excellent: float = 2.0
+    hfr_good: float = 2.5
+    hfr_acceptable: float = 3.0
+    hfr_poor: float = 3.5
+    # Eccentricity (0-1)
+    eccentricity_excellent: float = 0.3
+    eccentricity_good: float = 0.4
+    eccentricity_acceptable: float = 0.5
+    eccentricity_poor: float = 0.7
+    # Acceptance Rate (0-1)
+    acceptance_excellent: float = 0.95
+    acceptance_good: float = 0.90
+    acceptance_acceptable: float = 0.80
+    acceptance_poor: float = 0.70
+    # RMS Total (arcsec)
+    rms_excellent: float = 1.0
+    rms_good: float = 1.5
+    rms_acceptable: float = 2.0
+    rms_poor: float = 3.0
+    # HFR Trend (pixels/frame)
+    hfr_trend_degrading: float = 0.05
+    hfr_trend_stable: float = 0.02
+    hfr_trend_improving: float = -0.02
+    # Problems count
+    problems_few: int = 2
+    problems_many: int = 5
+
+
 class EmbeddingsConfig(BaseModel):
     """Конфигурация Embeddings."""
 
@@ -639,6 +682,13 @@ class Settings(BaseSettings):
         default_factory=ShadowVisualizerConfig
     )
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+
+    # Quality Score (С-10: единый модуль расчёта)
+    quality_weights: QualityWeightsConfig = Field(default_factory=QualityWeightsConfig)
+    quality_thresholds: QualityThresholdsConfig = Field(
+        default_factory=QualityThresholdsConfig
+    )
+
     triggers: TriggersConfig = Field(default_factory=TriggersConfig)
     hal_config: ExtendedHALConfig = Field(default_factory=ExtendedHALConfig)
 

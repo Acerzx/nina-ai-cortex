@@ -426,36 +426,25 @@ class SessionsMetadataStorage:
         avg_rms_dec: Optional[float],
         acceptance_rate: float,
     ) -> float:
-        """Рассчитывает overall quality score (0-10)."""
-        score = 10.0
+        """
+        Рассчитывает quality score через единый модуль app.core.quality.
+        ИСПРАВЛЕНО (С-10): устранено дублирование формулы.
+        """
+        from app.core.quality import calculate_quality_score
 
-        # Штраф за высокий HFR
-        if avg_hfr:
-            if avg_hfr > 3.0:
-                score -= 2.0
-            elif avg_hfr > 2.5:
-                score -= 1.0
+        # Вычисляем RMS total из компонент
+        avg_rms_total = None
+        if avg_rms_ra is not None and avg_rms_dec is not None:
+            avg_rms_total = (avg_rms_ra**2 + avg_rms_dec**2) ** 0.5
 
-        # Штраф за высокий FWHM
-        if avg_fwhm:
-            if avg_fwhm > 4.0:
-                score -= 2.0
-            elif avg_fwhm > 3.0:
-                score -= 1.0
-
-        # Штраф за высокий RMS
-        if avg_rms_ra and avg_rms_ra > 1.5:
-            score -= 1.0
-        if avg_rms_dec and avg_rms_dec > 1.5:
-            score -= 1.0
-
-        # Бонус за высокий acceptance rate
-        if acceptance_rate > 0.95:
-            score += 1.0
-        elif acceptance_rate < 0.80:
-            score -= 1.0
-
-        return max(0.0, min(10.0, score))
+        return calculate_quality_score(
+            avg_hfr=avg_hfr,
+            avg_eccentricity=None,  # Не доступно на уровне сессии
+            acceptance_rate=acceptance_rate,
+            avg_rms_total=avg_rms_total,
+            hfr_trend=None,  # Не доступно при финализации
+            problems_count=0,  # Будет обновлено позже
+        )
 
     # ========================================================================
     # FRAME MANAGEMENT
