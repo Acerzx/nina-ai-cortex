@@ -699,6 +699,35 @@ class ExtendedHALConfig(BaseModel):
     )
 
 
+class LangGraphTracingConfig(BaseModel):
+    """Конфигурация tracing для LangGraph workflows (Спринт 4)."""
+
+    # Включить OpenTelemetry spans для каждого узла
+    node_spans_enabled: bool = True
+    # Включить логирование решений через orchestrator
+    decision_logging_enabled: bool = True
+    # Префикс для имён spans
+    span_prefix: str = "langgraph"
+    # Включать ли контекст observatory_state в атрибуты span
+    include_observatory_state: bool = False
+    # Максимальная длина rationale в логах
+    max_rationale_length: int = 200
+
+
+class TracingConfig(BaseModel):
+    """Конфигурация OpenTelemetry distributed tracing."""
+
+    enabled: bool = False
+    exporter: str = "otlp"  # "otlp" | "console" | "none"
+    otlp_endpoint: str = "http://localhost:4317"
+    service_name: str = "nina-ai-cortex"
+    service_version: str = "5.0.0"
+    sample_rate: float = 1.0  # 0.0-1.0 (доля трассируемых запросов)
+    console_export: bool = False  # Дублировать spans в консоль
+    instrument_fastapi: bool = True
+    instrument_httpx: bool = True
+
+
 # ============================================================================
 # КОРНЕВАЯ МОДЕЛЬ SETTINGS
 # ============================================================================
@@ -772,6 +801,12 @@ class Settings(BaseSettings):
 
     triggers: TriggersConfig = Field(default_factory=TriggersConfig)
     hal_config: ExtendedHALConfig = Field(default_factory=ExtendedHALConfig)
+    # LangGraph tracing (Спринт 4)
+    langgraph_tracing: LangGraphTracingConfig = Field(
+        default_factory=LangGraphTracingConfig
+    )
+    # OpenTelemetry tracing (Спринт 4)
+    tracing: TracingConfig = Field(default_factory=TracingConfig)
 
     @field_validator("influxdb", mode="before")
     def resolve_env_vars(cls, value):

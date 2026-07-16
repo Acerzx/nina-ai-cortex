@@ -34,7 +34,23 @@ services:
     networks:
       - cortex_network
 
-  # Ollama - Локальный LLM сервер (опционально, требует GPU/CPU ресурсов)
+  # Jaeger - Distributed Tracing визуализация (Спринт 4)
+  # UI: http://localhost:16686
+  # OTLP gRPC endpoint: localhost:4317 (для Cortex)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: nina_cortex_jaeger
+    restart: unless-stopped
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317" # OTLP gRPC (для Cortex)
+      - "4318:4318" # OTLP HTTP (альтернатива)
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - cortex_network
+
+  # Ollama - Локальный LLM сервер (опционально)
   # Раскомментируйте, если не используете локально установленный Ollama
   # ollama:
   #   image: ollama/ollama:latest

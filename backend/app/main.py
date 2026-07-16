@@ -83,6 +83,9 @@ from app.storage.sessions_metadata import sessions_metadata
 from app.execution.predictive_hal import predictive_hal
 from app.shadow_engine.shadow_visualizer import shadow_visualizer
 
+# Observability (Спринт 4)
+from app.core.tracing import tracing_manager
+
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -184,6 +187,29 @@ async def lifespan(app: FastAPI):
     # ====================================================================
 
     try:
+        # 0. OpenTelemetry Tracing (Спринт 4)
+        logger.info("🔭 Initializing OpenTelemetry tracing...")
+        tracing_cfg = getattr(settings, "tracing", None)
+        if tracing_cfg:
+            tracing_initialized = tracing_manager.initialize(
+                enabled=tracing_cfg.enabled,
+                exporter_type=tracing_cfg.exporter,
+                otlp_endpoint=tracing_cfg.otlp_endpoint,
+                service_name=tracing_cfg.service_name,
+                service_version=tracing_cfg.service_version,
+                sample_rate=tracing_cfg.sample_rate,
+                console_export=tracing_cfg.console_export,
+            )
+            if tracing_initialized and tracing_cfg.enabled:
+                # Автоматическая инструментация httpx
+                if tracing_cfg.instrument_httpx:
+                    tracing_manager.instrument_httpx()
+                logger.info("✅ OpenTelemetry tracing ready")
+            else:
+                logger.info("⏭️ OpenTelemetry tracing disabled")
+        else:
+            logger.info("⏭️ OpenTelemetry tracing not configured")
+
         # 1. Запуск Ingestion, Shadow Engine и Execution
         await watcher_manager.start()
 
@@ -533,6 +559,9 @@ async def lifespan(app: FastAPI):
 
         await shutdown_executors()
 
+        # 9.5. Спринт 4: Shutdown OpenTelemetry tracing (flush spans)
+        await tracing_manager.shutdown()
+
         # 10. Даем время на закрытие всех соединений
         await asyncio.sleep(0.5)
         logger.info("✅ Cortex stopped gracefully.")
@@ -571,6 +600,12 @@ if settings.cors.enabled:
     )
 else:
     logger.warning("⚠️ CORS is disabled in configuration")
+
+# Спринт 4: OpenTelemetry инструментация FastAPI
+if tracing_manager.enabled:
+    tracing_cfg = getattr(settings, "tracing", None)
+    if tracing_cfg and tracing_cfg.instrument_fastapi:
+        tracing_manager.instrument_fastapi(app)
 
 
 # ============================================================================
@@ -1787,6 +1822,15 @@ async def get_langgraph_stats(request: Request):
         "available_types": [t.value for t in WorkflowType],
         "orchestrator_initialized": (hybrid_orchestrator.graph is not None),
     }
+
+
+# ============================================================================
+# OBSERVABILITY ENDPOINTS (Спринт 4)
+# ============================================================================
+@app.get("/api/v1/observability/tracing", tags=["Observability"])
+async def get_tracing_stats(request: Request):
+    """Статистика OpenTelemetry tracing."""
+    return tracing_manager.get_stats()
 
 
 # ============================================================================

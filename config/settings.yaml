@@ -488,3 +488,40 @@ quality_thresholds:
   # Problems count
   problems_few: 2
   problems_many: 5
+
+# ============================================================================
+# OPENTELEMETRY DISTRIBUTED TRACING (Спринт 4)
+# ============================================================================
+# Визуализация трасс в Jaeger: http://localhost:16686
+# Запуск Jaeger: docker run -d --name jaeger \
+#   -p 16686:16686 -p 4317:4317 \
+#   jaegertracing/all-in-one:latest
+tracing:
+  enabled: true # Включить после настройки Jaeger/OTLP collector
+  exporter: "otlp" # "otlp" | "console" | "none"
+  otlp_endpoint: "http://localhost:4317" # OTLP gRPC endpoint
+  service_name: "nina-ai-cortex"
+  service_version: "5.0.0"
+  sample_rate: 1.0 # 1.0 = все запросы, 0.1 = 10% запросов
+  console_export: false # true = дублировать spans в stdout (для отладки)
+  instrument_fastapi: true # Автоматическая инструментация HTTP endpoints
+  instrument_httpx: true # Автоматическая инструментация HTTP клиентов
+
+# ============================================================================
+# LANGGRAPH TRACING (Спринт 4 — Задача 2)
+# ============================================================================
+# Интеграция LangGraph решений в Decision Audit Trail
+# и OpenTelemetry distributed tracing
+langgraph_tracing:
+  # Включить OpenTelemetry spans для каждого узла workflow
+  node_spans_enabled: true
+  # Включить логирование решений через orchestrator.route_decision()
+  # (проверяет режимы работы: MANUAL блокирует, SAFE_AUTONOMOUS ограничивает)
+  decision_logging_enabled: true
+  # Префикс для имён spans (будет langgraph.analyze_context, etc.)
+  span_prefix: "langgraph"
+  # Включать ли полный observatory_state в атрибуты span
+  # (может значительно увеличить размер span — только для отладки)
+  include_observatory_state: false
+  # Максимальная длина rationale в логах (для читаемости)
+  max_rationale_length: 200
