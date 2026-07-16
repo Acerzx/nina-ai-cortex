@@ -9,15 +9,47 @@ Event Bus для публикации и подписки на события.
 - При ошибке подписчика событие повторно отправляется через 5 секунд
 - До 3 попыток retry для критических событий
 - Все ошибки подписчиков логируются с traceback
+ИСПРАВЛЕНО (Спринт 5 — Фаза 1):
+- OpenTelemetry distributed tracing для каждого publish() и subscriber
+- Parent span eventbus.publish.{event_type} на publish
+- Child span eventbus.subscribe.{event_type} на каждый callback
+- W3C Trace Context propagation через data["_trace"]
+- Graceful degradation если OpenTelemetry недоступен
 """
 
 import asyncio
 import logging
+import time
 import traceback
+from datetime import datetime
 from typing import Dict, Any, List, Callable, Awaitable, Set, Tuple
+
 from app.core.config import settings
 
 logger = logging.getLogger("EventBus")
+
+# ============================================================================
+# OPENTELEMETRY — graceful import
+# ============================================================================
+try:
+    from opentelemetry import trace
+    from opentelemetry.trace import StatusCode
+    from opentelemetry.propagate import inject, extract
+    from opentelemetry.context import attach, detach
+    from opentelemetry.trace.propagation import set_span_in_context
+    from app.core.tracing import tracing_manager, span_context
+
+    OPENTELEMETRY_AVAILABLE = True
+except ImportError:
+    OPENTELEMETRY_AVAILABLE = False
+    tracing_manager = None
+    span_context = None
+
+    class _FakeStatusCode:
+        OK = "OK"
+        ERROR = "ERROR"
+
+    StatusCode = _FakeStatusCode()
 
 # События, для которых включён retry при ошибке подписчика
 CRITICAL_EVENTS: Set[str] = {
@@ -48,6 +80,11 @@ class EventBus:
     ИСПРАВЛЕНО (R3):
     - Retry для критических событий при ошибке подписчика
     - Логирование всех ошибок с traceback
+
+    ИСПРАВЛЕНО (Спринт 5):
+    - OpenTelemetry distributed tracing
+    - Parent span на publish, child span на каждый subscriber
+    - Trace context propagation через data["_trace"]
     """
 
     def __init__(self):
@@ -60,11 +97,11 @@ class EventBus:
         self._max_queue_size = getattr(metrics_cfg, "event_queue_maxsize", 10000)
         self._stop_timeout = getattr(metrics_cfg, "event_stop_timeout_seconds", 5.0)
 
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=self._max_queue_size)
+        self._queue = asyncio.Queue(maxsize=self._max_queue_size)
         self._running = False
-        self._dispatcher_task: asyncio.Task = None
+        self._dispatcher_task = None
 
-        # ИСПРАВЛЕНО (R3): Статистика retry
+        # ИСПРАВЛЕНО (Спринт 5): Статистика tracing
         self._stats = {
             "events_published": 0,
             "events_dropped_queue_full": 0,
@@ -72,49 +109,102 @@ class EventBus:
             "retry_attempts": 0,
             "retry_successes": 0,
             "retry_failures": 0,
+            "dispatched_subscribers": 0,
+            "avg_dispatch_ms": 0.0,
+            "_dispatch_time_samples": 0,
+            "_dispatch_time_sum_ms": 0.0,
         }
 
         logger.info(
             f"📡 EventBus initialized "
             f"(max_queue_size={self._max_queue_size}, "
-            f"critical_events={len(CRITICAL_EVENTS)}, "
-            f"max_retry={MAX_RETRY_ATTEMPTS})"
+            f"tracing={'enabled' if OPENTELEMETRY_AVAILABLE else 'unavailable'})"
         )
 
+    # ====================================================================
+    # SUBSCRIBE / UNSUBSCRIBE
+    # ====================================================================
+
     def subscribe(self, event_type: str, callback: Callable):
-        """Подписывает callback на событие."""
         if event_type not in self._subscribers:
             self._subscribers[event_type] = []
         self._subscribers[event_type].append(callback)
 
     def unsubscribe(self, event_type: str, callback: Callable):
-        """Отписывает callback от события."""
         if event_type in self._subscribers:
             self._subscribers[event_type] = [
                 cb for cb in self._subscribers[event_type] if cb != callback
             ]
+
+    # ====================================================================
+    # PUBLISH
+    # ====================================================================
 
     async def publish(self, event_type: str, data: Dict[str, Any]):
         """
         Публикует событие в очередь.
 
         ИСПРАВЛЕНО (К-8): Обработка переполнения очереди.
-        ИСПРАВЛЕНО (R3): Счётчик опубликованных событий.
+        ИСПРАВЛЕНО (Спринт 5): OpenTelemetry span + trace context injection.
         """
-        try:
-            # Пытаемся добавить в очередь без блокировки
-            self._queue.put_nowait((event_type, data))
-            self._stats["events_published"] += 1
-        except asyncio.QueueFull:
-            # Очередь переполнена — логируем и пропускаем событие
-            self._stats["events_dropped_queue_full"] += 1
-            logger.warning(
-                f"⚠️ EventBus queue full ({self._max_queue_size} items). "
-                f"Dropping event: {event_type}"
-            )
+        # Snapshot data (защита от изменения в subscriber'ах)
+        data = dict(data)
+
+        # === Без tracing: простая логика ===
+        if not (
+            OPENTELEMETRY_AVAILABLE and tracing_manager and tracing_manager.enabled
+        ):
+            try:
+                self._queue.put_nowait((event_type, data))
+                self._stats["events_published"] += 1
+            except asyncio.QueueFull:
+                self._stats["events_dropped_queue_full"] += 1
+                logger.warning(
+                    f"⚠️ EventBus queue full ({self._max_queue_size} items). "
+                    f"Dropping event: {event_type}"
+                )
+            return
+
+        # === С tracing: span + inject context ===
+        async with span_context(
+            f"eventbus.publish.{event_type}",
+            attributes={
+                "event.type": event_type,
+                "event.subscribers_count": len(self._subscribers.get(event_type, [])),
+                "event.queue_size": self._queue.qsize(),
+                "event.is_critical": event_type in CRITICAL_EVENTS,
+            },
+        ) as span:
+            # Inject W3C Trace Context в data для propagation через очередь
+            if span:
+                carrier: Dict[str, str] = {}
+                inject(carrier)
+                ctx = span.get_span_context()
+                data["_trace"] = {
+                    "trace_id": format(ctx.trace_id, "032x"),
+                    "span_id": format(ctx.span_id, "016x"),
+                    "traceparent": carrier.get("traceparent"),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                span.set_attribute("event.trace_id", data["_trace"]["trace_id"])
+
+            try:
+                self._queue.put_nowait((event_type, data))
+                self._stats["events_published"] += 1
+            except asyncio.QueueFull:
+                self._stats["events_dropped_queue_full"] += 1
+                logger.warning(
+                    f"⚠️ EventBus queue full ({self._max_queue_size} items). "
+                    f"Dropping event: {event_type}"
+                )
+                if span:
+                    span.set_status(StatusCode.ERROR, "Queue full — event dropped")
+
+    # ====================================================================
+    # LIFECYCLE
+    # ====================================================================
 
     async def start(self):
-        """Запускает диспетчер событий."""
         self._running = True
         self._dispatcher_task = asyncio.create_task(self._dispatcher())
         logger.info("🚀 EventBus started")
@@ -122,15 +212,9 @@ class EventBus:
     async def stop(self):
         """
         Останавливает EventBus с graceful shutdown.
-
-        ИСПРАВЛЕНО (К-8):
-        - Сигнализирует диспетчеру об остановке
-        - Ожидает завершения текущих обработчиков с таймаутом
-        - Очищает оставшиеся события в очереди
         """
         self._running = False
 
-        # Ждём завершения текущего обработчика с таймаутом
         if self._dispatcher_task:
             try:
                 await asyncio.wait_for(
@@ -138,8 +222,8 @@ class EventBus:
                 )
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"⚠️ EventBus dispatcher timeout "
-                    f"({self._stop_timeout}s). Force stopping..."
+                    f"⚠️ EventBus dispatcher timeout ({self._stop_timeout}s). "
+                    f"Force stopping..."
                 )
                 self._dispatcher_task.cancel()
                 try:
@@ -162,14 +246,11 @@ class EventBus:
 
         logger.info("🛑 EventBus stopped gracefully")
 
-    async def _dispatcher(self):
-        """
-        Диспетчер событий.
+    # ====================================================================
+    # DISPATCHER
+    # ====================================================================
 
-        ИСПРАВЛЕНО (R3):
-        - Вызывает _dispatch_event для каждого события
-        - _dispatch_event обрабатывает retry для критических событий
-        """
+    async def _dispatcher(self):
         while self._running:
             try:
                 # Ждём событие с таймаутом для проверки флага _running
@@ -178,10 +259,9 @@ class EventBus:
                         self._queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
-                    # Таймаут — проверяем флаг и продолжаем
                     continue
 
-                # ИСПРАВЛЕНО (R3): Делегируем обработку в _dispatch_event
+                # ИСПРАВЛЕНО (Спринт 5): dispatch с tracing
                 await self._dispatch_event(event_type, data)
 
                 self._queue.task_done()
@@ -195,10 +275,8 @@ class EventBus:
         """
         Dispatches событие всем подписчикам.
 
-        ИСПРАВЛЕНО (R3):
-        - Для критических событий: retry при ошибке подписчика
-        - Для остальных событий: только логирование ошибки
-        - Все ошибки логируются с traceback
+        ИСПРАВЛЕНО (R3): retry для критических событий.
+        ИСПРАВЛЕНО (Спринт 5): child span для каждого subscriber.
         """
         subscribers = self._subscribers.get(event_type, [])
         if not subscribers:
@@ -206,18 +284,60 @@ class EventBus:
 
         is_critical = event_type in CRITICAL_EVENTS
 
-        for callback in subscribers:
-            callback_name = getattr(callback, "__qualname__", str(callback))
+        # === Извлекаем parent trace context из data ===
+        # Если событие пришло через очередь с injected context — используем его
+        trace_info = data.get("_trace", {})
+        parent_context = None
+        token = None
 
-            await self._invoke_subscriber(
-                event_type=event_type,
-                data=data,
-                callback=callback,
-                callback_name=callback_name,
-                is_critical=is_critical,
-            )
+        if (
+            OPENTELEMETRY_AVAILABLE
+            and tracing_manager
+            and tracing_manager.enabled
+            and trace_info.get("traceparent")
+        ):
+            try:
+                carrier = {"traceparent": trace_info["traceparent"]}
+                parent_context = extract(carrier)
+                token = attach(parent_context)
+            except Exception as e:
+                logger.debug(f"Failed to extract trace context: {e}")
 
-    async def _invoke_subscriber(
+        try:
+            for callback in subscribers:
+                callback_name = self._get_callback_name(callback)
+
+                # === С tracing: child span для каждого subscriber ===
+                if (
+                    OPENTELEMETRY_AVAILABLE
+                    and tracing_manager
+                    and tracing_manager.enabled
+                ):
+                    await self._invoke_with_span(
+                        event_type=event_type,
+                        data=data,
+                        callback=callback,
+                        callback_name=callback_name,
+                        is_critical=is_critical,
+                    )
+                else:
+                    # === Без tracing: простая логика ===
+                    await self._invoke_subscriber(
+                        event_type=event_type,
+                        data=data,
+                        callback=callback,
+                        callback_name=callback_name,
+                        is_critical=is_critical,
+                    )
+        finally:
+            # Detach parent context
+            if token is not None:
+                try:
+                    detach(token)
+                except Exception:
+                    pass
+
+    async def _invoke_with_span(
         self,
         event_type: str,
         data: Dict[str, Any],
@@ -226,18 +346,64 @@ class EventBus:
         is_critical: bool,
     ):
         """
-        Вызывает подписчика с опциональным retry.
+        Вызывает subscriber внутри child span.
+        """
+        async with span_context(
+            f"eventbus.subscribe.{event_type}",
+            attributes={
+                "event.type": event_type,
+                "subscriber.name": callback_name,
+                "subscriber.module": getattr(callback, "__module__", "unknown"),
+                "event.is_critical": is_critical,
+            },
+        ) as span:
+            start_time = time.perf_counter()
+            success = await self._invoke_subscriber(
+                event_type=event_type,
+                data=data,
+                callback=callback,
+                callback_name=callback_name,
+                is_critical=is_critical,
+            )
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
 
-        ИСПРАВЛЕНО (R3):
-        - Для критических событий: до MAX_RETRY_ATTEMPTS попыток
-        - Задержка RETRY_DELAY_SECONDS между попытками
-        - Логирование каждой ошибки с traceback
+            if span:
+                span.set_attribute("subscriber.duration_ms", round(elapsed_ms, 2))
+                span.set_attribute("subscriber.success", success)
+
+                if success:
+                    span.set_status(StatusCode.OK)
+                else:
+                    span.set_status(StatusCode.ERROR, "Subscriber failed")
+
+            # Обновляем статистику
+            self._stats["_dispatch_time_samples"] += 1
+            self._stats["_dispatch_time_sum_ms"] += elapsed_ms
+            total = self._stats["_dispatch_time_samples"]
+            if total > 0:
+                self._stats["avg_dispatch_ms"] = round(
+                    self._stats["_dispatch_time_sum_ms"] / total, 2
+                )
+
+    async def _invoke_subscriber(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        callback: Callable,
+        callback_name: str,
+        is_critical: bool,
+    ) -> bool:
+        """
+        Вызывает подписчика с опциональным retry.
+        Returns:
+            True если успешно, False если ошибка.
         """
         max_attempts = MAX_RETRY_ATTEMPTS if is_critical else 1
 
         for attempt in range(1, max_attempts + 1):
             try:
                 await callback(data)
+                self._stats["dispatched_subscribers"] += 1
 
                 # Если это был retry и он успешен — логируем
                 if attempt > 1:
@@ -246,7 +412,7 @@ class EventBus:
                         f"✅ Retry succeeded for {event_type} → "
                         f"{callback_name} (attempt {attempt}/{max_attempts})"
                     )
-                return  # Успех — выходим
+                return True
 
             except Exception as e:
                 self._stats["subscriber_errors"] += 1
@@ -278,11 +444,31 @@ class EventBus:
                             f"failed for {event_type} → {callback_name}. "
                             f"Event may be lost!"
                         )
+                    return False
+
+        return False
+
+    # ====================================================================
+    # HELPERS
+    # ====================================================================
+
+    @staticmethod
+    def _get_callback_name(callback: Callable) -> str:
+        """Извлекает читаемое имя callback'а."""
+        if hasattr(callback, "__qualname__"):
+            return callback.__qualname__
+        if hasattr(callback, "__name__"):
+            return callback.__name__
+        return str(callback)
+
+    # ====================================================================
+    # STATS
+    # ====================================================================
 
     def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику EventBus."""
         return {
-            **self._stats,
+            **{k: v for k, v in self._stats.items() if not k.startswith("_")},
             "queue_size": self._queue.qsize(),
             "max_queue_size": self._max_queue_size,
             "running": self._running,
@@ -293,6 +479,14 @@ class EventBus:
             "critical_events": sorted(CRITICAL_EVENTS),
             "max_retry_attempts": MAX_RETRY_ATTEMPTS,
             "retry_delay_seconds": RETRY_DELAY_SECONDS,
+            "tracing": {
+                "enabled": (
+                    OPENTELEMETRY_AVAILABLE
+                    and tracing_manager is not None
+                    and tracing_manager.enabled
+                ),
+                "opentelemetry_available": OPENTELEMETRY_AVAILABLE,
+            },
         }
 
 

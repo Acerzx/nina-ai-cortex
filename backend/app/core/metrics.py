@@ -1,36 +1,32 @@
 """
 Cortex Metrics — Prometheus-совместимые метрики для мониторинга N.I.N.A. AI Cortex.
-
 ЭТАП 1.4 (рефакторинг):
 - Переход со своей реализации (~800 строк) на prometheus-client (~350 строк)
 - Потокобезопасность из коробки (встроена в prometheus-client)
 - Изолированный CollectorRegistry для Cortex метрик
 - Стандартный Prometheus exposition format через generate_latest()
-
+ИСПРАВЛЕНО (Спринт 5 Фаза 2):
+- Добавлена поддержка exemplars для связи метрик с traces
+- Exemplars позволяют кликнуть на метрику в Grafana и открыть trace в Jaeger
 Предоставляемые метрики (28 штук):
-
 EventBus:
 - cortex_events_total
 - cortex_event_processing_seconds
 - cortex_eventbus_queue_size
 - cortex_eventbus_subscribers
 - cortex_event_handler_errors_total
-
 AI Agents:
 - cortex_decisions_total
 - cortex_decision_confidence
 - cortex_agents_active
-
 LLM:
 - cortex_llm_requests_total
 - cortex_llm_request_duration_seconds
 - cortex_llm_tokens_total
 - cortex_llm_available
-
 API:
 - cortex_api_requests_total
 - cortex_api_request_duration_seconds
-
 System:
 - cortex_operation_mode
 - cortex_sequence_running
@@ -38,37 +34,17 @@ System:
 - cortex_safety_status
 - cortex_active_ws_connections
 - cortex_uptime_seconds
-
 Execution:
 - cortex_triggers_fired_total
 - cortex_trigger_duration_seconds
 - cortex_variables_set_total
-
 RAG:
 - cortex_rag_searches_total
 - cortex_rag_search_duration_seconds
 - cortex_rag_documents_total
-
 Ingestion:
 - cortex_files_processed_total
 - cortex_watchers_active
-
-Использование:
-    from app.core.metrics import cortex_metrics
-
-    # Инкремент счётчика (async-safe)
-    cortex_metrics.events_total.inc(event_type="NEW_FRAME")
-    cortex_metrics.events_total.inc_sync(event_type="NEW_FRAME")  # алиас
-
-    # Запись времени
-    with cortex_metrics.llm_duration.labels(model="gemma4:31b").time():
-        await llm_provider.generate(...)
-
-    # Установка gauge
-    cortex_metrics.queue_size.set(42)
-
-    # Экспорт в Prometheus формате
-    output = cortex_metrics.expose()
 """
 
 import time
@@ -86,6 +62,28 @@ logger = logging.getLogger("CortexMetrics")
 
 
 # ============================================================================
+# EXEMPLAR HELPER — связь метрик с traces
+# ============================================================================
+def get_exemplar() -> Optional[Dict[str, str]]:
+    """
+    Возвращает exemplar с текущим trace_id для связи с Jaeger.
+    Используется в Prometheus метриках для возможности клика
+    на метрику в Grafana и открытия соответствующего trace.
+    Returns:
+        Dict с trace_id или None если tracing отключен
+    """
+    try:
+        from app.core.tracing import tracing_manager
+
+        trace_id = tracing_manager.get_trace_id()
+        if trace_id and trace_id != "-":
+            return {"trace_id": trace_id}
+    except Exception:
+        pass
+    return None
+
+
+# ============================================================================
 # WRAPPER КЛАССЫ (для обратной совместимости API)
 # ============================================================================
 # prometheus-client уже потокобезопасен, поэтому inc_sync/observe_sync/set_sync
@@ -98,24 +96,47 @@ class CounterWrapper:
     """
     Wrapper над prometheus_client.Counter.
     Добавляет inc_sync() алиас для обратной совместимости.
+    ИСПРАВЛЕНО (Спринт 5 Фаза 2): поддержка exemplars.
     """
 
     def __init__(self, counter: Counter):
         self._counter = counter
 
-    def inc(self, amount: float = 1.0, **label_values):
-        """Увеличить счётчик (async-safe, потокобезопасно)."""
+    def inc(
+        self,
+        amount: float = 1.0,
+        exemplar: Optional[Dict[str, str]] = None,
+        **label_values,
+    ):
+        """
+        Увеличить счётчик (async-safe, потокобезопасно).
+        Args:
+            amount: На сколько увеличить
+            exemplar: Опциональный exemplar с trace_id
+            **label_values: Label значения
+        """
         if label_values:
-            self._counter.labels(**label_values).inc(amount)
+            if exemplar:
+                self._counter.labels(**label_values).inc(amount, exemplar=exemplar)
+            else:
+                self._counter.labels(**label_values).inc(amount)
         else:
-            self._counter.inc(amount)
+            if exemplar:
+                self._counter.inc(amount, exemplar=exemplar)
+            else:
+                self._counter.inc(amount)
 
-    def inc_sync(self, amount: float = 1.0, **label_values):
+    def inc_sync(
+        self,
+        amount: float = 1.0,
+        exemplar: Optional[Dict[str, str]] = None,
+        **label_values,
+    ):
         """
         Синхронное увеличение (алиас для inc).
         prometheus-client уже потокобезопасен.
         """
-        self.inc(amount, **label_values)
+        self.inc(amount, exemplar=exemplar, **label_values)
 
     def labels(self, **label_values) -> "CounterWrapper":
         """Возвращает wrapper для конкретных label значений."""
@@ -173,21 +194,38 @@ class HistogramWrapper:
     """
     Wrapper над prometheus_client.Histogram.
     Добавляет observe_sync() алиас для обратной совместимости.
+    ИСПРАВЛЕНО (Спринт 5 Фаза 2): поддержка exemplars.
     """
 
     def __init__(self, histogram: Histogram):
         self._histogram = histogram
 
-    def observe(self, value: float, **label_values):
-        """Добавить наблюдение."""
+    def observe(
+        self, value: float, exemplar: Optional[Dict[str, str]] = None, **label_values
+    ):
+        """
+        Добавить наблюдение.
+        Args:
+            value: Значение наблюдения
+            exemplar: Опциональный exemplar с trace_id
+            **label_values: Label значения
+        """
         if label_values:
-            self._histogram.labels(**label_values).observe(value)
+            if exemplar:
+                self._histogram.labels(**label_values).observe(value, exemplar=exemplar)
+            else:
+                self._histogram.labels(**label_values).observe(value)
         else:
-            self._histogram.observe(value)
+            if exemplar:
+                self._histogram.observe(value, exemplar=exemplar)
+            else:
+                self._histogram.observe(value)
 
-    def observe_sync(self, value: float, **label_values):
+    def observe_sync(
+        self, value: float, exemplar: Optional[Dict[str, str]] = None, **label_values
+    ):
         """Синхронное наблюдение (алиас для observe)."""
-        self.observe(value, **label_values)
+        self.observe(value, exemplar=exemplar, **label_values)
 
     def labels(self, **label_values) -> "HistogramWrapper":
         """Возвращает wrapper для конкретных label значений."""
@@ -203,34 +241,30 @@ class HistogramWrapper:
 # ============================================================================
 # CORTEX METRICS REGISTRY
 # ============================================================================
-
-
 class CortexMetrics:
     """
     Реестр всех метрик Cortex для Prometheus-экспорта.
-
     Использует изолированный CollectorRegistry, чтобы:
     - Не конфликтовать с другими библиотеками (fastapi, httpx и т.д.)
     - Контролировать, какие метрики экспортируются
     - Избежать засорения /metrics эндпоинта
-
+    ИСПРАВЛЕНО (Спринт 5 Фаза 2): добавлена поддержка exemplars.
     Использование:
-        from app.core.metrics import cortex_metrics
-
-        # Счётчик событий
-        cortex_metrics.events_total.inc(event_type="NEW_FRAME")
-
-        # Время обработки события
-        with cortex_metrics.event_processing_time.time(event_type="NEW_FRAME"):
-            await process_event(...)
-
-        # Экспорт для Prometheus
-        output = cortex_metrics.expose()
+    from app.core.metrics import cortex_metrics
+    # Счётчик событий с exemplar
+    exemplar = get_exemplar()
+    cortex_metrics.events_total.inc_sync(event_type="NEW_FRAME", exemplar=exemplar)
+    # Время обработки события
+    with cortex_metrics.event_processing_time.time(event_type="NEW_FRAME"):
+        await process_event(...)
+    # Установка gauge
+    cortex_metrics.queue_size.set(42)
+    # Экспорт в Prometheus формате
+    output = cortex_metrics.expose()
     """
 
     def __init__(self):
         self._start_time = time.time()
-
         # Изолированный registry для Cortex метрик
         self._registry = CollectorRegistry()
 
@@ -517,18 +551,63 @@ class CortexMetrics:
             )
         )
 
+        # ====================================================================
+        # Background Tasks метрики (Спринт 5)
+        # ====================================================================
+        self.background_tasks_total = GaugeWrapper(
+            Gauge(
+                "cortex_background_tasks_total",
+                "Total number of registered background tasks",
+                registry=self._registry,
+            )
+        )
+
+        self.background_tasks_enabled = GaugeWrapper(
+            Gauge(
+                "cortex_background_tasks_enabled",
+                "Number of enabled background tasks",
+                registry=self._registry,
+            )
+        )
+
+        self.background_task_executions_total = CounterWrapper(
+            Counter(
+                "cortex_background_task_executions_total",
+                "Total number of background task executions",
+                labelnames=["task_name", "status"],
+                registry=self._registry,
+            )
+        )
+
+        self.background_task_errors_total = CounterWrapper(
+            Counter(
+                "cortex_background_task_errors_total",
+                "Total number of background task errors",
+                labelnames=["task_name", "error_type"],
+                registry=self._registry,
+            )
+        )
+
+        self.background_task_duration_seconds = HistogramWrapper(
+            Histogram(
+                "cortex_background_task_duration_seconds",
+                "Duration of background task executions",
+                labelnames=["task_name"],
+                buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0],
+                registry=self._registry,
+            )
+        )
+
         logger.info(
             "✅ CortexMetrics initialized (prometheus-client backend, "
-            "isolated registry, 28 metrics)"
+            "isolated registry, 28 metrics, exemplars enabled)"
         )
 
     def expose(self) -> str:
         """
         Экспортирует все метрики в Prometheus exposition формате.
-
         Использует generate_latest() из prometheus-client —
         стандартный способ генерации text format для /metrics эндпоинта.
-
         Returns:
             Строка в формате Prometheus text exposition
         """
@@ -542,12 +621,10 @@ class CortexMetrics:
     def get_summary(self) -> Dict[str, Any]:
         """
         Возвращает сводку метрик в JSON-формате (для API).
-
         Полезно для:
         - dashboard и health check endpoints
         - Быстрого просмотра состояния системы
         - WebSocket broadcast на Frontend
-
         Читает значения напрямую из registry через get_sample_value().
         """
 

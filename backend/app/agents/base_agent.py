@@ -5,10 +5,14 @@ Base Agent — базовый класс для всех AI-агентов в Mu
 - Удалён get_recent_decisions() — дублирует функциональность Orchestrator
 - get_stats() упрощён (без recent_decisions)
 - Template Method pattern сохранён
-ИСПРАВЛЕНО (В-2):
+ИСПРАВЛЕНО (В-2 Спринт 2):
 - log_decision() сохраняет ссылки на фоновые задачи в _background_tasks
 - Предотвращает RuntimeWarning "Task was destroyed but it is pending"
 - Добавлен метод wait_for_background_tasks() для graceful shutdown
+ИСПРАВЛЕНО (Спринт 5 — 1.4):
+- OpenTelemetry spans для analyze() и execute() методов
+- Child spans для каждого hook (_validate_context, _gather_data, _make_decision)
+- Атрибуты: agent.name, agent.role, decision.type, decision.confidence
 """
 
 import asyncio
@@ -19,6 +23,9 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from app.agents.observatory_state import observatory_state
 from app.core.rag_engine import rag_engine
+
+# Спринт 5: OpenTelemetry tracing
+from app.core.tracing import tracing_manager, span_context
 
 logger = logging.getLogger("BaseAgent")
 
@@ -61,9 +68,12 @@ class BaseAgent(ABC):
     - Приоритет: Safety > Quality > Optimization
     - История решений хранится в Orchestrator (единый источник правды)
 
-    ИСПРАВЛЕНО (В-2):
+    ИСПРАВЛЕНО (В-2 Спринт 2):
     - Фоновые задачи сохраняются в _background_tasks
     - Предотвращает потерю задач из-за garbage collection
+
+    ИСПРАВЛЕНО (Спринт 5 — 1.4):
+    - OpenTelemetry spans для observability
     """
 
     def __init__(self, name: str, role: str):
@@ -73,9 +83,7 @@ class BaseAgent(ABC):
         self._last_action_time: Optional[datetime] = None
         self._is_running = False
 
-        # ИСПРАВЛЕНО (В-2): Хранение ссылок на фоновые задачи
-        # Предотвращает RuntimeWarning "Task was destroyed but it is pending"
-        # в Python 3.12+ при высокой нагрузке
+        # В-2: Хранение ссылок на фоновые задачи
         self._background_tasks: Set[asyncio.Task] = set()
 
     async def initialize(self):
@@ -86,7 +94,7 @@ class BaseAgent(ABC):
     async def shutdown(self):
         """
         Корректное завершение работы агента.
-        ИСПРАВЛЕНО (В-2): Ожидает завершения всех фоновых задач.
+        В-2: Ожидает завершения всех фоновых задач.
         """
         self._is_running = False
 
@@ -98,7 +106,7 @@ class BaseAgent(ABC):
     async def wait_for_background_tasks(self, timeout: float = 5.0) -> None:
         """
         Ожидает завершения всех фоновых задач с таймаутом.
-        ИСПРАВЛЕНО (В-2): Гарантирует, что все log_ai_action вызовы завершатся.
+        В-2: Гарантирует, что все log_ai_action вызовы завершатся.
 
         Args:
             timeout: Максимальное время ожидания (секунды)
@@ -144,23 +152,93 @@ class BaseAgent(ABC):
         """
         TEMPLATE METHOD: Анализирует контекст и принимает решение.
 
+        ИСПРАВЛЕНО (Спринт 5 — 1.4): OpenTelemetry span для всего процесса.
+
         Алгоритм:
         1. Валидация контекста (hook: _validate_context)
         2. Сбор дополнительных данных (hook: _gather_data)
         3. Анализ и принятие решения (hook: _make_decision)
         4. Логирование решения (hook: _log_decision)
         """
-        if not await self._validate_context(context):
-            logger.debug(f"{self.name}: Context validation failed, skipping")
-            return None
+        # Спринт 5: Parent span для analyze()
+        async with span_context(
+            f"agent.{self.name}.analyze",
+            attributes={
+                "agent.name": self.name,
+                "agent.role": self.role,
+                "agent.is_running": self._is_running,
+                "context.has_rag": context.rag_context is not None,
+                "context.alerts_count": len(context.active_alerts),
+            },
+        ) as span:
+            try:
+                # Hook 1: Валидация контекста
+                async with span_context(
+                    f"agent.{self.name}._validate_context",
+                    attributes={"agent.name": self.name},
+                ) as validate_span:
+                    is_valid = await self._validate_context(context)
+                    if validate_span:
+                        validate_span.set_attribute("validation.result", is_valid)
 
-        enriched_context = await self._gather_data(context)
-        decision = await self._make_decision(enriched_context)
+                if not is_valid:
+                    logger.debug(f"{self.name}: Context validation failed, skipping")
+                    if span:
+                        span.set_attribute("analyze.result", "validation_failed")
+                    return None
 
-        if decision:
-            await self._log_decision(decision)
+                # Hook 2: Сбор данных
+                async with span_context(
+                    f"agent.{self.name}._gather_data",
+                    attributes={"agent.name": self.name},
+                ):
+                    enriched_context = await self._gather_data(context)
 
-        return decision
+                # Hook 3: Принятие решения
+                async with span_context(
+                    f"agent.{self.name}._make_decision",
+                    attributes={"agent.name": self.name},
+                ) as decision_span:
+                    decision = await self._make_decision(enriched_context)
+
+                    if decision and decision_span:
+                        decision_span.set_attribute(
+                            "decision.type", decision.decision_type
+                        )
+                        decision_span.set_attribute(
+                            "decision.confidence", decision.confidence
+                        )
+                        decision_span.set_attribute(
+                            "decision.rationale_length", len(decision.rationale)
+                        )
+
+                # Hook 4: Логирование решения
+                if decision:
+                    async with span_context(
+                        f"agent.{self.name}._log_decision",
+                        attributes={
+                            "agent.name": self.name,
+                            "decision.type": decision.decision_type,
+                        },
+                    ):
+                        await self._log_decision(decision)
+
+                # Устанавливаем атрибуты parent span
+                if span:
+                    span.set_attribute(
+                        "analyze.result", "decision_made" if decision else "no_decision"
+                    )
+                    if decision:
+                        span.set_attribute("decision.type", decision.decision_type)
+                        span.set_attribute("decision.confidence", decision.confidence)
+
+                return decision
+
+            except Exception as e:
+                if span:
+                    span.set_attribute("analyze.result", "error")
+                    span.record_exception(e)
+                raise
 
     # ========================================================================
     # TEMPLATE METHOD: execute()
@@ -170,27 +248,89 @@ class BaseAgent(ABC):
         """
         TEMPLATE METHOD: Выполняет принятое решение.
 
+        ИСПРАВЛЕНО (Спринт 5 — 1.4): OpenTelemetry span для всего процесса.
+
         Алгоритм:
         1. Валидация решения (hook: _validate_decision)
         2. Подготовка к выполнению (hook: _prepare_execution)
         3. Выполнение действия (hook: _perform_action)
         4. Постобработка (hook: _post_process)
         """
-        if not await self._validate_decision(decision):
-            logger.warning(f"{self.name}: Decision validation failed")
-            return False
+        # Спринт 5: Parent span для execute()
+        async with span_context(
+            f"agent.{self.name}.execute",
+            attributes={
+                "agent.name": self.name,
+                "agent.role": self.role,
+                "decision.type": decision.decision_type,
+                "decision.confidence": decision.confidence,
+            },
+        ) as span:
+            try:
+                # Hook 1: Валидация решения
+                async with span_context(
+                    f"agent.{self.name}._validate_decision",
+                    attributes={"agent.name": self.name},
+                ) as validate_span:
+                    is_valid = await self._validate_decision(decision)
+                    if validate_span:
+                        validate_span.set_attribute("validation.result", is_valid)
 
-        await self._prepare_execution(decision)
+                if not is_valid:
+                    logger.warning(f"{self.name}: Decision validation failed")
+                    if span:
+                        span.set_attribute("execute.result", "validation_failed")
+                        span.set_attribute("execute.success", False)
+                    return False
 
-        try:
-            success = await self._perform_action(decision)
-        except Exception as e:
-            logger.error(f"{self.name}: Action failed with error: {e}")
-            success = False
+                # Hook 2: Подготовка
+                async with span_context(
+                    f"agent.{self.name}._prepare_execution",
+                    attributes={"agent.name": self.name},
+                ):
+                    await self._prepare_execution(decision)
 
-        await self._post_process(decision, success)
+                # Hook 3: Выполнение действия
+                async with span_context(
+                    f"agent.{self.name}._perform_action",
+                    attributes={
+                        "agent.name": self.name,
+                        "decision.type": decision.decision_type,
+                    },
+                ) as action_span:
+                    try:
+                        success = await self._perform_action(decision)
+                        if action_span:
+                            action_span.set_attribute("action.success", success)
+                    except Exception as e:
+                        logger.error(f"{self.name}: Action failed with error: {e}")
+                        if action_span:
+                            action_span.set_attribute("action.success", False)
+                            action_span.record_exception(e)
+                        success = False
 
-        return success
+                # Hook 4: Постобработка
+                async with span_context(
+                    f"agent.{self.name}._post_process",
+                    attributes={
+                        "agent.name": self.name,
+                        "execute.success": success,
+                    },
+                ):
+                    await self._post_process(decision, success)
+
+                # Устанавливаем атрибуты parent span
+                if span:
+                    span.set_attribute("execute.result", "completed")
+                    span.set_attribute("execute.success", success)
+
+                return success
+
+            except Exception as e:
+                if span:
+                    span.set_attribute("execute.result", "error")
+                    span.record_exception(e)
+                raise
 
     # ========================================================================
     # HOOKS для analyze()
@@ -252,17 +392,15 @@ class BaseAgent(ABC):
         Логирует решение в Decision Audit Trail.
 
         ИСПРАВЛЕНО (v4.2): observatory_state.log_ai_action() — async метод,
-        вызывается через asyncio.create_task() для fire-and-forget.
+        вызываем через asyncio.create_task() для fire-and-forget.
 
-        ИСПРАВЛЕНО (В-2): Ссылки на задачи сохраняются в _background_tasks.
-        Раньше задачи могли быть уничтожены сборщиком мусора до выполнения,
-        что приводило к RuntimeWarning в Python 3.12+ и потере логов.
+        ИСПРАВЛЕНО (В-2 Спринт 2): Ссылки на задачи сохраняются в _background_tasks.
         """
         self._decision_log.append(decision)
         if len(self._decision_log) > 1000:
             self._decision_log = self._decision_log[-1000:]
 
-        # ИСПРАВЛЕНО (v4.2): log_ai_action — это async метод
+        # В-2: log_ai_action — это async метод
         # Вызываем через create_task для fire-and-forget
         try:
             loop = asyncio.get_running_loop()
@@ -275,7 +413,7 @@ class BaseAgent(ABC):
                 )
             )
 
-            # ИСПРАВЛЕНО (В-2): Сохраняем ссылку на задачу
+            # В-2: Сохраняем ссылку на задачу
             self._background_tasks.add(task)
 
             # Автоматически удаляем задачу из set после завершения
@@ -293,7 +431,7 @@ class BaseAgent(ABC):
     def _remove_background_task(self, task: asyncio.Task) -> None:
         """
         Удаляет задачу из _background_tasks после завершения.
-        ИСПРАВЛЕНО (В-2): Вызывается через add_done_callback.
+        В-2: Вызывается через add_done_callback.
         """
         self._background_tasks.discard(task)
 
@@ -335,7 +473,7 @@ class BaseAgent(ABC):
         - orchestrator.get_recent_decisions() — in-memory cache
         - /api/v1/audit/decisions — SQLite persistence
 
-        ИСПРАВЛЕНО (В-2): Добавлена статистика по фоновым задачам.
+        ИСПРАВЛЕНО (В-2 Спринт 2): Добавлена статистика по фоновым задачам.
         """
         active_tasks = len([t for t in self._background_tasks if not t.done()])
 

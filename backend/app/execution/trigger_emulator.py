@@ -13,9 +13,13 @@ Trigger Emulator v3 (OpenAPI-Driven Edition)
 ИСПРАВЛЕНО (v4.1):
 - Исправлены отступы в __init__
 - Удалён недостижимый код с неопределённой переменной api_response
+ИСПРАВЛЕНО (Спринт 5 — 1.5):
+- OpenTelemetry spans для trigger.fire и trigger.http_request
+- Атрибуты: trigger.name, category, risk_level, status, duration_ms, blocked_by
 """
 
 import logging
+import time
 from typing import Optional, Dict, Any, List, Set, Tuple
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -25,12 +29,17 @@ from app.shadow_engine.state_tracker import state_tracker
 from app.core.events import event_bus
 from app.execution.openapi_client import get_nina_api_client, DynamicAPIClient
 
+# Спринт 5: OpenTelemetry tracing
+from app.core.tracing import tracing_manager, span_context
+
 logger = logging.getLogger("TriggerEmulator")
 
 
 # ============================================================================
 # МОДЕЛИ ДАННЫХ
 # ============================================================================
+
+
 class TriggerHistoryRecord(BaseModel):
     """Запись в истории триггеров."""
 
@@ -46,6 +55,7 @@ class TriggerHistoryRecord(BaseModel):
 # ============================================================================
 # КОНФИГУРАЦИЯ
 # ============================================================================
+
 # Защищённые параметры (нельзя перезаписывать через extra_params).
 PROTECTED_PARAMS: Set[str] = {
     "cancel",  # Отмена операций
@@ -251,9 +261,14 @@ DEFAULT_TRIGGER_PATTERNS: Dict[str, Dict[str, Any]] = {
 # ============================================================================
 # TRIGGER EMULATOR
 # ============================================================================
+
+
 class TriggerEmulator:
     """
     Эмулятор триггеров N.I.N.A. Advanced API (OpenAPI-Driven Edition).
+
+    ИСПРАВЛЕНО (Спринт 5 — 1.5):
+    - OpenTelemetry spans для trigger.fire и trigger.http_request
     """
 
     def __init__(self):
@@ -311,6 +326,7 @@ class TriggerEmulator:
     # ====================================================================
     # КОНФИГУРАЦИЯ
     # ====================================================================
+
     def _load_agent_aliases(self) -> Dict[str, str]:
         """Загружает AGENT_ALIASES из settings или возвращает default."""
         try:
@@ -454,6 +470,7 @@ class TriggerEmulator:
     # ====================================================================
     # ВАЛИДАЦИЯ ПАРАМЕТРОВ
     # ====================================================================
+
     def _validate_parameter_value(
         self,
         trigger_config: Dict[str, Any],
@@ -462,6 +479,7 @@ class TriggerEmulator:
     ) -> Tuple[bool, Optional[str]]:
         """Валидирует значение параметра против OpenAPI схемы."""
         parameter_ranges = trigger_config.get("parameter_ranges", {})
+
         if param_name not in parameter_ranges:
             return True, None
 
@@ -532,6 +550,7 @@ class TriggerEmulator:
     # ====================================================================
     # ИСТОРИЯ
     # ====================================================================
+
     def _add_to_history(
         self,
         trigger_name: str,
@@ -556,27 +575,28 @@ class TriggerEmulator:
             self._trigger_history = self._trigger_history[-self._history_max_size :]
 
     # ====================================================================
-    # ГЛАВНЫЙ МЕТОД
+    # ГЛАВНЫЙ МЕТОД (с OpenTelemetry spans)
     # ====================================================================
+
     async def fire_trigger(
         self,
         trigger_name: str,
         reason: str = "AI Agent Decision",
         extra_params: Optional[Dict[str, Any]] = None,
-        source: str = "agent",  # ← НОВОЕ (К-2): "agent" или "api"
+        source: str = "agent",
     ) -> bool:
         """
         Эмулирует срабатывание триггера через Advanced API.
+
+        ИСПРАВЛЕНО (Спринт 5 — 1.5):
+        - OpenTelemetry span trigger.fire.{trigger_name}
+        - Атрибуты: category, risk_level, status, duration_ms, blocked_by
 
         Args:
             trigger_name: Имя триггера
             reason: Причина вызова
             extra_params: Дополнительные параметры
-            source: Источник вызова:
-                - "agent" (default): вызов от AI-агента.
-                В MANUAL режиме ЗАПРЕЩЁН.
-                - "api": вызов от пользователя через API.
-                В MANUAL режиме РАЗРЕШЁН.
+            source: "agent" (default) или "api"
 
         Returns:
             True если триггер успешно выполнен
@@ -590,143 +610,209 @@ class TriggerEmulator:
             if actual_trigger != trigger_name
             else ""
         )
-        logger.info(
-            f"🔥 Firing trigger: '{trigger_name}'{alias_note} "
-            f"(Reason: {reason}, Source: {source})"
-        )
 
-        # === НОВАЯ ПРОВЕРКА (К-2): Режим MANUAL блокирует agent-триггеры ===
-        from app.core.mode_manager import mode_manager, OperationMode
+        # ИСПРАВЛЕНО (Спринт 5 — 1.5): OpenTelemetry parent span
+        async with span_context(
+            f"trigger.fire.{trigger_name}",
+            attributes={
+                "trigger.name": trigger_name,
+                "trigger.actual_name": actual_trigger,
+                "trigger.reason": reason,
+                "trigger.source": source,
+                "trigger.alias": alias_note,
+            },
+        ) as span:
+            start_time = time.perf_counter()
 
-        if mode_manager.current_mode == OperationMode.MANUAL and source != "api":
-            logger.warning(
-                f"🛑 BLOCKED: Trigger '{trigger_name}' ignored — "
-                f"system in MANUAL mode (source: {source}). "
-                f"Use API with source='api' for manual overrides."
+            logger.info(
+                f"🔥 Firing trigger: '{trigger_name}'{alias_note} "
+                f"(Reason: {reason}, Source: {source})"
             )
-            self._stats["blocked_by_manual_mode"] = (
-                self._stats.get("blocked_by_manual_mode", 0) + 1
-            )
-            self._add_to_history(
-                trigger_name, actual_trigger, reason, "BLOCKED_MANUAL_MODE"
-            )
-            return False
 
-        # === ПРОВЕРКА 1: FLAT_MODE ===
-        if state_tracker.state.is_flat_mode:
-            blocked_in_flat = {
-                "autofocus",
-                "guider_start",
-                "guider_calibrate",
-                "sequence_start",
-            }
-            if actual_trigger in blocked_in_flat:
+            # === ПРОВЕРКА 1: Режим MANUAL ===
+            from app.core.mode_manager import mode_manager, OperationMode
+
+            if mode_manager.current_mode == OperationMode.MANUAL and source != "api":
                 logger.warning(
-                    f"🛑 BLOCKED: Trigger '{trigger_name}' ignored during FLAT_MODE"
+                    f"🛑 BLOCKED: Trigger '{trigger_name}' ignored — "
+                    f"system in MANUAL mode (source: {source})."
                 )
-                self._stats["blocked_by_flat_mode"] += 1
+                self._stats["blocked_by_manual_mode"] += 1
                 self._add_to_history(
-                    trigger_name, actual_trigger, reason, "BLOCKED_FLAT_MODE"
+                    trigger_name, actual_trigger, reason, "BLOCKED_MANUAL_MODE"
                 )
+
+                if span:
+                    span.set_attribute("trigger.status", "BLOCKED_MANUAL_MODE")
+                    span.set_attribute("trigger.blocked_by", "manual_mode")
+
                 return False
 
-        # === ПРОВЕРКА 2: Критическая фаза (shutdown) ===
-        if state_tracker.state.is_approaching_shutdown:
-            allowed_during_shutdown = {
-                "mount_park",
-                "dome_close",
-                "camera_warm",
-                "guider_stop",
-                "livestack_stop",
-                "sequence_stop",
-            }
-            if actual_trigger not in allowed_during_shutdown:
-                logger.warning(
-                    f"🛑 BLOCKED: Trigger '{trigger_name}' ignored - "
-                    f"approaching shutdown"
+            # === ПРОВЕРКА 2: FLAT_MODE ===
+            if state_tracker.state.is_flat_mode:
+                blocked_in_flat = {
+                    "autofocus",
+                    "guider_start",
+                    "guider_calibrate",
+                    "sequence_start",
+                }
+                if actual_trigger in blocked_in_flat:
+                    logger.warning(
+                        f"🛑 BLOCKED: Trigger '{trigger_name}' ignored during FLAT_MODE"
+                    )
+                    self._stats["blocked_by_flat_mode"] += 1
+                    self._add_to_history(
+                        trigger_name, actual_trigger, reason, "BLOCKED_FLAT_MODE"
+                    )
+
+                    if span:
+                        span.set_attribute("trigger.status", "BLOCKED_FLAT_MODE")
+                        span.set_attribute("trigger.blocked_by", "flat_mode")
+
+                    return False
+
+            # === ПРОВЕРКА 3: Критическая фаза (shutdown) ===
+            if state_tracker.state.is_approaching_shutdown:
+                allowed_during_shutdown = {
+                    "mount_park",
+                    "dome_close",
+                    "camera_warm",
+                    "guider_stop",
+                    "livestack_stop",
+                    "sequence_stop",
+                }
+                if actual_trigger not in allowed_during_shutdown:
+                    logger.warning(
+                        f"🛑 BLOCKED: Trigger '{trigger_name}' ignored - "
+                        f"approaching shutdown"
+                    )
+                    self._stats["blocked_by_critical_phase"] += 1
+                    self._add_to_history(
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "BLOCKED_CRITICAL_PHASE",
+                    )
+
+                    if span:
+                        span.set_attribute("trigger.status", "BLOCKED_CRITICAL_PHASE")
+                        span.set_attribute("trigger.blocked_by", "critical_phase")
+
+                    return False
+
+            # === ПРОВЕРКА 4: HAL валидация ===
+            try:
+                from app.execution.hal import hal
+
+                is_safe, hal_reason = hal.validate_trigger_injection(actual_trigger)
+                if not is_safe:
+                    logger.warning(
+                        f"🛑 BLOCKED by HAL: Trigger '{trigger_name}' - {hal_reason}"
+                    )
+                    self._stats["blocked_by_hal"] += 1
+                    self._add_to_history(
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "BLOCKED_HAL",
+                        {"hal_reason": hal_reason},
+                    )
+
+                    if span:
+                        span.set_attribute("trigger.status", "BLOCKED_HAL")
+                        span.set_attribute("trigger.blocked_by", "hal")
+                        span.set_attribute("trigger.hal_reason", hal_reason)
+
+                    return False
+            except ImportError:
+                logger.debug("HAL not available, skipping HAL validation")
+
+            # === ПРОВЕРКА 5: Получение конфигурации триггера ===
+            if not self._registry:
+                await self._ensure_openapi_client()
+
+            trigger_config = self._registry.get(actual_trigger)
+            if not trigger_config:
+                available = ", ".join(sorted(self._registry.keys()))
+                logger.error(
+                    f"❌ Unknown trigger: '{trigger_name}'. Available: {available}"
                 )
-                self._stats["blocked_by_critical_phase"] += 1
                 self._add_to_history(
-                    trigger_name,
-                    actual_trigger,
-                    reason,
-                    "BLOCKED_CRITICAL_PHASE",
+                    trigger_name, actual_trigger, reason, "FAILED_UNKNOWN_TRIGGER"
                 )
+
+                if span:
+                    span.set_attribute("trigger.status", "FAILED_UNKNOWN_TRIGGER")
+
                 return False
 
-        # === ПРОВЕРКА 3: HAL валидация ===
-        try:
-            from app.execution.hal import hal
-
-            is_safe, hal_reason = hal.validate_trigger_injection(actual_trigger)
-            if not is_safe:
-                logger.warning(
-                    f"🛑 BLOCKED by HAL: Trigger '{trigger_name}' - {hal_reason}"
+            # Добавляем атрибуты конфигурации к span
+            if span:
+                span.set_attribute(
+                    "trigger.category",
+                    trigger_config.get("category", "unknown"),
                 )
-                self._stats["blocked_by_hal"] += 1
-                self._add_to_history(
-                    trigger_name,
-                    actual_trigger,
-                    reason,
-                    "BLOCKED_HAL",
-                    {"hal_reason": hal_reason},
+                span.set_attribute(
+                    "trigger.risk_level",
+                    trigger_config.get("risk_level", "UNKNOWN"),
                 )
-                return False
-        except ImportError:
-            logger.debug("HAL not available, skipping HAL validation")
+                span.set_attribute(
+                    "trigger.from_openapi",
+                    trigger_config.get("from_openapi", False),
+                )
 
-        # === ПРОВЕРКА 4: Получение конфигурации триггера ===
-        if not self._registry:
-            await self._ensure_openapi_client()
-
-        trigger_config = self._registry.get(actual_trigger)
-        if not trigger_config:
-            available = ", ".join(sorted(self._registry.keys()))
-            logger.error(
-                f"❌ Unknown trigger: '{trigger_name}'. Available: {available}"
-            )
-            self._add_to_history(
-                trigger_name, actual_trigger, reason, "FAILED_UNKNOWN_TRIGGER"
-            )
-            return False
-
-        # === ПРОВЕРКА 5: Безопасное объединение параметров ===
-        params, rejected = self._merge_params_safely(
-            trigger_config, trigger_config.get("params", {}), extra_params
-        )
-
-        self._last_rejected_params = rejected if rejected else None
-
-        if rejected:
-            logger.warning(
-                f"⚠️ Trigger '{trigger_name}' had {len(rejected)} parameters "
-                f"rejected: {rejected}. Proceeding with safe parameters."
-            )
-
-        # === ВЫПОЛНЕНИЕ ЗАПРОСА ===
-        method = trigger_config["method"]
-
-        # Используем OpenAPI клиент если доступен
-        if self._openapi_client and trigger_config.get("from_openapi"):
-            return await self._fire_via_openapi(
-                trigger_name,
-                actual_trigger,
+            # === ПРОВЕРКА 6: Безопасное объединение параметров ===
+            params, rejected = self._merge_params_safely(
                 trigger_config,
-                params,
-                rejected,
-                reason,
+                trigger_config.get("params", {}),
+                extra_params,
             )
+            self._last_rejected_params = rejected if rejected else None
 
-        # Fallback: прямой HTTP запрос
-        return await self._fire_direct_http(
-            trigger_name,
-            actual_trigger,
-            method,
-            f"{self.base_url}{trigger_config['path']}",
-            params,
-            rejected,
-            reason,
-        )
+            if rejected:
+                logger.warning(
+                    f"⚠️ Trigger '{trigger_name}' had {len(rejected)} "
+                    f"parameters rejected: {rejected}. "
+                    f"Proceeding with safe parameters."
+                )
+
+            # === ВЫПОЛНЕНИЕ ЗАПРОСА ===
+            method = trigger_config["method"]
+
+            # Используем OpenAPI клиент если доступен
+            if self._openapi_client and trigger_config.get("from_openapi"):
+                result = await self._fire_via_openapi(
+                    trigger_name,
+                    actual_trigger,
+                    trigger_config,
+                    params,
+                    rejected,
+                    reason,
+                    span,
+                )
+            else:
+                # Fallback: прямой HTTP запрос
+                result = await self._fire_direct_http(
+                    trigger_name,
+                    actual_trigger,
+                    method,
+                    f"{self.base_url}{trigger_config['path']}",
+                    params,
+                    rejected,
+                    reason,
+                    span,
+                )
+
+            # Записываем duration в span
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            if span:
+                span.set_attribute("trigger.duration_ms", round(elapsed_ms, 2))
+                span.set_attribute(
+                    "trigger.status",
+                    "SUCCESS" if result else "FAILED",
+                )
+
+            return result
 
     async def _fire_via_openapi(
         self,
@@ -736,6 +822,7 @@ class TriggerEmulator:
         params: Dict[str, Any],
         rejected: List[str],
         reason: str,
+        parent_span=None,
     ) -> bool:
         """Выполняет триггер через OpenAPI клиент (с валидацией)."""
         self._stats["openapi_calls"] += 1
@@ -750,31 +837,43 @@ class TriggerEmulator:
                 params,
                 rejected,
                 reason,
+                parent_span,
             )
 
-        result = (
-            await self._openapi_client.call_endpoint(
-                operation_id=endpoint.operation_id or "",
-                params=params,
-                validate=True,
+        # ИСПРАВЛЕНО (Спринт 5 — 1.5): child span для HTTP вызова
+        async with span_context(
+            "trigger.http_request",
+            attributes={
+                "trigger.operation_id": endpoint.operation_id or "",
+                "trigger.method": endpoint.method,
+                "trigger.path": endpoint.path,
+                "trigger.via": "openapi",
+            },
+        ) as http_span:
+            result = (
+                await self._openapi_client.call_endpoint(
+                    operation_id=endpoint.operation_id or "",
+                    params=params,
+                    validate=True,
+                )
+                if endpoint.operation_id
+                else await self._openapi_client.call_by_path(
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    params=params,
+                    validate=True,
+                )
             )
-            if endpoint.operation_id
-            else await self._openapi_client.call_by_path(
-                method=endpoint.method,
-                path=endpoint.path,
-                params=params,
-                validate=True,
-            )
-        )
 
-        return self._process_http_result(
-            result,
-            trigger_name,
-            actual_trigger,
-            params,
-            rejected,
-            reason,
-        )
+            return self._process_http_result(
+                result,
+                trigger_name,
+                actual_trigger,
+                params,
+                rejected,
+                reason,
+                http_span,
+            )
 
     async def _fire_direct_http(
         self,
@@ -785,90 +884,115 @@ class TriggerEmulator:
         params: Dict[str, Any],
         rejected: List[str],
         reason: str,
+        parent_span=None,
     ) -> bool:
         """
         Выполняет прямой HTTP запрос (fallback без OpenAPI).
-
-        ИСПРАВЛЕНО (С-15): использует http_client_manager для connection pooling.
-        Клиент кэшируется по ключу "nina:{base_url}" и переиспользуется
-        между всеми вызовами триггеров.
+        ИСПРАВЛЕНО (С-15): использует http_client_manager.
+        ИСПРАВЛЕНО (Спринт 5 — 1.5): child span для HTTP вызова.
         """
         self._stats["direct_calls"] += 1
-        try:
-            # ИСПРАВЛЕНО (С-15): Получаем клиент через менеджер
-            # service="nina" — использует конфигурацию таймаутов из settings.http_client.nina
-            client = await http_client_manager.get_client(
-                base_url=self.base_url,
-                service="nina",
-            )
 
-            if method == "GET":
-                response = await client.get(url, params=params)
-            elif method == "POST":
-                response = await client.post(url, json=params)
-            else:
-                logger.error(f"❌ Unsupported method: {method}")
-                self._add_to_history(
+        # ИСПРАВЛЕНО (Спринт 5 — 1.5): child span для HTTP вызова
+        async with span_context(
+            "trigger.http_request",
+            attributes={
+                "trigger.method": method,
+                "trigger.url": url,
+                "trigger.via": "direct_http",
+                "trigger.params_count": len(params),
+            },
+        ) as http_span:
+            try:
+                client = await http_client_manager.get_client(
+                    base_url=self.base_url,
+                    service="nina",
+                )
+
+                if method == "GET":
+                    response = await client.get(url, params=params)
+                elif method == "POST":
+                    response = await client.post(url, json=params)
+                else:
+                    logger.error(f"❌ Unsupported method: {method}")
+                    self._add_to_history(
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "FAILED_UNSUPPORTED_METHOD",
+                    )
+                    if http_span:
+                        http_span.set_attribute("trigger.error", "unsupported_method")
+                    return False
+
+                # Преобразуем response в dict-формат
+                if response.status_code == 200:
+                    try:
+                        result = response.json()
+                    except Exception:
+                        result = {"status": "success", "data": response.text}
+                else:
+                    result = {
+                        "status": "error",
+                        "code": response.status_code,
+                        "message": response.text[:500],
+                    }
+
+                if http_span:
+                    http_span.set_attribute("http.status_code", response.status_code)
+
+                return self._process_http_result(
+                    result,
                     trigger_name,
                     actual_trigger,
+                    params,
+                    rejected,
                     reason,
-                    "FAILED_UNSUPPORTED_METHOD",
+                    http_span,
                 )
+
+            except Exception as e:
+                error_type = type(e).__name__
+
+                if "Connect" in error_type:
+                    logger.error(
+                        f"❌ Cannot connect to N.I.N.A. Advanced API "
+                        f"at {self.base_url}\n"
+                        f"   Проверьте, что N.I.N.A. запущена "
+                        f"и Advanced API включен."
+                    )
+                    self._add_to_history(
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "FAILED_CONNECTION_ERROR",
+                    )
+                elif "Timeout" in error_type:
+                    logger.error(f"❌ Timeout firing trigger '{trigger_name}'")
+                    self._add_to_history(
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "FAILED_TIMEOUT",
+                    )
+                else:
+                    logger.error(
+                        f"❌ Unexpected error firing trigger '{trigger_name}': {e}"
+                    )
+                    self._add_to_history(
+                        trigger_name,
+                        actual_trigger,
+                        reason,
+                        "FAILED_UNEXPECTED",
+                        {"error": str(e)},
+                    )
+
+                if http_span:
+                    http_span.set_attribute("trigger.error", error_type)
+                    http_span.set_attribute("trigger.error_message", str(e))
+
+                self._stats["failed_triggers"] += 1
                 return False
-
-            # Преобразуем response в dict-формат
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                except Exception:
-                    result = {"status": "success", "data": response.text}
-            else:
-                result = {
-                    "status": "error",
-                    "code": response.status_code,
-                    "message": response.text[:500],
-                }
-
-            return self._process_http_result(
-                result,
-                trigger_name,
-                actual_trigger,
-                params,
-                rejected,
-                reason,
-            )
-
-        except Exception as e:
-            # Обработка всех ошибок подключения (ConnectError, TimeoutException, etc.)
-            error_type = type(e).__name__
-
-            if "Connect" in error_type:
-                logger.error(
-                    f"❌ Cannot connect to N.I.N.A. Advanced API at {self.base_url}\n"
-                    f"   Проверьте, что N.I.N.A. запущена и Advanced API включен."
-                )
-                self._add_to_history(
-                    trigger_name, actual_trigger, reason, "FAILED_CONNECTION_ERROR"
-                )
-            elif "Timeout" in error_type:
-                logger.error(f"❌ Timeout firing trigger '{trigger_name}'")
-                self._add_to_history(
-                    trigger_name, actual_trigger, reason, "FAILED_TIMEOUT"
-                )
-            else:
-                logger.error(
-                    f"❌ Unexpected error firing trigger '{trigger_name}': {e}"
-                )
-                self._add_to_history(
-                    trigger_name,
-                    actual_trigger,
-                    reason,
-                    "FAILED_UNEXPECTED",
-                    {"error": str(e)},
-                )
-
-            self._stats["failed_triggers"] += 1
-            return False
 
     def _process_http_result(
         self,
@@ -878,6 +1002,7 @@ class TriggerEmulator:
         params: Dict[str, Any],
         rejected: List[str],
         reason: str,
+        http_span=None,
     ) -> bool:
         """Обрабатывает результат HTTP запроса (унифицированная логика)."""
         status = result.get("status")
@@ -890,7 +1015,6 @@ class TriggerEmulator:
                 f"✅ Trigger '{trigger_name}' fired successfully: {api_response}"
             )
             self._stats["successful_triggers"] += 1
-
             self._add_to_history(
                 trigger_name,
                 actual_trigger,
@@ -902,6 +1026,9 @@ class TriggerEmulator:
                     "rejected_params": rejected,
                 },
             )
+
+            if http_span:
+                http_span.set_attribute("trigger.result", "success")
 
             # Публикуем событие
             try:
@@ -938,6 +1065,8 @@ class TriggerEmulator:
                 "FAILED_VALIDATION",
                 {"errors": errors},
             )
+            if http_span:
+                http_span.set_attribute("trigger.result", "validation_error")
             return False
 
         # HTTP ошибка
@@ -948,12 +1077,12 @@ class TriggerEmulator:
             )
             self._stats["failed_triggers"] += 1
 
-            # Специальная обработка 404
             if code == 404:
                 logger.error(
-                    f"❌ Endpoint not found (404) for trigger '{trigger_name}'.\n"
-                    f"   Проверьте, что Advanced API плагин установлен и запущен.\n"
-                    f"   Установите: N.I.N.A. → Options → Plugins → Advanced API"
+                    f"❌ Endpoint not found (404) for trigger "
+                    f"'{trigger_name}'.\n"
+                    f"   Проверьте, что Advanced API плагин "
+                    f"установлен и запущен."
                 )
                 self._add_to_history(
                     trigger_name,
@@ -962,7 +1091,6 @@ class TriggerEmulator:
                     "FAILED_NOT_FOUND",
                     {"error": error_msg},
                 )
-            # Специальная обработка 409 (conflict)
             elif code == 409:
                 self._add_to_history(
                     trigger_name,
@@ -979,6 +1107,11 @@ class TriggerEmulator:
                     f"FAILED_HTTP_{code}",
                     {"error": error_msg, "code": code},
                 )
+
+            if http_span:
+                http_span.set_attribute("trigger.result", "http_error")
+                http_span.set_attribute("trigger.http_code", code or 0)
+
             return False
 
         # Неожиданный формат
@@ -993,11 +1126,16 @@ class TriggerEmulator:
             "FAILED_UNKNOWN_FORMAT",
             {"result": result},
         )
+
+        if http_span:
+            http_span.set_attribute("trigger.result", "unknown_format")
+
         return False
 
     # ====================================================================
     # ПРЯМОЙ ВЫЗОВ ЛЮБОГО OPENAPI ЭНДПОИНТА (FALLBACK)
     # ====================================================================
+
     async def call_openapi_endpoint(
         self,
         operation_id: str,
@@ -1032,8 +1170,9 @@ class TriggerEmulator:
     # ====================================================================
     # ПУБЛИЧНЫЕ МЕТОДЫ
     # ====================================================================
+
     def list_available_triggers(self) -> Dict[str, Dict[str, Any]]:
-        """Возвращает список всех доступных триггеров с детальной информацией."""
+        """Возвращает список всех доступных триггеров."""
         result = {}
         for name, config in self._registry.items():
             param_details = {}
@@ -1064,7 +1203,6 @@ class TriggerEmulator:
         """Возвращает статистику TriggerEmulator."""
         total = max(self._stats["total_triggers_fired"], 1)
         success_rate = (self._stats["successful_triggers"] / total) * 100
-
         return {
             **self._stats,
             "success_rate_percent": round(success_rate, 2),

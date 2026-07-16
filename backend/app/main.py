@@ -1,19 +1,6 @@
 """
 N.I.N.A. AI Cortex - Main Application Entry Point
 FastAPI сервер, управляющий жизненным циклом всех компонентов Cortex.
-
-ЭТАП 2 (рефакторинг метрик):
-- Удалён metrics_source_monitor (заменён на встроенную логику в MetricsAggregator)
-- Добавлен endpoint /api/v1/metrics/unified для нового формата UnifiedMetric
-- Добавлен endpoint /api/v1/metrics/sources-status для статуса источников данных
-- InfluxDB = PRIMARY, Prometheus = UNIQUE + FALLBACK (логика в observatory_state.py)
-
-ИСПРАВЛЕНО (v4.2 — критическое):
-- Структура lifespan полностью перестроена
-- Весь startup код ПЕРЕД yield
-- Весь shutdown код ПОСЛЕ yield
-- Убраны дублирующиеся регистрации background tasks
-- DiskMonitor: только мониторинг, без удаления файлов
 """
 
 import asyncio
@@ -68,7 +55,8 @@ from app.agents.llm_client import llm_client
 from app.agents.hybrid_langgraph_orchestrator import (
     hybrid_orchestrator,
     WorkflowType,
-    set_agents_for_hybrid_orchestrator,  # ← ДОБАВИТЬ (С-5)
+    WorkflowStatus,  # ← ДОБАВЛЕНО
+    set_agents_for_hybrid_orchestrator,
 )
 
 # Storage
@@ -86,16 +74,37 @@ from app.shadow_engine.shadow_visualizer import shadow_visualizer
 # Observability (Спринт 4)
 from app.core.tracing import tracing_manager
 
+
 # ============================================================================
-# LOGGING SETUP
+# LOGGING SETUP (ОДИН РАЗ, в самом начале файла)
 # ============================================================================
-logging.basicConfig(
-    level=getattr(logging, settings.logging.level.upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
+# ИСПРАВЛЕНО (финальное):
+# Используем TracingFormatter вместо Filter
+# TracingFormatter сам добавляет trace_id при форматировании
+# Это работает в multiprocessing.spawn, потому что formatter сериализуется
+from app.core.tracing import TracingFormatter
+
+# Создаём formatter с trace_id в формате
+tracing_formatter = TracingFormatter(
+    fmt="%(asctime)s | %(levelname)-8s | %(trace_id)s | %(name)-25s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# Настраиваем basicConfig БЕЗ format (будет установлен вручную)
+logging.basicConfig(
+    level=getattr(logging, settings.logging.level.upper(), logging.INFO),
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# Применяем TracingFormatter ко всем handlers
+root_logger = logging.getLogger()
+for handler in root_logger.handlers:
+    handler.setFormatter(tracing_formatter)
+
+# Устанавливаем DEBUG для WatcherAgent
 logging.getLogger("WatcherAgent").setLevel(logging.DEBUG)
 logger = logging.getLogger("CortexMain")
+
 
 # ============================================================================
 # GLOBAL INSTANCES
@@ -109,7 +118,7 @@ auditor_agent = AuditorAgent()
 calibrator_agent: Optional[CalibratorAgent] = None
 copilot_agent = CopilotAgent()
 
-# Хранилище ссылок на обработчики событий (для корректной отписки при shutdown)
+# Хранилище ссылок на обработчики событий
 _event_handlers: Dict[str, Callable] = {}
 
 
@@ -160,66 +169,67 @@ async def _on_llm_response(data: Dict[str, Any]):
 
 
 # ============================================================================
-# LIFESPAN (Startup / Shutdown) — ИСПРАВЛЕНО v4.2
+# LIFESPAN (Startup / Shutdown)
 # ============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Управление жизненным циклом приложения.
-
-    ИСПРАВЛЕНО (v4.2): Правильная структура:
-    - Весь STARTUP код ПЕРЕД yield
-    - yield — приложение работает
-    - Весь SHUTDOWN код ПОСЛЕ yield
-
-    ЭТАП 2: Убран metrics_source_monitor (логика перенесена в MetricsAggregator)
-    """
+    """Управление жизненным циклом приложения."""
     global calibrator_agent
-
     logger.info("=" * 70)
     logger.info("🚀 N.I.N.A. AI Cortex v4.2 Starting Up...")
     logger.info("=" * 70)
 
-    # ====================================================================
-    # ████████████████████████████████████████████████████████████████████
-    # ███  STARTUP PHASE — ВСЁ ДО yield                                ███
-    # ████████████████████████████████████████████████████████████████████
-    # ====================================================================
-
     try:
-        # 0. OpenTelemetry Tracing (Спринт 4)
-        logger.info("🔭 Initializing OpenTelemetry tracing...")
+        # ================================================================
+        # 0. OpenTelemetry Tracing (инициализация менеджера)
+        # ================================================================
         tracing_cfg = getattr(settings, "tracing", None)
-        if tracing_cfg:
-            tracing_initialized = tracing_manager.initialize(
-                enabled=tracing_cfg.enabled,
-                exporter_type=tracing_cfg.exporter,
-                otlp_endpoint=tracing_cfg.otlp_endpoint,
-                service_name=tracing_cfg.service_name,
-                service_version=tracing_cfg.service_version,
-                sample_rate=tracing_cfg.sample_rate,
-                console_export=tracing_cfg.console_export,
-            )
-            if tracing_initialized and tracing_cfg.enabled:
-                # Автоматическая инструментация httpx
-                if tracing_cfg.instrument_httpx:
-                    tracing_manager.instrument_httpx()
-                logger.info("✅ OpenTelemetry tracing ready")
-            else:
-                logger.info("⏭️ OpenTelemetry tracing disabled")
+        if tracing_cfg and getattr(tracing_cfg, "enabled", False):
+            logger.info("🔭 Initializing OpenTelemetry tracing...")
+            try:
+                tracing_initialized = tracing_manager.initialize(
+                    enabled=tracing_cfg.enabled,
+                    exporter_type=getattr(tracing_cfg, "exporter", "otlp"),
+                    otlp_endpoint=getattr(
+                        tracing_cfg, "otlp_endpoint", "http://localhost:4317"
+                    ),
+                    service_name=getattr(tracing_cfg, "service_name", "nina-ai-cortex"),
+                    service_version=getattr(tracing_cfg, "service_version", "5.0.0"),
+                    sample_rate=getattr(tracing_cfg, "sample_rate", 1.0),
+                    console_export=getattr(tracing_cfg, "console_export", False),
+                )
+                if tracing_initialized:
+                    # Автоматическая инструментация httpx
+                    if getattr(tracing_cfg, "instrument_httpx", True):
+                        tracing_manager.instrument_httpx()
+                    logger.info("✅ OpenTelemetry tracing ready")
+                else:
+                    logger.info("⏭️ OpenTelemetry tracing init returned False")
+            except Exception as e:
+                logger.warning(f"⚠️ Tracing init failed (non-fatal): {e}")
         else:
-            logger.info("⏭️ OpenTelemetry tracing not configured")
+            logger.info("⏭️ OpenTelemetry tracing disabled in config")
 
+        # ================================================================
         # 1. Запуск Ingestion, Shadow Engine и Execution
+        # ================================================================
         await watcher_manager.start()
 
+        # ================================================================
         # 2. RAG Engine
+        # ================================================================
         logger.info("📚 Initializing RAG Engine...")
         await rag_engine.initialize()
 
         # 3. WebSocket Broadcast Manager
         logger.info("🔌 Starting WebSocket Broadcast Manager...")
         await ws_broadcast_manager.start()
+
+        # 3.5. Instrumentors для SQLite и Qdrant (Спринт 5 Фаза 2)
+        if tracing_manager.enabled:
+            logger.info("🔧 Installing OpenTelemetry instrumentors...")
+            tracing_manager.instrument_sqlite()
+            tracing_manager.instrument_qdrant()
 
         # 4. Mode Manager
         logger.info("🎛️ Starting Mode Manager...")
@@ -253,7 +263,7 @@ async def lifespan(app: FastAPI):
         orchestrator.register_agent("Calibrator", calibrator_agent)
         orchestrator.register_agent("Copilot", copilot_agent)
 
-        # 8.1. ИСПРАВЛЕНО (С-5): Внедрение агентов в HybridLangGraphOrchestrator
+        # 8.1. Внедрение агентов в HybridLangGraphOrchestrator
         set_agents_for_hybrid_orchestrator(orchestrator.agents)
         logger.info("✅ Agents injected into HybridLangGraphOrchestrator")
 
@@ -280,7 +290,6 @@ async def lifespan(app: FastAPI):
             "RAG_SEARCH",
             "MASTERS_INDEXED",
         ]
-
         for event_type in general_events:
 
             async def _handler(data: Dict[str, Any], et: str = event_type) -> None:
@@ -296,17 +305,9 @@ async def lifespan(app: FastAPI):
         event_bus.subscribe("TRIGGER_FIRED", _on_trigger_fired)
         event_bus.subscribe("LLM_RESPONSE", _on_llm_response)
 
-        # 10.1. ИСПРАВЛЕНО (С-16): Сброс кэша EarthLocation при изменении профиля
-        # (не критично, но хорошая практика)
-
+        # 10.1. С-16: Детекция Meridian Flip Started
         async def _on_meridian_flip_started(data: Dict[str, Any]):
-            """
-            С-16: Детекция события Meridian Flip Started.
-            Используется PredictiveHAL для синхронизации состояния.
-            """
             logger.info("🔄 Meridian Flip Started (detected via WebSocket)")
-            # PredictiveHAL получит это событие и может скорректировать предсказания
-            # Дополнительная логика может быть добавлена в будущем
 
         _event_handlers["MERIDIAN_FLIP_STARTED_sync"] = _on_meridian_flip_started
         event_bus.subscribe("MERIDIAN_FLIP_STARTED", _on_meridian_flip_started)
@@ -340,12 +341,8 @@ async def lifespan(app: FastAPI):
             )
             logger.info("   ✅ Decision Audit cleanup registered (daily)")
 
-        # 11.2. Disk Monitor — ТОЛЬКО рекомендации, БЕЗ удаления
+        # 11.2. Disk Monitor
         async def disk_monitor_task():
-            """
-            Периодическая генерация рекомендаций по управлению дисковым пространством.
-            ИСПРАВЛЕНО (v4.2): НЕ удаляет файлы, только генерирует рекомендации.
-            """
             try:
                 result = await disk_monitor.generate_recommendations(
                     "keep_last_30_days"
@@ -373,7 +370,7 @@ async def lifespan(app: FastAPI):
         )
         logger.info(f"   ✅ Disk monitor registered (every {check_interval}s)")
 
-        # 11.3. RAG автообновление (feature flag)
+        # 11.3-11.4. Feature flags для RAG и Predictive HAL
         rag_auto_enabled = False
         try:
             ff = getattr(settings, "feature_flags", None)
@@ -399,7 +396,6 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ RAG auto-update disabled (feature flag off)")
 
-        # 11.4. Predictive HAL (feature flag)
         predictive_enabled = False
         try:
             ff = getattr(settings, "feature_flags", None)
@@ -426,9 +422,6 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("   ⏭️ Predictive HAL disabled (feature flag off)")
 
-        # ЭТАП 2: metrics_source_monitor УДАЛЁН
-        # Логика переключения источников теперь встроена в MetricsAggregator
-        # (observatory_state.py) — InfluxDB = PRIMARY, Prometheus = UNIQUE + FALLBACK
         logger.info(
             "   ℹ️ Metrics source monitoring: built into MetricsAggregator "
             "(InfluxDB=PRIMARY, Prometheus=UNIQUE+FALLBACK)"
@@ -452,7 +445,7 @@ async def lifespan(app: FastAPI):
         )
         logger.info("   ✅ RAG cleanup registered (weekly)")
 
-        # 11.6. P2: Metrics History cleanup (hourly)
+        # 11.6. Metrics History cleanup (hourly)
         async def metrics_history_cleanup_task():
             try:
                 deleted = await metrics_history.cleanup_old_records()
@@ -466,14 +459,13 @@ async def lifespan(app: FastAPI):
         background_tasks.register(
             name="metrics_history_cleanup",
             coro=metrics_history_cleanup_task,
-            interval_seconds=3600,  # Каждый час
+            interval_seconds=3600,
             enabled=True,
             description="Cleanup old aggregated metrics (retention: 24h)",
         )
         logger.info("   ✅ Metrics History cleanup registered (hourly)")
 
         logger.info(f"   ✅ {len(background_tasks._tasks)} background tasks registered")
-
         logger.info("=" * 70)
         logger.info("✅ All AI Agents initialized and registered")
         logger.info("✅ Cortex is fully operational and ready to accept connections.")
@@ -488,22 +480,15 @@ async def lifespan(app: FastAPI):
         logger.critical(f"❌ FATAL: Failed to start Cortex: {e}", exc_info=True)
         raise
 
-    # ====================================================================
-    # ████████████████████████████████████████████████████████████████████
-    # ███  ПРИЛОЖЕНИЕ РАБОТАЕТ                                         ███
-    # ████████████████████████████████████████████████████████████████████
-    # ====================================================================
-
     yield
 
     # ====================================================================
-    # ████████████████████████████████████████████████████████████████████
-    # ███  SHUTDOWN PHASE — ВСЁ ПОСЛЕ yield (в обратном порядке)       ███
-    # ████████████████████████████████████████████████████████████████████
+    # SHUTDOWN PHASE
     # ====================================================================
     logger.info("=" * 70)
     logger.info("🛑 N.I.N.A. AI Cortex Shutting Down...")
     logger.info("=" * 70)
+
     try:
         # 1. Отписка от EventBus
         for event_type, handler in _event_handlers.items():
@@ -511,12 +496,6 @@ async def lifespan(app: FastAPI):
                 event_bus.unsubscribe(event_type, handler)
             except Exception as e:
                 logger.debug(f"Failed to unsubscribe from {event_type}: {e}")
-        try:
-            event_bus.unsubscribe("DECISION_MADE", _on_decision_made)
-            event_bus.unsubscribe("TRIGGER_FIRED", _on_trigger_fired)
-            event_bus.unsubscribe("LLM_RESPONSE", _on_llm_response)
-        except Exception as e:
-            logger.debug(f"Failed to unsubscribe detail handlers: {e}")
 
         # 2. Останавливаем Background Task Manager
         await background_tasks.stop()
@@ -548,23 +527,45 @@ async def lifespan(app: FastAPI):
         # 8. Закрываем trigger emulator
         await trigger_emulator.close()
 
-        # 8.5. С-3: Закрываем Decision Audit Trail (финальный flush batch-буфера)
+        # 8.5. С-3: Закрываем Decision Audit Trail
         await decision_audit.close()
 
-        # 9. ИСПРАВЛЕНО (С-15): Закрываем все HTTP клиенты через HttpClientManager
+        # 9. ИСПРАВЛЕНО (С-15): Закрываем все HTTP клиенты
         await http_client_manager.close_all()
 
-        # НОВОЕ (К-7): 9. Закрываем thread pool executors
+        # 10. Закрываем aiohttp клиенты (qdrant, influxdb)
+        try:
+            if rag_engine._client is not None:
+                await rag_engine._client.close()
+                rag_engine._client = None
+                logger.debug("Qdrant aiohttp client closed")
+        except Exception as e:
+            logger.debug(f"Error closing Qdrant client: {e}")
+
+        try:
+            from app.ingestion.providers.influxdb_metrics import (
+                influxdb_metrics_provider,
+            )
+
+            if influxdb_metrics_provider._client is not None:
+                await influxdb_metrics_provider._client.close()
+                influxdb_metrics_provider._client = None
+                logger.debug("InfluxDB aiohttp client closed")
+        except Exception as e:
+            logger.debug(f"Error closing InfluxDB client: {e}")
+
+        # 11. Закрываем thread pool executors
         from app.core.executors import shutdown_executors
 
         await shutdown_executors()
 
-        # 9.5. Спринт 4: Shutdown OpenTelemetry tracing (flush spans)
+        # 12. Спринт 4: Shutdown OpenTelemetry tracing
         await tracing_manager.shutdown()
 
-        # 10. Даем время на закрытие всех соединений
+        # 13. Даем время на закрытие всех соединений
         await asyncio.sleep(0.5)
         logger.info("✅ Cortex stopped gracefully.")
+
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
 
@@ -613,7 +614,7 @@ if tracing_manager.enabled:
 # ============================================================================
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
-    """Middleware для сбора метрик API запросов."""
+    """Middleware для сбора метрик API запросов + X-Trace-Id header."""
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
@@ -627,11 +628,17 @@ async def metrics_middleware(request: Request, call_next):
     )
     cortex_metrics.api_request_duration.observe_sync(duration, method=method, path=path)
 
+    # Спринт 5 (2.2): Добавляем X-Trace-Id header
+    if tracing_manager.enabled:
+        trace_id = tracing_manager.get_trace_id()
+        if trace_id and trace_id != "-":
+            response.headers["X-Trace-Id"] = trace_id
+
     return response
 
 
 # ============================================================================
-# PYDANTIC MODELS для запросов
+# PYDANTIC MODELS
 # ============================================================================
 class TriggerRequest(BaseModel):
     trigger_name: str
@@ -659,7 +666,6 @@ async def health_check(request: Request):
     rag_stats = await rag_engine.get_stats()
     ws_stats = ws_broadcast_manager.get_stats()
     metrics_summary = cortex_metrics.get_summary()
-
     return {
         "status": "healthy",
         "version": "4.2.0",
@@ -796,6 +802,7 @@ async def websocket_endpoint(
                 except Exception:
                     pass
                 break
+
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -929,15 +936,11 @@ async def test_llm_generation(
 
 
 # ============================================================================
-# METRICS ENDPOINTS (ЭТАП 2: обновлены для поддержки UnifiedMetric)
+# METRICS ENDPOINTS
 # ============================================================================
 @app.get("/api/v1/metrics", tags=["Metrics"])
 async def get_metrics(request: Request):
-    """
-    Возвращает текущие метрики обсерватории.
-
-    ЭТАП 2: Добавлена поддержка unified формата через query параметр.
-    """
+    """Возвращает текущие метрики обсерватории."""
     metrics = observatory_state.current_metrics
     weather = observatory_state.weather
     astronomy = observatory_state.astronomy
@@ -977,31 +980,15 @@ async def get_metrics(request: Request):
 
 @app.get("/api/v1/metrics/unified", tags=["Metrics"])
 async def get_unified_metrics(request: Request):
-    """
-    ЭТАП 2 (НОВЫЙ): Возвращает все метрики в UnifiedMetric формате.
-
-    Каждая метрика содержит:
-    - name, value, timestamp
-    - source (influxdb, prometheus, websocket, file_watcher)
-    - priority (primary, unique, fallback, events, enrichment)
-    - unit, quality, labels
-    - age_seconds, is_stale
-    """
+    """Возвращает все метрики в UnifiedMetric формате."""
+    # ИСПРАВЛЕНО: Это sync метод, НЕ используем await
     return await observatory_state.get_unified_metrics()
 
 
 @app.get("/api/v1/metrics/sources-status", tags=["Metrics"])
 async def get_metrics_sources_status(request: Request):
-    """
-    ЭТАП 2 (НОВЫЙ): Возвращает статус всех источников данных.
-
-    Показывает:
-    - InfluxDB: PRIMARY источник, last_update, is_stale
-    - Prometheus: UNIQUE + FALLBACK, fallback_active если InfluxDB stale
-    - WebSocket: EVENTS источник
-    - File Watchers: ENRICHMENT источник
-    - Список уникальных Prometheus-метрик
-    """
+    """Возвращает статус всех источников данных."""
+    # ИСПРАВЛЕНО: Это sync метод, НЕ используем await
     return observatory_state.get_data_sources_status()
 
 
@@ -1013,7 +1000,6 @@ async def get_metrics_history(
 ):
     """Возвращает историю конкретной метрики."""
     history_list = getattr(observatory_state.history, metric, None)
-
     if history_list is None:
         raise HTTPException(
             status_code=404,
@@ -1054,7 +1040,7 @@ async def get_metrics_history(
 
 
 # ============================================================================
-# METRICS HISTORY ENDPOINTS (P2: долгосрочные тренды)
+# METRICS HISTORY ENDPOINTS (P2)
 # ============================================================================
 @app.get("/api/v1/metrics/trend", tags=["Metrics"])
 async def get_metric_trend(
@@ -1071,13 +1057,7 @@ async def get_metric_trend(
         description="Размер окна в минутах (для window='long')",
     ),
 ):
-    """
-    Возвращает тренд метрики.
-
-    P2: Гибридная история:
-    - window='short': in-memory тренд (последние 10 точек, ~5 минут)
-    - window='long': SQLite тренд (агрегация по минутам, до 24 часов)
-    """
+    """Возвращает тренд метрики."""
     if window == "short":
         # In-memory тренд (быстрый)
         trend_value = await observatory_state.get_trend(metric, window=10)
@@ -1145,11 +1125,7 @@ async def get_aggregated_metrics(
         description="Период в часах (0.1 — 24)",
     ),
 ):
-    """
-    Возвращает агрегированные данные метрики из SQLite.
-
-    Каждая запись — среднее значение за минуту с min/max/count.
-    """
+    """Возвращает агрегированные данные метрики из SQLite."""
     data = await metrics_history.get_aggregated(metric, hours=hours)
 
     return {
@@ -1171,9 +1147,7 @@ async def get_aggregated_metrics(
 
 @app.get("/api/v1/metrics/history/stats", tags=["Metrics"])
 async def get_metrics_history_stats(request: Request):
-    """
-    Возвращает статистику хранилища долгосрочных метрик.
-    """
+    """Возвращает статистику хранилища долгосрочных метрик."""
     return await metrics_history.get_stats()
 
 
@@ -1184,12 +1158,13 @@ async def get_metrics_history_stats(request: Request):
 async def fire_trigger(request: Request, body: TriggerRequest):
     """Ручной вызов триггера через API."""
     logger.info(f"API Request: Fire trigger '{body.trigger_name}'")
-    # НОВОЕ (К-2): source="api" — пользовательские триггеры разрешены в MANUAL
+
     success = await trigger_emulator.fire_trigger(
         body.trigger_name,
         body.reason,
-        source="api",  # ← API вызовы разрешены в MANUAL режиме
+        source="api",
     )
+
     if success:
         observatory_state.log_ai_action(
             "API",
@@ -1212,6 +1187,7 @@ async def fire_trigger(request: Request, body: TriggerRequest):
 async def set_variable(request: Request, body: VariableRequest):
     """Изменение глобальной переменной Sequencer+."""
     logger.info(f"API Request: Set variable '{body.name}' = {body.value}")
+
     success = await global_var_injector.set_variable(body.name, body.value, body.reason)
 
     if success:
@@ -1239,9 +1215,11 @@ async def set_variable(request: Request, body: VariableRequest):
 async def rag_search(request: Request, body: RAGSearchRequest):
     """Семантический поиск по базе знаний RAG."""
     logger.info(f"RAG Search: '{body.query}' (top_k={body.top_k})")
+
     results = await rag_engine.search(
         query=body.query, top_k=body.top_k, filters=body.filters
     )
+
     return {
         "query": body.query,
         "results_count": len(results),
@@ -1369,10 +1347,7 @@ async def get_disk_usage(request: Request):
 
 @app.get("/api/v1/storage/recommendations", tags=["Storage"])
 async def get_disk_recommendations(request: Request):
-    """
-    Генерирует рекомендации по управлению дисковым пространством.
-    ИСПРАВЛЕНО (v4.2): НЕ удаляет файлы, только рекомендует.
-    """
+    """Генерирует рекомендации по управлению дисковым пространством."""
     result = await disk_monitor.generate_recommendations("keep_last_30_days")
     return result.model_dump()
 
@@ -1382,10 +1357,7 @@ async def get_disk_recommendations_by_policy(
     request: Request,
     policy_name: str,
 ):
-    """
-    Генерирует рекомендации по конкретной политике.
-    ИСПРАВЛЕНО (v4.2): НЕ удаляет файлы, только рекомендует.
-    """
+    """Генерирует рекомендации по конкретной политике."""
     result = await disk_monitor.generate_recommendations(policy_name)
     return result.model_dump()
 
@@ -1410,6 +1382,7 @@ async def get_audit_decisions(
         limit=limit,
         offset=offset,
     )
+
     return {
         "records": [r.model_dump() for r in records],
         "count": len(records),
@@ -1426,6 +1399,7 @@ async def get_audit_stats(request: Request):
 async def get_audit_archives(request: Request):
     """Возвращает список архивов Decision Audit Trail."""
     archives = await decision_audit.get_archives()
+
     return {
         "archives": archives,
         "count": len(archives),
@@ -1477,6 +1451,7 @@ async def start_simulation(
     await mode_manager.set_mode(
         OperationMode.SIMULATION, reason="Simulation started via API"
     )
+
     return {
         "status": "success",
         "message": f"Simulation started: {target} ({frames} frames)",
@@ -1493,6 +1468,7 @@ async def stop_simulation(request: Request):
     await mode_manager.set_mode(
         OperationMode.FULL_AI, reason="Simulation stopped via API"
     )
+
     return {"status": "success", "message": "Simulation stopped"}
 
 
@@ -1519,6 +1495,7 @@ async def inject_anomaly(
         )
 
     await fake_nina.inject_anomaly(anomaly_type)
+
     return {
         "status": "success",
         "message": f"Anomaly '{anomaly_type}' injected",
@@ -1804,7 +1781,6 @@ async def cancel_langgraph_workflow(request: Request, workflow_id: str):
 async def get_langgraph_stats(request: Request):
     """Статистика LangGraph оркестратора."""
     active_ids = hybrid_orchestrator.list_active_workflows()
-
     status_counts: Dict[str, int] = {}
     type_counts: Dict[str, int] = {}
 
@@ -1886,6 +1862,7 @@ async def rag_updater_stats(request: Request):
 async def force_rag_update(request: Request):
     """Принудительное обновление RAG."""
     logger.info("API Request: Force RAG update")
+
     result = await rag_updater.force_update()
 
     await observatory_state.log_ai_action(
@@ -1981,6 +1958,7 @@ async def list_sessions(
         min_quality=min_quality,
         limit=limit,
     )
+
     return {
         "sessions": [s.model_dump() for s in sessions],
         "count": len(sessions),
@@ -1991,8 +1969,10 @@ async def list_sessions(
 async def get_session_details(request: Request, session_id: str):
     """Детальная информация о сессии."""
     stats = await sessions_metadata.get_session_stats(session_id)
+
     if "error" in stats:
         raise HTTPException(status_code=404, detail=stats["error"])
+
     return stats
 
 
@@ -2012,6 +1992,7 @@ async def get_session_frames(
         image_type=image_type,
         limit=limit,
     )
+
     return {
         "session_id": session_id,
         "frames": [f.model_dump() for f in frames],
@@ -2026,6 +2007,7 @@ async def get_session_frames(
 async def export_session(request: Request, session_id: str):
     """Экспорт кадров сессии в CSV."""
     output_path = Path(f"./data/exports/{session_id}_frames.csv")
+
     success = await sessions_metadata.export_session_csv(session_id, output_path)
 
     if not success:
@@ -2108,3 +2090,85 @@ async def get_shadow_html_report(request: Request):
 async def get_shadow_visualizer_stats(request: Request):
     """Статистика Shadow Visualizer."""
     return shadow_visualizer.get_stats()
+
+
+# ============================================================================
+# FRONTEND COMPATIBILITY ENDPOINTS
+# ============================================================================
+@app.get("/api/sequence", tags=["Frontend Compatibility"])
+async def get_sequence_compat(request: Request):
+    """Совместимость: возвращает состояние секвенсора."""
+    return state_tracker.get_state()
+
+
+@app.get("/api/sequence/tree", tags=["Frontend Compatibility"])
+async def get_sequence_tree_compat(request: Request):
+    """Совместимость: возвращает теневой граф секвенсора."""
+    if not state_tracker._shadow_graph:
+        raise HTTPException(status_code=404, detail="Sequence shadow graph not loaded")
+    return state_tracker._shadow_graph
+
+
+@app.get("/api/images", tags=["Frontend Compatibility"])
+async def get_images_compat(request: Request):
+    """Совместимость: возвращает информацию о последнем кадре."""
+    hfr_history = observatory_state.history.hfr
+    fwhm_history = observatory_state.history.fwhm
+
+    if not hfr_history:
+        return {"images": [], "count": 0}
+
+    recent_count = min(10, len(hfr_history))
+    images = []
+
+    for i in range(recent_count):
+        idx = len(hfr_history) - recent_count + i
+        images.append(
+            {
+                "index": idx + 1,
+                "hfr": hfr_history[idx] if idx < len(hfr_history) else None,
+                "fwhm": fwhm_history[idx] if idx < len(fwhm_history) else None,
+            }
+        )
+
+    return {"images": images, "count": len(images)}
+
+
+@app.get("/api/telemetry", tags=["Frontend Compatibility"])
+async def get_telemetry_compat(request: Request):
+    """Совместимость: возвращает текущие метрики."""
+    return {
+        "metrics": observatory_state.current_metrics,
+        "weather": observatory_state.weather,
+        "astronomy": observatory_state.astronomy,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/guider", tags=["Frontend Compatibility"])
+async def get_guider_compat(request: Request):
+    """Совместимость: возвращает состояние гидирования."""
+    return {
+        "is_guiding_active": observatory_state.is_guiding_active,
+        "rms_ra": observatory_state.current_metrics.get("rms_ra"),
+        "rms_dec": observatory_state.current_metrics.get("rms_dec"),
+        "rms_total": observatory_state.current_metrics.get("rms_total"),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/environment", tags=["Frontend Compatibility"])
+async def get_environment_compat(request: Request):
+    """Совместимость: возвращает погодные условия."""
+    return {
+        "weather": observatory_state.weather,
+        "astronomy": observatory_state.astronomy,
+        "safety_status": observatory_state.safety_status,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/tracing", tags=["Frontend Compatibility"])
+async def get_tracing_compat(request: Request):
+    """Совместимость: возвращает статистику tracing."""
+    return tracing_manager.get_stats()

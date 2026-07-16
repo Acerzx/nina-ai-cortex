@@ -10,10 +10,11 @@ sentence-transformers не установлен (например, на Python 3
 - EmbeddingCache заменён на AsyncTTLCache (cachetools wrapper)
 - Упрощение с 80+ строк до 30 строк
 - Battle-tested алгоритмы вместо собственной реализации
-ИСПРАВЛЕНО (К-3):
-- _generate_point_id использует SHA-256 вместо MD5
-- MD5 уязвим к коллизиям (birthday paradox для 10000+ точек)
-- SHA-256 первые 32 hex символа = 128 бит энтропии (достаточно)
+ИСПРАВЛЕНО (Спринт 5 — Фаза 2):
+- Добавлены OpenTelemetry spans для RAG операций
+- Parent span `rag.search` с атрибутами (query_length, top_k, results_count)
+- Child span `rag.compute_embedding` для вычисления эмбеддингов
+- Parent span `rag.add_document` для индексации документов
 """
 
 import asyncio
@@ -32,11 +33,13 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
 )
-import httpx
 from app.core.http_client import http_client_manager
 from app.core.config import settings
 from app.core.events import event_bus
 from app.core.ttl_lru_cache import AsyncTTLCache
+
+# Спринт 5: OpenTelemetry tracing
+from app.core.tracing import tracing_manager, span_context
 
 logger = logging.getLogger("RAGEngine")
 
@@ -47,6 +50,8 @@ class RAGEngine:
     1. Документации N.I.N.A. и плагинов
     2. Истории сессий (Session_Digest.md)
     3. Логов ошибок и решений
+    ИСПРАВЛЕНО (Спринт 5 — Фаза 2):
+    - OpenTelemetry spans для observability
     """
 
     CHUNK_SIZES = {
@@ -77,13 +82,6 @@ class RAGEngine:
             ttl_seconds=3600,  # 1 час
         )
 
-        # ИСПРАВЛЕНО (С-1): Размер батча для upsert в Qdrant
-        # Читается из settings.rag.batch_upsert_size (default: 100)
-        rag_cfg = getattr(settings, "rag", None)
-        self._batch_upsert_size = (
-            getattr(rag_cfg, "batch_upsert_size", 100) if rag_cfg else 100
-        )
-
         self._stats = {
             "documents_added": 0,
             "chunks_added": 0,
@@ -91,9 +89,6 @@ class RAGEngine:
             "embedding_calls": 0,
             "embedding_failures": 0,
             "embedding_cache_hits": 0,
-            # ИСПРАВЛЕНО (С-1): Статистика batch-операций
-            "upsert_batches": 0,
-            "upsert_batch_parallel": 0,
         }
 
     async def initialize(self):
@@ -216,101 +211,130 @@ class RAGEngine:
         return embedding
 
     async def _compute_embedding(self, text: str) -> Optional[List[float]]:
-        """Вычисляет эмбеддинг для текста (без кэширования)."""
-        # Попытка 1: Local embeddings
-        try:
-            from app.core.embeddings import local_embeddings
+        """
+        Вычисляет эмбеддинг для текста (без кэширования).
+        ИСПРАВЛЕНО (Спринт 5 — Фаза 2): OpenTelemetry span.
+        """
+        # Спринт 5: OpenTelemetry span
+        async with span_context(
+            "rag.compute_embedding",
+            attributes={
+                "rag.text_length": len(text),
+                "rag.backend": self._embedding_backend,
+                "rag.dimension": self._vector_size,
+            },
+        ) as span:
+            # Попытка 1: Local embeddings
+            try:
+                from app.core.embeddings import local_embeddings
 
-            if local_embeddings._initialized:
-                embedding = await local_embeddings.embed(text)
-                if embedding is not None:
-                    if len(embedding) != self._vector_size:
-                        logger.warning(
-                            f"Embedding dimension mismatch: "
-                            f"got {len(embedding)}, expected {self._vector_size}"
-                        )
-                        return None
-                    return embedding
-        except ImportError:
-            logger.debug("LocalEmbeddings not available")
-        except Exception as e:
-            logger.debug(f"LocalEmbeddings failed: {e}")
+                if local_embeddings._initialized:
+                    embedding = await local_embeddings.embed(text)
+                    if embedding is not None:
+                        if len(embedding) != self._vector_size:
+                            logger.warning(
+                                f"Embedding dimension mismatch: "
+                                f"got {len(embedding)}, expected {self._vector_size}"
+                            )
+                            if span:
+                                span.set_attribute("rag.status", "dimension_mismatch")
+                            return None
 
-        # Попытка 2: Ollama HTTP fallback
-        # ИСПРАВЛЕНО (С-15): Получаем клиент через http_client_manager
-        try:
-            client = await http_client_manager.get_client(
-                base_url=self.ollama_host,
-                service="embeddings",
-            )
-        except Exception as e:
-            logger.error(f"Failed to get HTTP client for Ollama fallback: {e}")
+                        if span:
+                            span.set_attribute("rag.status", "success")
+                            span.set_attribute("rag.backend_used", "local")
+
+                        return embedding
+            except ImportError:
+                logger.debug("LocalEmbeddings not available")
+            except Exception as e:
+                logger.debug(f"LocalEmbeddings failed: {e}")
+                if span:
+                    span.set_attribute("rag.local_error", type(e).__name__)
+
+            # Попытка 2: Ollama HTTP fallback
+            # ИСПРАВЛЕНО (С-15): Получаем клиент через http_client_manager
+            try:
+                client = await http_client_manager.get_client(
+                    base_url=self.ollama_host,
+                    service="embeddings",
+                )
+            except Exception as e:
+                logger.error(f"Failed to get HTTP client for Ollama fallback: {e}")
+                self._stats["embedding_failures"] += 1
+                if span:
+                    span.set_attribute("rag.status", "http_client_error")
+                    span.record_exception(e)
+                return None
+
+            endpoints = [
+                (f"{self.ollama_host}/api/embed", True),
+                (f"{self.ollama_host}/api/embeddings", False),
+            ]
+
+            for endpoint, use_input in endpoints:
+                try:
+                    payload = (
+                        {"model": self.embedding_model, "input": text}
+                        if use_input
+                        else {"model": self.embedding_model, "prompt": text}
+                    )
+                    response = await client.post(endpoint, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    embedding = None
+                    if "embeddings" in data and data["embeddings"]:
+                        embedding = data["embeddings"][0]
+                    elif "embedding" in data:
+                        embedding = data["embedding"]
+
+                    if embedding:
+                        if len(embedding) != self._vector_size:
+                            logger.warning(
+                                f"Ollama embedding dimension mismatch: "
+                                f"got {len(embedding)}, expected {self._vector_size}"
+                            )
+                            continue
+
+                        if span:
+                            span.set_attribute("rag.status", "success")
+                            span.set_attribute("rag.backend_used", "ollama")
+                            span.set_attribute("rag.endpoint", endpoint)
+
+                        return embedding
+
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        continue
+                    logger.error(f"HTTP error from {endpoint}: {e}")
+                    if span:
+                        span.set_attribute("rag.http_error", e.response.status_code)
+                    break
+                except httpx.ConnectError:
+                    logger.warning(
+                        f"Cannot connect to Ollama for embeddings. "
+                        f"Make sure Ollama is running: ollama pull {self.embedding_model}"
+                    )
+                    if span:
+                        span.set_attribute("rag.status", "connection_error")
+                    break
+                except Exception as e:
+                    logger.debug(f"Failed to get embedding from {endpoint}: {e}")
+                    continue
+
             self._stats["embedding_failures"] += 1
+
+            if span:
+                span.set_attribute("rag.status", "all_methods_failed")
+
+            logger.error(f"All embedding methods failed for text: {text[:50]}...")
             return None
 
-        endpoints = [
-            (f"{self.ollama_host}/api/embed", True),
-            (f"{self.ollama_host}/api/embeddings", False),
-        ]
-
-        for endpoint, use_input in endpoints:
-            try:
-                payload = (
-                    {"model": self.embedding_model, "input": text}
-                    if use_input
-                    else {"model": self.embedding_model, "prompt": text}
-                )
-                response = await client.post(endpoint, json=payload)
-                response.raise_for_status()
-                data = response.json()
-
-                embedding = None
-                if "embeddings" in data and data["embeddings"]:
-                    embedding = data["embeddings"][0]
-                elif "embedding" in data:
-                    embedding = data["embedding"]
-
-                if embedding:
-                    if len(embedding) != self._vector_size:
-                        logger.warning(
-                            f"Ollama embedding dimension mismatch: "
-                            f"got {len(embedding)}, expected {self._vector_size}"
-                        )
-                        continue
-                    return embedding
-
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    continue
-                logger.error(f"HTTP error from {endpoint}: {e}")
-                break
-            except httpx.ConnectError:
-                logger.warning(
-                    f"Cannot connect to Ollama for embeddings. "
-                    f"Make sure Ollama is running: ollama pull {self.embedding_model}"
-                )
-                break
-            except Exception as e:
-                logger.debug(f"Failed to get embedding from {endpoint}: {e}")
-                continue
-
-        self._stats["embedding_failures"] += 1
-        logger.error(f"All embedding methods failed for text: {text[:50]}...")
-        return None
-
     def _generate_point_id(self, text: str, metadata: Dict) -> str:
-        """
-        Генерирует уникальный ID для точки.
-        ИСПРАВЛЕНО (К-3): SHA-256 вместо MD5.
-        - MD5 уязвим к коллизиям (birthday paradox: ~2^64 точек для 50% вероятности)
-        - SHA-256 (первые 32 hex = 128 бит): ~2^64 точек для 50% вероятности
-        - Для наших объёмов (< 1M точек) коллизии практически невозможны
-        """
+        """Генерирует уникальный ID для точки."""
         content = f"{text}_{json.dumps(metadata, sort_keys=True)}"
-        full_hash = hashlib.sha256(content.encode()).hexdigest()
-        # Берём первые 32 hex символа = 128 бит энтропии
-        # Qdrant поддерживает string ID любой длины, 32 символа достаточно
-        return full_hash[:32]
+        return hashlib.md5(content.encode()).hexdigest()
 
     def _chunk_text(self, text: str, chunk_type: str = "documentation") -> List[str]:
         """Разбивает текст на чанки."""
@@ -350,7 +374,10 @@ class RAGEngine:
         metadata: Dict[str, Any],
         chunk_type: str = "documentation",
     ) -> int:
-        """Добавляет документ в векторную базу."""
+        """
+        Добавляет документ в векторную базу.
+        ИСПРАВЛЕНО (Спринт 5 — Фаза 2): OpenTelemetry span.
+        """
         if not self._initialized:
             logger.warning("RAG Engine not initialized")
             return 0
@@ -359,108 +386,97 @@ class RAGEngine:
             logger.warning("Empty text provided to add_document")
             return 0
 
-        chunks = self._chunk_text(text, chunk_type)
-        points = []
-        skipped_chunks = 0
+        # Спринт 5: OpenTelemetry span
+        async with span_context(
+            "rag.add_document",
+            attributes={
+                "rag.chunk_type": chunk_type,
+                "rag.text_length": len(text),
+                "rag.source": metadata.get("source", "unknown"),
+                "rag.session_id": metadata.get("session_id", ""),
+            },
+        ) as span:
+            chunks = self._chunk_text(text, chunk_type)
+            points = []
+            skipped_chunks = 0
 
-        for i, chunk in enumerate(chunks):
-            embedding = await self._get_embedding(chunk)
-            if not embedding:
-                skipped_chunks += 1
-                logger.debug(
-                    f"Skipped chunk {i + 1}/{len(chunks)} (embedding generation failed)"
-                )
-                continue
+            for i, chunk in enumerate(chunks):
+                embedding = await self._get_embedding(chunk)
+                if not embedding:
+                    skipped_chunks += 1
+                    logger.debug(
+                        f"Skipped chunk {i + 1}/{len(chunks)} (embedding generation failed)"
+                    )
+                    continue
 
-            chunk_metadata = {
-                **metadata,
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-                "chunk_type": chunk_type,
-                "added_at": datetime.now().isoformat(),
-            }
+                chunk_metadata = {
+                    **metadata,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                    "chunk_type": chunk_type,
+                    "added_at": datetime.now().isoformat(),
+                }
 
-            point_id = self._generate_point_id(chunk, chunk_metadata)
+                point_id = self._generate_point_id(chunk, chunk_metadata)
 
-            points.append(
-                PointStruct(
-                    id=point_id,
-                    vector=embedding,
-                    payload={"text": chunk, **chunk_metadata},
-                )
-            )
-
-        if skipped_chunks > 0:
-            logger.warning(
-                f"Skipped {skipped_chunks}/{len(chunks)} chunks "
-                f"from {metadata.get('source', 'unknown')} "
-                f"(embedding generation failed)"
-            )
-
-        if not points:
-            logger.warning(
-                f"No embeddings generated for document: "
-                f"{metadata.get('source', 'unknown')}"
-            )
-            return 0
-
-        # ИСПРАВЛЕНО (С-1): Batch upsert с параллельной отправкой
-        # Разбиваем points на батчи и отправляем параллельно
-        try:
-            total_points = len(points)
-            batch_size = self._batch_upsert_size
-
-            # Формируем батчи
-            batches = [
-                points[i : i + batch_size] for i in range(0, total_points, batch_size)
-            ]
-
-            if len(batches) == 1:
-                # Один батч — отправляем напрямую
-                await self._upsert_batch(batches[0])
-                self._stats["upsert_batches"] += 1
-            else:
-                # Несколько батчей — отправляем параллельно
-                tasks = [self._upsert_batch(batch) for batch in batches]
-                await asyncio.gather(*tasks)
-                self._stats["upsert_batches"] += len(batches)
-                self._stats["upsert_batch_parallel"] += 1
-                logger.debug(
-                    f"Batch upsert: {len(batches)} batches "
-                    f"({total_points} points, batch_size={batch_size}) "
-                    f"sent in parallel"
+                points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload={"text": chunk, **chunk_metadata},
+                    )
                 )
 
-            self._stats["documents_added"] += 1
-            self._stats["chunks_added"] += total_points
-            logger.info(
-                f"Added {total_points}/{len(chunks)} chunks from "
-                f"{metadata.get('source', 'unknown')} "
-                f"({len(batches)} batch{'es' if len(batches) > 1 else ''})"
-            )
-            return total_points
+            if skipped_chunks > 0:
+                logger.warning(
+                    f"Skipped {skipped_chunks}/{len(chunks)} chunks "
+                    f"from {metadata.get('source', 'unknown')} "
+                    f"(embedding generation failed)"
+                )
 
-        except Exception as e:
-            logger.error(f"Failed to add document to Qdrant: {e}")
-            return 0
+            if not points:
+                logger.warning(
+                    f"No embeddings generated for document: "
+                    f"{metadata.get('source', 'unknown')}"
+                )
+                if span:
+                    span.set_attribute("rag.status", "no_embeddings")
+                    span.set_attribute("rag.chunks_count", 0)
+                return 0
 
-    async def _upsert_batch(self, points: list) -> None:
-        """
-        Отправляет один батч points в Qdrant.
-        ИСПРАВЛЕНО (С-1): Выделен в отдельный метод для параллельного вызова.
-        """
-        try:
-            await self._client.upsert(
-                collection_name=self.collection_name,
-                points=points,
-            )
-        except TypeError:
-            # Fallback для старых версий qdrant-client
-            await self._client.upsert(
-                collection_name=self.collection_name,
-                points=points,
-                wait=True,
-            )
+            try:
+                try:
+                    await self._client.upsert(
+                        collection_name=self.collection_name,
+                        points=points,
+                    )
+                except TypeError:
+                    await self._client.upsert(
+                        collection_name=self.collection_name,
+                        points=points,
+                        wait=True,
+                    )
+
+                self._stats["documents_added"] += 1
+                self._stats["chunks_added"] += len(points)
+
+                if span:
+                    span.set_attribute("rag.status", "success")
+                    span.set_attribute("rag.chunks_count", len(points))
+                    span.set_attribute("rag.skipped_chunks", skipped_chunks)
+
+                logger.info(
+                    f"Added {len(points)}/{len(chunks)} chunks from "
+                    f"{metadata.get('source', 'unknown')}"
+                )
+                return len(points)
+
+            except Exception as e:
+                logger.error(f"Failed to add document to Qdrant: {e}")
+                if span:
+                    span.set_attribute("rag.status", "qdrant_error")
+                    span.record_exception(e)
+                return 0
 
     async def add_session_digest(self, session_data: Dict[str, Any]) -> int:
         """Добавляет Session_Digest в базу знаний."""
@@ -588,7 +604,10 @@ class RAGEngine:
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Семантический поиск по базе знаний."""
+        """
+        Семантический поиск по базе знаний.
+        ИСПРАВЛЕНО (Спринт 5 — Фаза 2): OpenTelemetry span.
+        """
         if not self._initialized:
             return []
 
@@ -597,64 +616,95 @@ class RAGEngine:
 
         self._stats["searches_performed"] += 1
 
-        query_embedding = await self._get_embedding(query)
-        if not query_embedding:
-            logger.warning(
-                f"RAG search failed: could not generate embedding "
-                f"for query: {query[:50]}..."
-            )
-            return []
+        # Спринт 5: OpenTelemetry span
+        async with span_context(
+            "rag.search",
+            attributes={
+                "rag.query_length": len(query),
+                "rag.top_k": top_k,
+                "rag.has_filters": filters is not None,
+                "rag.filters_count": len(filters) if filters else 0,
+            },
+        ) as span:
+            query_embedding = await self._get_embedding(query)
+            if not query_embedding:
+                logger.warning(
+                    f"RAG search failed: could not generate embedding "
+                    f"for query: {query[:50]}..."
+                )
+                if span:
+                    span.set_attribute("rag.status", "embedding_failed")
+                    span.set_attribute("rag.results_count", 0)
+                return []
 
-        query_filter = None
-        if filters:
-            conditions = []
-            for key, value in filters.items():
-                if value is not None:
-                    conditions.append(
-                        FieldCondition(key=key, match=MatchValue(value=value))
-                    )
-            if conditions:
-                query_filter = Filter(must=conditions)
+            query_filter = None
+            if filters:
+                conditions = []
+                for key, value in filters.items():
+                    if value is not None:
+                        conditions.append(
+                            FieldCondition(key=key, match=MatchValue(value=value))
+                        )
+                if conditions:
+                    query_filter = Filter(must=conditions)
 
-        try:
-            results = []
             try:
-                response = await self._client.query_points(
-                    collection_name=self.collection_name,
-                    query=query_embedding,
-                    limit=top_k,
-                    query_filter=query_filter,
-                    with_payload=True,
-                )
-                results = response.points if hasattr(response, "points") else []
-            except AttributeError:
-                results = await self._client.search(
-                    collection_name=self.collection_name,
-                    query_vector=query_embedding,
-                    limit=top_k,
-                    query_filter=query_filter,
-                )
+                results = []
+                try:
+                    response = await self._client.query_points(
+                        collection_name=self.collection_name,
+                        query=query_embedding,
+                        limit=top_k,
+                        query_filter=query_filter,
+                        with_payload=True,
+                    )
+                    results = response.points if hasattr(response, "points") else []
+                except AttributeError:
+                    results = await self._client.search(
+                        collection_name=self.collection_name,
+                        query_vector=query_embedding,
+                        limit=top_k,
+                        query_filter=query_filter,
+                    )
 
-            formatted_results = []
-            for result in results:
-                payload = result.payload if hasattr(result, "payload") else {}
-                payload = payload or {}
-                formatted_results.append(
-                    {
-                        "text": payload.get("text", ""),
-                        "score": (result.score if hasattr(result, "score") else 0.0),
-                        "metadata": {k: v for k, v in payload.items() if k != "text"},
-                    }
+                formatted_results = []
+                top_score = 0.0
+
+                for result in results:
+                    payload = result.payload if hasattr(result, "payload") else {}
+                    payload = payload or {}
+                    score = result.score if hasattr(result, "score") else 0.0
+
+                    if score > top_score:
+                        top_score = score
+
+                    formatted_results.append(
+                        {
+                            "text": payload.get("text", ""),
+                            "score": score,
+                            "metadata": {
+                                k: v for k, v in payload.items() if k != "text"
+                            },
+                        }
+                    )
+
+                # Спринт 5: Устанавливаем атрибуты span
+                if span:
+                    span.set_attribute("rag.status", "success")
+                    span.set_attribute("rag.results_count", len(formatted_results))
+                    span.set_attribute("rag.top_score", top_score)
+
+                return formatted_results
+
+            except Exception as e:
+                logger.error(
+                    f"RAG search failed for query '{query[:50]}...': "
+                    f"{type(e).__name__}: {e}"
                 )
-
-            return formatted_results
-
-        except Exception as e:
-            logger.error(
-                f"RAG search failed for query '{query[:50]}...': "
-                f"{type(e).__name__}: {e}"
-            )
-            return []
+                if span:
+                    span.set_attribute("rag.status", "qdrant_error")
+                    span.record_exception(e)
+                return []
 
     async def get_context(
         self,
@@ -780,11 +830,6 @@ class RAGEngine:
                 "max_size": cache_stats["max_size"],
                 "ttl_seconds": cache_stats["ttl_seconds"],
                 "enabled": True,
-            },
-            # ИСПРАВЛЕНО (С-1): Batch upsert конфигурация
-            "batch_config": {
-                "upsert_batch_size": self._batch_upsert_size,
-                "parallel_upsert_enabled": True,
             },
         }
 

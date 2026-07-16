@@ -12,8 +12,8 @@ Hybrid LangGraph Orchestrator
 ИСПРАВЛЕНО (С-5): Внедрение существующих агентов через конструктор
 ИСПРАВЛЕНО (С-14): Retry-логика с exponential backoff
 ИСПРАВЛЕНО (Н-2): Удалён неиспользуемый импорт Literal
-ИСПРАВЛЕНО (Спринт 4 — Задача 2):
-- Интеграция LangGraph решений в единый Decision Audit Trail
+ИСПРАВЛЕНО (Спринт 5 — Задача 2):
+- Интеграция LangGraph решений в Decision Audit Trail через orchestrator
 - Каждый узел логирует AgentDecision через orchestrator.route_decision()
 - OpenTelemetry spans для каждого узла и всего workflow
 - Trace context передаётся через HybridWorkflowState
@@ -32,9 +32,10 @@ from app.agents.base_agent import AgentDecision, BaseAgent
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.storage.decision_audit import decision_audit, DecisionRecord
-from app.shadow_engine.state_tracker import state_tracker  # ← ДОБАВЛЕНО (v4.1)
+from app.shadow_engine.state_tracker import state_tracker
+from app.core.mode_manager import mode_manager, OperationMode
 
-# Спринт 4: OpenTelemetry tracing
+# Спринт 5: OpenTelemetry tracing
 from app.core.tracing import tracing_manager, span_context
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ class HybridWorkflowState(TypedDict):
     retry_count: int
     max_retries: int
     errors: List[str]
-    # Спринт 4: OpenTelemetry trace context
+    # Спринт 5: OpenTelemetry trace context
     trace_context: Dict[str, Any]
 
 
@@ -94,7 +95,7 @@ class HybridLangGraphOrchestrator:
     ИСПРАВЛЕНО (С-5): Принимает существующих агентов через конструктор
     вместо создания новых экземпляров в каждом workflow.
 
-    ИСПРАВЛЕНО (Спринт 4): Интеграция с Decision Audit Trail через
+    ИСПРАВЛЕНО (Спринт 5): Интеграция с Decision Audit Trail через
     orchestrator.route_decision() и OpenTelemetry tracing.
     """
 
@@ -110,7 +111,7 @@ class HybridLangGraphOrchestrator:
         self.graph = self._build_graph()
         self.active_workflows: Dict[str, HybridWorkflowState] = {}
 
-        # Спринт 4: Статистика tracing
+        # Спринт 5: Статистика tracing
         self._tracing_stats = {
             "spans_created": 0,
             "decisions_logged": 0,
@@ -213,7 +214,7 @@ class HybridLangGraphOrchestrator:
             )
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение через orchestrator
+            # Спринт 5: Логируем решение через orchestrator
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -335,7 +336,7 @@ class HybridLangGraphOrchestrator:
 
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение Diagnostician через orchestrator
+            # Спринт 5: Логируем решение Diagnostician через orchestrator
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -436,7 +437,7 @@ class HybridLangGraphOrchestrator:
 
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение Auditor через orchestrator
+            # Спринт 5: Логируем решение Auditor через orchestrator
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -502,7 +503,7 @@ class HybridLangGraphOrchestrator:
 
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение
+            # Спринт 5: Логируем решение
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -553,7 +554,7 @@ class HybridLangGraphOrchestrator:
             state["recommendations"] = recommendations
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение
+            # Спринт 5: Логируем решение
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -587,6 +588,26 @@ class HybridLangGraphOrchestrator:
         ) as span:
             logger.info(f"⚡ Executing actions for {workflow_id}")
 
+            # Спринт 5: Проверка режима работы перед выполнением
+            current_mode = mode_manager.current_mode
+
+            if current_mode == OperationMode.MANUAL:
+                logger.warning(
+                    f"🛑 BLOCKED: Workflow {workflow_id} actions blocked — "
+                    f"system in MANUAL mode"
+                )
+                state["errors"].append(f"Actions blocked: system in MANUAL mode")
+                state["executed_actions"] = []
+                state["updated_at"] = datetime.now().isoformat()
+
+                self._tracing_stats["decisions_blocked_by_mode"] += 1
+
+                if span:
+                    span.set_attribute("blocked_by", "MANUAL_MODE")
+                    span.set_attribute("actions.executed_count", 0)
+
+                return state
+
             executed = []
             for recommendation in state.get("recommendations", []):
                 action_record = {
@@ -604,7 +625,7 @@ class HybridLangGraphOrchestrator:
             state["executed_actions"] = executed
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение
+            # Спринт 5: Логируем решение
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -617,6 +638,7 @@ class HybridLangGraphOrchestrator:
 
             if span:
                 span.set_attribute("actions.executed_count", len(executed))
+                span.set_attribute("current_mode", current_mode.value)
 
             self._tracing_stats["spans_created"] += 1
             return state
@@ -646,7 +668,7 @@ class HybridLangGraphOrchestrator:
             state["monitoring_metrics"].append(metric)
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение
+            # Спринт 5: Логируем решение
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -685,7 +707,7 @@ class HybridLangGraphOrchestrator:
             state["retry_count"] += 1
             state["updated_at"] = datetime.now().isoformat()
 
-            # Спринт 4: Логируем решение
+            # Спринт 5: Логируем решение
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -712,7 +734,7 @@ class HybridLangGraphOrchestrator:
         """
         Финализация workflow с OpenTelemetry span.
 
-        ИСПРАВЛЕНО (Спринт 4):
+        ИСПРАВЛЕНО (Спринт 5):
         - Использует orchestrator.route_decision() вместо прямой записи
         - Создаёт финальный OpenTelemetry span
         - Проверяет режимы работы
@@ -740,7 +762,7 @@ class HybridLangGraphOrchestrator:
 
             state["updated_at"] = datetime.now().isoformat()
 
-            # ИСПРАВЛЕНО (Спринт 4): Формируем outputs_dict гарантированно как dict
+            # ИСПРАВЛЕНО (Спринт 5): Формируем outputs_dict гарантированно как dict
             outputs_dict = {
                 "workflow_id": state["workflow_id"],
                 "recommendations": state.get("recommendations", []),
@@ -763,7 +785,7 @@ class HybridLangGraphOrchestrator:
                 outputs_dict["current_conditions"] = state.get("current_conditions", {})
                 outputs_dict["adaptation_actions"] = state.get("adaptation_actions", [])
 
-            # Спринт 4: Логируем финальное решение через orchestrator
+            # Спринт 5: Логируем финальное решение через orchestrator
             await self._log_node_decision(
                 state=state,
                 node_name=node_name,
@@ -968,7 +990,7 @@ class HybridLangGraphOrchestrator:
         """
         workflow_id = f"workflow_{workflow_type.value}_{datetime.now().timestamp()}"
 
-        # Спринт 4: Создаём trace context для передачи между узлами
+        # Спринт 5: Создаём trace context для передачи между узлами
         trace_context = {
             "workflow_id": workflow_id,
             "workflow_type": workflow_type.value,
@@ -999,7 +1021,7 @@ class HybridLangGraphOrchestrator:
             "retry_count": 0,
             "max_retries": max_retries,
             "errors": [],
-            # Спринт 4: trace context
+            # Спринт 5: trace context
             "trace_context": trace_context,
         }
 
@@ -1007,7 +1029,7 @@ class HybridLangGraphOrchestrator:
 
         logger.info(f"🚀 Starting workflow {workflow_id} (type: {workflow_type.value})")
 
-        # Спринт 4: Создаём parent span для всего workflow
+        # Спринт 5: Создаём parent span для всего workflow
         async with span_context(
             name=f"langgraph.workflow.{workflow_type.value}",
             attributes={

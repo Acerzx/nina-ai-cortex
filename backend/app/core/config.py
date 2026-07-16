@@ -699,21 +699,6 @@ class ExtendedHALConfig(BaseModel):
     )
 
 
-class LangGraphTracingConfig(BaseModel):
-    """Конфигурация tracing для LangGraph workflows (Спринт 4)."""
-
-    # Включить OpenTelemetry spans для каждого узла
-    node_spans_enabled: bool = True
-    # Включить логирование решений через orchestrator
-    decision_logging_enabled: bool = True
-    # Префикс для имён spans
-    span_prefix: str = "langgraph"
-    # Включать ли контекст observatory_state в атрибуты span
-    include_observatory_state: bool = False
-    # Максимальная длина rationale в логах
-    max_rationale_length: int = 200
-
-
 class TracingConfig(BaseModel):
     """Конфигурация OpenTelemetry distributed tracing."""
 
@@ -726,6 +711,16 @@ class TracingConfig(BaseModel):
     console_export: bool = False  # Дублировать spans в консоль
     instrument_fastapi: bool = True
     instrument_httpx: bool = True
+
+
+class LangGraphTracingConfig(BaseModel):
+    """Конфигурация tracing для LangGraph workflows (Спринт 4 Задача 2)."""
+
+    node_spans_enabled: bool = True
+    decision_logging_enabled: bool = True
+    span_prefix: str = "langgraph"
+    include_observatory_state: bool = False
+    max_rationale_length: int = 200
 
 
 # ============================================================================

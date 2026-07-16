@@ -201,33 +201,63 @@ class HAL:
         """
         Валидация инжекта триггера через N.I.N.A. Advanced API.
         Возвращает: (is_safe: bool, reason: str)
+
+        ИСПРАВЛЕНО (Спринт 5 — 1.5):
+        - Атрибуты HAL записываются в текущий active span (trigger.fire.*)
         """
+        # Получаем текущий active span (создан trigger_emulator)
+        span = None
+        if tracing_manager.enabled:
+            try:
+                from opentelemetry import trace
+
+                span = trace.get_current_span()
+            except Exception:
+                pass
+
+        if span:
+            span.set_attribute("hal.enabled", settings.hal.enabled)
+            span.set_attribute("hal.safety_status", self._safety_status)
+            span.set_attribute("hal.critical_phase", self._critical_phase)
+            span.set_attribute("hal.camera_busy", self._camera_busy)
+            span.set_attribute(
+                "hal.current_critical_item",
+                self._current_critical_item or "none",
+            )
+
         if not settings.hal.enabled:
             return True, "HAL disabled"
 
         if self._safety_status == "UNSAFE":
+            if span:
+                span.set_attribute("hal.blocked_by", "safety_unsafe")
             return False, "Safety Monitor is UNSAFE"
 
-        # Во время критической фазы разрешены только триггеры прерывания
-        # (например, InterruptWhenRMSAbove от PHD2Tools)
         if self._critical_phase:
             safe_during_critical = {
                 "InterruptWhenRMSAbove",
                 "RestartWhenSaturated",
             }
             if trigger_name not in safe_during_critical:
+                if span:
+                    span.set_attribute("hal.blocked_by", "critical_phase")
                 return (
                     False,
                     f"Critical phase in progress: {self._current_critical_item}",
                 )
 
-        # Проверка занятости камеры
         if self._camera_busy and trigger_name not in ["InterruptWhenRMSAbove"]:
+            if span:
+                span.set_attribute("hal.blocked_by", "camera_busy")
             return False, "Camera is busy (exposure in progress)"
 
-        # Проверка приближения к Shutdown
         if state_tracker.state.is_approaching_shutdown:
+            if span:
+                span.set_attribute("hal.blocked_by", "approaching_shutdown")
             return False, "Approaching shutdown"
+
+        if span:
+            span.set_attribute("hal.result", "OK")
 
         return True, "OK"
 
