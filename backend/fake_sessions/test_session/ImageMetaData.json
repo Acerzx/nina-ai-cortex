@@ -3131,6 +3131,30 @@
       "fwhm": 3.0938785781712523,
       "stars": 142,
       "rms_total": 1.1764351533625408
+    },
+    {
+      "Index": 1,
+      "ExposureTime": 60.0,
+      "Filter": "Ha",
+      "Gain": 85,
+      "Offset": 10,
+      "Temperature": -14.812906296961865,
+      "HFR": 2.494477976783614,
+      "FWHM": 3.139452251776498,
+      "Stars": 149,
+      "RmsTotal": 1.2190286501789287,
+      "ImageType": "LIGHT",
+      "Date": "2026-07-16",
+      "Time": "10:15:58",
+      "index": 1,
+      "exposure_time": 60.0,
+      "filter": "Ha",
+      "gain": 85,
+      "temperature": -14.812906296961865,
+      "hfr": 2.494477976783614,
+      "fwhm": 3.139452251776498,
+      "stars": 149,
+      "rms_total": 1.2190286501789287
     }
   ]
 }
