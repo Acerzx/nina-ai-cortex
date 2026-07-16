@@ -219,6 +219,9 @@ metrics:
   # НОВОЕ (К-8): Параметры EventBus
   event_queue_maxsize: 10000 # Максимальный размер очереди событий
   event_stop_timeout_seconds: 5.0 # Таймаут graceful stop (секунды)
+  # НОВОЕ (P2): Долгосрочная история (SQLite)
+  history_retention_hours: 24 # Хранить агрегаты за 24 часа
+  history_cleanup_interval_seconds: 3600 # Очистка каждый час
 
 # 16. OPENAPI
 openapi:
@@ -315,6 +318,9 @@ rag:
     session: 500
     error_log: 300
   embedding_cache_max_size: 10000
+  # ИСПРАВЛЕНО (С-1): Размер батча для upsert в Qdrant
+  # Большие документы разбиваются на батчи и отправляются параллельно
+  batch_upsert_size: 100
 
 # ============================================================================
 # RAG UPDATER CONFIGURATION

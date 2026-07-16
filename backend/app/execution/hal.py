@@ -87,8 +87,14 @@ class HAL:
             self._current_altitude = data["mount_altitude"]
 
     async def _on_log(self, data: dict):
-        """Обработка событий из логов N.I.N.A."""
+        """
+        Обработка событий из логов N.I.N.A.
+        ИСПРАВЛЕНО (В-3): Сброс _critical_phase при детекции ошибки.
+        Раньше, если критическая инструкция падала без SEQUENCE_ITEM_COMPLETED,
+        флаг оставался True навсегда, блокируя все последующие триггеры.
+        """
         msg = data.get("message", "")
+
         if "Safety Monitor" in msg and "UNSAFE" in msg:
             self._safety_status = "UNSAFE"
             logger.warning("🚨 HAL: Safety Monitor -> UNSAFE")
@@ -100,6 +106,21 @@ class HAL:
             self._camera_busy = True
         elif "Exposure completed" in msg or "Exposure failed" in msg:
             self._camera_busy = False
+
+        # ИСПРАВЛЕНО (В-3): Сброс critical phase при ошибке
+        # Если во время критической фазы произошла ошибка,
+        # инструкция не завершится нормально и SEQUENCE_ITEM_COMPLETED
+        # может не прийти. Сбрасываем флаг для предотвращения блокировки.
+        msg_lower = msg.lower()
+        if self._critical_phase and (
+            "error" in msg_lower or "failed" in msg_lower or "exception" in msg_lower
+        ):
+            logger.warning(
+                f"⚠️ HAL: Critical phase reset due to error in log: "
+                f"{msg[:100]}... (previous instruction: {self._current_critical_item})"
+            )
+            self._critical_phase = False
+            self._current_critical_item = ""
 
     async def _on_sequence_item_started(self, data: dict):
         """

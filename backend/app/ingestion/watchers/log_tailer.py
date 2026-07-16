@@ -134,9 +134,22 @@ class LogTailer:
                     await asyncio.sleep(2.0)
                     continue
 
+
             # Проверяем, изменился ли файл
             try:
                 current_size = self._active_log.stat().st_size
+                
+                # ИСПРАВЛЕНО (В-5): Детекция truncation (log rotation)
+                # N.I.N.A. может ротировать логи: truncate файл и начать писать заново.
+                # Если current_size < _file_position, значит файл был усечён.
+                if current_size < self._file_position:
+                    logger.info(
+                        f"🔄 Log rotation detected: {self._active_log.name} "
+                        f"truncated ({self._file_position} → {current_size} bytes). "
+                        f"Resetting read position to 0."
+                    )
+                    self._file_position = 0
+                
                 if current_size == self._file_position:
                     # Файл не изменился — пропускаем
                     continue

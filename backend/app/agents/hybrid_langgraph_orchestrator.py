@@ -168,7 +168,7 @@ class HybridLangGraphOrchestrator:
     ) -> HybridWorkflowState:
         logger.info(f"🔍 Analyzing context for workflow {state['workflow_id']}")
 
-        current_state = observatory_state.get_full_state()
+        current_state = await observatory_state.get_full_state()
         state["context"].update(
             {
                 "observatory_state": current_state,

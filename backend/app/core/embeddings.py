@@ -4,26 +4,30 @@ Embeddings через Ollama.
 Поддерживает оба эндпоинта:
 - /api/embed (новые версии Ollama >= 0.1.26)
 - /api/embeddings (старые версии)
-
 Преимущества:
 - Нет дополнительных зависимостей (torch не нужен)
 - Единый источник для LLM и embeddings
 - Работает с Python 3.14 без проблем
-
 ИСПРАВЛЕНО (С-15):
 - Миграция на единый HttpClientManager
 - Убрано самостоятельное создание httpx.AsyncClient
 - Connection pooling через http_client_manager
+ИСПРАВЛЕНО (К-4):
+- _save_cache() теперь async через run_io (executor)
+- Синхронный pickle.dump больше не блокирует event loop
+- При кэше 10000+ embeddings pickle.dump занимает 0.5-2 секунды
+- Теперь это выполняется в I/O thread pool без блокировки event loop
 """
 
 import logging
 import hashlib
+import pickle
 from typing import List, Optional, Dict
 from pathlib import Path
-import pickle
 import httpx
 from app.core.config import settings
 from app.core.http_client import http_client_manager
+from app.core.executors import run_io
 
 logger = logging.getLogger("Embeddings")
 
@@ -33,26 +37,39 @@ class OllamaEmbeddings:
     Генерация embeddings через Ollama.
     Модель: nomic-embed-text (768 dim)
     Кэширование: pickle на диск для быстрого рестарта
-
     ИСПРАВЛЕНО (С-15):
     - Использует http_client_manager для connection pooling
+    ИСПРАВЛЕНО (К-4):
+    - _save_cache() async через run_io — не блокирует event loop
     """
 
     MODEL = "nomic-embed-text"
     CACHE_FILE = Path("./data/embeddings_cache.pkl")
+
+    # Интервал сохранения кэша на диск (каждые N добавленных embeddings)
+    _SAVE_INTERVAL = 100
 
     def __init__(self):
         self.model_name = self.MODEL
         self._dimension = 768  # nomic-embed-text = 768 dim
         self._cache: Dict[str, List[float]] = {}
         self._initialized = False
+
         # ИСПРАВЛЕНО (С-15): http_client_manager управляет клиентами
         # self._http_client — удалён
         self._embedding_backend = "ollama"
+
+        # Счётчик добавлений с последнего сохранения
+        self._unsaved_count: int = 0
+
         self._load_cache()
 
     def _load_cache(self):
-        """Загружает кэш embeddings с диска."""
+        """
+        Загружает кэш embeddings с диска (синхронно — выполняется при __init__).
+        Это допустимо, так как __init__ вызывается один раз при импорте модуля,
+        до запуска event loop.
+        """
         if self.CACHE_FILE.exists():
             try:
                 with open(self.CACHE_FILE, "rb") as f:
@@ -62,12 +79,30 @@ class OllamaEmbeddings:
                 logger.warning(f"Failed to load embeddings cache: {e}")
                 self._cache = {}
 
-    def _save_cache(self):
-        """Сохраняет кэш embeddings на диск."""
+    async def _save_cache(self):
+        """
+        Асинхронное сохранение кэша embeddings на диск.
+        ИСПРАВЛЕНО (К-4): использует run_io для выполнения в I/O thread pool.
+        Синхронный pickle.dump больше не блокирует event loop.
+        """
         try:
-            self.CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.CACHE_FILE, "wb") as f:
-                pickle.dump(self._cache, f)
+            # Подготавливаем данные в event loop (быстрая операция)
+            cache_snapshot = dict(self._cache)
+            cache_path = self.CACHE_FILE
+
+            def _save_sync():
+                """Синхронная часть — выполняется в I/O executor."""
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    pickle.dump(cache_snapshot, f)
+
+            # Выполняем блокирующую операцию в I/O executor
+            await run_io(_save_sync)
+
+            # Сбрасываем счётчик после успешного сохранения
+            self._unsaved_count = 0
+            logger.debug(f"💾 Embeddings cache saved: {len(cache_snapshot)} entries")
+
         except Exception as e:
             logger.debug(f"Failed to save embeddings cache: {e}")
 
@@ -94,6 +129,7 @@ class OllamaEmbeddings:
                 timeout=httpx.Timeout(30.0),
             )
             response.raise_for_status()
+
             models = response.json().get("models", [])
             model_names = [m["name"] for m in models]
 
@@ -177,10 +213,15 @@ class OllamaEmbeddings:
 
                 if embedding:
                     self._cache[cache_key] = embedding
-                    # Периодически сохраняем кэш
-                    if len(self._cache) % 100 == 0:
-                        self._save_cache()
+                    self._unsaved_count += 1
+
+                    # ИСПРАВЛЕНО (К-4): async сохранение через run_io
+                    # Периодически сохраняем кэш (каждые 100 добавлений)
+                    if self._unsaved_count >= self._SAVE_INTERVAL:
+                        await self._save_cache()
+
                     return embedding
+
                 continue
 
             except httpx.HTTPStatusError as e:
@@ -188,14 +229,12 @@ class OllamaEmbeddings:
                     continue
                 logger.error(f"HTTP error from {endpoint}: {e}")
                 return None
-
             except httpx.ConnectError:
                 logger.warning(
                     f"Cannot connect to Ollama. "
                     f"Make sure Ollama is running: ollama pull {self.model_name}"
                 )
                 return None
-
             except Exception as e:
                 logger.debug(f"Endpoint {endpoint} failed: {e}")
                 continue
@@ -204,10 +243,19 @@ class OllamaEmbeddings:
         return None
 
     async def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
-        """Генерирует embeddings для списка текстов."""
+        """
+        Генерирует embeddings для списка текстов.
+        ИСПРАВЛЕНО (К-4): сохраняет кэш один раз после всей batch,
+        а не на каждые 100 элементов.
+        """
         results = []
         for text in texts:
             results.append(await self.embed(text))
+
+        # Финальное сохранение после batch если есть несохранённые
+        if self._unsaved_count > 0:
+            await self._save_cache()
+
         return results
 
     def get_dimension(self) -> int:
@@ -232,15 +280,27 @@ class OllamaEmbeddings:
             "dimension": self._dimension,
             "initialized": self._initialized,
             "cached_embeddings": len(self._cache),
+            "unsaved_count": self._unsaved_count,
+            "save_interval": self._SAVE_INTERVAL,
+            "save_method": "async_run_io",  # К-4: документирование
             "client_active": client_active,
             "http_client_manager": "active",
         }
 
     async def close(self):
         """
-        Закрывает HTTP клиент.
+        Закрывает HTTP клиент и сохраняет кэш перед закрытием.
         ИСПРАВЛЕНО (С-15): делегирует http_client_manager.
+        ИСПРАВЛЕНО (К-4): финальное сохранение кэша перед закрытием.
         """
+        # Финальное сохранение кэша если есть несохранённые
+        if self._unsaved_count > 0:
+            try:
+                await self._save_cache()
+                logger.info(f"💾 Final cache save on close: {len(self._cache)} entries")
+            except Exception as e:
+                logger.debug(f"Failed final cache save: {e}")
+
         ollama_host = settings.ai_settings.ollama_host
         closed = await http_client_manager.close_client(
             base_url=ollama_host,

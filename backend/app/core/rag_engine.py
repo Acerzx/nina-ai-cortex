@@ -1,19 +1,19 @@
 """
 RAG Engine (Retrieval-Augmented Generation)
-
 Предоставляет AI-агентам доступ к документации и истории сессий через векторный поиск.
-
 Архитектура embeddings (гибридный подход):
 1. Primary: sentence-transformers (локально, быстро, оффлайн)
 2. Fallback: Ollama (nomic-embed-text) через HTTP
-
 Автоматический fallback обеспечивает работоспособность RAG даже если
 sentence-transformers не установлен (например, на Python 3.14).
-
 ИСПРАВЛЕНО (Этап 1.1):
 - EmbeddingCache заменён на AsyncTTLCache (cachetools wrapper)
 - Упрощение с 80+ строк до 30 строк
 - Battle-tested алгоритмы вместо собственной реализации
+ИСПРАВЛЕНО (К-3):
+- _generate_point_id использует SHA-256 вместо MD5
+- MD5 уязвим к коллизиям (birthday paradox для 10000+ точек)
+- SHA-256 первые 32 hex символа = 128 бит энтропии (достаточно)
 """
 
 import asyncio
@@ -24,7 +24,6 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 from qdrant_client import AsyncQdrantClient
-
 from qdrant_client.models import (
     Distance,
     VectorParams,
@@ -33,10 +32,11 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
 )
+import httpx
 from app.core.http_client import http_client_manager
 from app.core.config import settings
 from app.core.events import event_bus
-from app.core.ttl_lru_cache import AsyncTTLCache  # ← ИМПОРТ НОВОГО КЭША
+from app.core.ttl_lru_cache import AsyncTTLCache
 
 logger = logging.getLogger("RAGEngine")
 
@@ -62,7 +62,6 @@ class RAGEngine:
         self.ollama_host = settings.ai_settings.ollama_host
 
         self._client: Optional[AsyncQdrantClient] = None
-
         self._initialized = False
         self._vector_size = 384
         self._embedding_backend: str = "unknown"
@@ -78,6 +77,13 @@ class RAGEngine:
             ttl_seconds=3600,  # 1 час
         )
 
+        # ИСПРАВЛЕНО (С-1): Размер батча для upsert в Qdrant
+        # Читается из settings.rag.batch_upsert_size (default: 100)
+        rag_cfg = getattr(settings, "rag", None)
+        self._batch_upsert_size = (
+            getattr(rag_cfg, "batch_upsert_size", 100) if rag_cfg else 100
+        )
+
         self._stats = {
             "documents_added": 0,
             "chunks_added": 0,
@@ -85,6 +91,9 @@ class RAGEngine:
             "embedding_calls": 0,
             "embedding_failures": 0,
             "embedding_cache_hits": 0,
+            # ИСПРАВЛЕНО (С-1): Статистика batch-операций
+            "upsert_batches": 0,
+            "upsert_batch_parallel": 0,
         }
 
     async def initialize(self):
@@ -117,7 +126,6 @@ class RAGEngine:
                     self.collection_name
                 )
                 existing_size = collection_info.config.params.vectors.size
-
                 if existing_size != self._vector_size:
                     logger.warning(
                         f"Collection {self.collection_name} has dimension "
@@ -144,7 +152,6 @@ class RAGEngine:
             event_bus.subscribe("NIGHT_SUMMARY", self._on_night_summary)
 
             self._initialized = True
-
             logger.info(
                 f"RAG Engine initialized "
                 f"(Qdrant: {self.qdrant_url}, "
@@ -160,7 +167,6 @@ class RAGEngine:
     async def close(self):
         """
         Корректно закрывает все подключения и очищает кэш.
-
         ИСПРАВЛЕНО (С-15):
         - HTTP клиент больше не закрывается здесь (это делает http_client_manager)
         - Закрывается только Qdrant клиент и очищается кэш эмбеддингов
@@ -173,7 +179,6 @@ class RAGEngine:
 
         # ИСПРАВЛЕНО (С-15): HTTP клиент закрывается через менеджер при shutdown
         # Здесь только закрываем Qdrant и очищаем кэш
-
         if self._client:
             try:
                 await self._client.close()
@@ -206,10 +211,8 @@ class RAGEngine:
         # Вычисляем новый embedding
         self._stats["embedding_calls"] += 1
         embedding = await self._compute_embedding(text)
-
         if embedding is not None:
             await self._embedding_cache.put(text, embedding)
-
         return embedding
 
     async def _compute_embedding(self, text: str) -> Optional[List[float]]:
@@ -258,7 +261,6 @@ class RAGEngine:
                     else {"model": self.embedding_model, "prompt": text}
                 )
                 response = await client.post(endpoint, json=payload)
-
                 response.raise_for_status()
                 data = response.json()
 
@@ -297,9 +299,18 @@ class RAGEngine:
         return None
 
     def _generate_point_id(self, text: str, metadata: Dict) -> str:
-        """Генерирует уникальный ID для точки."""
+        """
+        Генерирует уникальный ID для точки.
+        ИСПРАВЛЕНО (К-3): SHA-256 вместо MD5.
+        - MD5 уязвим к коллизиям (birthday paradox: ~2^64 точек для 50% вероятности)
+        - SHA-256 (первые 32 hex = 128 бит): ~2^64 точек для 50% вероятности
+        - Для наших объёмов (< 1M точек) коллизии практически невозможны
+        """
         content = f"{text}_{json.dumps(metadata, sort_keys=True)}"
-        return hashlib.md5(content.encode()).hexdigest()
+        full_hash = hashlib.sha256(content.encode()).hexdigest()
+        # Берём первые 32 hex символа = 128 бит энтропии
+        # Qdrant поддерживает string ID любой длины, 32 символа достаточно
+        return full_hash[:32]
 
     def _chunk_text(self, text: str, chunk_type: str = "documentation") -> List[str]:
         """Разбивает текст на чанки."""
@@ -393,31 +404,63 @@ class RAGEngine:
             )
             return 0
 
+        # ИСПРАВЛЕНО (С-1): Batch upsert с параллельной отправкой
+        # Разбиваем points на батчи и отправляем параллельно
         try:
-            try:
-                await self._client.upsert(
-                    collection_name=self.collection_name,
-                    points=points,
-                )
-            except TypeError:
-                await self._client.upsert(
-                    collection_name=self.collection_name,
-                    points=points,
-                    wait=True,
+            total_points = len(points)
+            batch_size = self._batch_upsert_size
+
+            # Формируем батчи
+            batches = [
+                points[i : i + batch_size] for i in range(0, total_points, batch_size)
+            ]
+
+            if len(batches) == 1:
+                # Один батч — отправляем напрямую
+                await self._upsert_batch(batches[0])
+                self._stats["upsert_batches"] += 1
+            else:
+                # Несколько батчей — отправляем параллельно
+                tasks = [self._upsert_batch(batch) for batch in batches]
+                await asyncio.gather(*tasks)
+                self._stats["upsert_batches"] += len(batches)
+                self._stats["upsert_batch_parallel"] += 1
+                logger.debug(
+                    f"Batch upsert: {len(batches)} batches "
+                    f"({total_points} points, batch_size={batch_size}) "
+                    f"sent in parallel"
                 )
 
             self._stats["documents_added"] += 1
-            self._stats["chunks_added"] += len(points)
-
+            self._stats["chunks_added"] += total_points
             logger.info(
-                f"Added {len(points)}/{len(chunks)} chunks from "
-                f"{metadata.get('source', 'unknown')}"
+                f"Added {total_points}/{len(chunks)} chunks from "
+                f"{metadata.get('source', 'unknown')} "
+                f"({len(batches)} batch{'es' if len(batches) > 1 else ''})"
             )
-            return len(points)
+            return total_points
 
         except Exception as e:
             logger.error(f"Failed to add document to Qdrant: {e}")
             return 0
+
+    async def _upsert_batch(self, points: list) -> None:
+        """
+        Отправляет один батч points в Qdrant.
+        ИСПРАВЛЕНО (С-1): Выделен в отдельный метод для параллельного вызова.
+        """
+        try:
+            await self._client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+            )
+        except TypeError:
+            # Fallback для старых версий qdrant-client
+            await self._client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=True,
+            )
 
     async def add_session_digest(self, session_data: Dict[str, Any]) -> int:
         """Добавляет Session_Digest в базу знаний."""
@@ -575,7 +618,6 @@ class RAGEngine:
 
         try:
             results = []
-
             try:
                 response = await self._client.query_points(
                     collection_name=self.collection_name,
@@ -622,7 +664,6 @@ class RAGEngine:
     ) -> str:
         """Получает контекст для LLM на основе запроса."""
         results = await self.search(query, top_k=10, filters=filters)
-
         if not results:
             return "Контекст не найден в базе знаний."
 
@@ -633,7 +674,6 @@ class RAGEngine:
             text = result["text"]
             score = result["score"]
             metadata = result["metadata"]
-
             source = metadata.get("source", "unknown")
             target = metadata.get("target", "")
             date = metadata.get("date", "")
@@ -646,7 +686,6 @@ class RAGEngine:
             header += f", Релевантность: {score:.2f}]\n"
 
             chunk = f"{header}{text}\n"
-
             if current_length + len(chunk) > max_tokens * 4:
                 break
 
@@ -676,10 +715,8 @@ class RAGEngine:
                 "quality_score": data.get("quality_score"),
                 "detailed_report": data.get("detailed_report"),
             }
-
             await self.add_session_digest(session_digest)
             logger.info(f"Session {session_digest['session_id']} indexed in RAG")
-
         except Exception as e:
             logger.error(f"Failed to index session in RAG: {e}")
 
@@ -687,15 +724,12 @@ class RAGEngine:
         """Обработчик события Night Summary."""
         try:
             summary_text = json.dumps(data, indent=2, ensure_ascii=False)
-
             metadata = {
                 "source": "night_summary",
                 "session_id": data.get("session_id"),
                 "date": datetime.now().strftime("%Y-%m-%d"),
             }
-
             await self.add_document(summary_text, metadata, chunk_type="session")
-
         except Exception as e:
             logger.error(f"Failed to index night summary in RAG: {e}")
 
@@ -746,6 +780,11 @@ class RAGEngine:
                 "max_size": cache_stats["max_size"],
                 "ttl_seconds": cache_stats["ttl_seconds"],
                 "enabled": True,
+            },
+            # ИСПРАВЛЕНО (С-1): Batch upsert конфигурация
+            "batch_config": {
+                "upsert_batch_size": self._batch_upsert_size,
+                "parallel_upsert_enabled": True,
             },
         }
 

@@ -1,20 +1,22 @@
 """
 Base Agent — базовый класс для всех AI-агентов в Multi-Agent Swarm.
 Обеспечивает единый интерфейс, логирование решений и интеграцию с ObservatoryState.
-
 ИСПРАВЛЕНО (рефакторинг v3):
 - Удалён get_recent_decisions() — дублирует функциональность Orchestrator
 - get_stats() упрощён (без recent_decisions)
 - Template Method pattern сохранён
+ИСПРАВЛЕНО (В-2):
+- log_decision() сохраняет ссылки на фоновые задачи в _background_tasks
+- Предотвращает RuntimeWarning "Task was destroyed but it is pending"
+- Добавлен метод wait_for_background_tasks() для graceful shutdown
 """
 
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from datetime import datetime
 from pydantic import BaseModel, Field
-
 from app.agents.observatory_state import observatory_state
 from app.core.rag_engine import rag_engine
 
@@ -58,6 +60,10 @@ class BaseAgent(ABC):
     - Агенты используют RAG для получения контекста из истории
     - Приоритет: Safety > Quality > Optimization
     - История решений хранится в Orchestrator (единый источник правды)
+
+    ИСПРАВЛЕНО (В-2):
+    - Фоновые задачи сохраняются в _background_tasks
+    - Предотвращает потерю задач из-за garbage collection
     """
 
     def __init__(self, name: str, role: str):
@@ -67,19 +73,73 @@ class BaseAgent(ABC):
         self._last_action_time: Optional[datetime] = None
         self._is_running = False
 
+        # ИСПРАВЛЕНО (В-2): Хранение ссылок на фоновые задачи
+        # Предотвращает RuntimeWarning "Task was destroyed but it is pending"
+        # в Python 3.12+ при высокой нагрузке
+        self._background_tasks: Set[asyncio.Task] = set()
+
     async def initialize(self):
         """Инициализация агента (подписка на события, загрузка контекста)."""
         self._is_running = True
         logger.info(f"🤖 Agent '{self.name}' ({self.role}) initialized")
 
     async def shutdown(self):
-        """Корректное завершение работы агента."""
+        """
+        Корректное завершение работы агента.
+        ИСПРАВЛЕНО (В-2): Ожидает завершения всех фоновых задач.
+        """
         self._is_running = False
+
+        # Ждём завершения всех фоновых задач
+        await self.wait_for_background_tasks()
+
         logger.info(f"🛑 Agent '{self.name}' shutdown")
+
+    async def wait_for_background_tasks(self, timeout: float = 5.0) -> None:
+        """
+        Ожидает завершения всех фоновых задач с таймаутом.
+        ИСПРАВЛЕНО (В-2): Гарантирует, что все log_ai_action вызовы завершатся.
+
+        Args:
+            timeout: Максимальное время ожидания (секунды)
+        """
+        if not self._background_tasks:
+            return
+
+        pending = [t for t in self._background_tasks if not t.done()]
+        if not pending:
+            return
+
+        logger.debug(
+            f"⏳ Waiting for {len(pending)} background tasks "
+            f"of agent '{self.name}' (timeout: {timeout}s)..."
+        )
+
+        try:
+            done, still_pending = await asyncio.wait(pending, timeout=timeout)
+
+            # Отменяем задачи, которые не успели завершиться
+            for task in still_pending:
+                task.cancel()
+                logger.warning(
+                    f"⚠️ Background task of '{self.name}' cancelled (timeout exceeded)"
+                )
+
+            # Собираем результаты отменённых задач
+            if still_pending:
+                await asyncio.gather(*still_pending, return_exceptions=True)
+
+            logger.debug(
+                f"✅ Background tasks of '{self.name}' completed: "
+                f"{len(done)} done, {len(still_pending)} cancelled"
+            )
+        except Exception as e:
+            logger.error(f"❌ Error waiting for background tasks of '{self.name}': {e}")
 
     # ========================================================================
     # TEMPLATE METHOD: analyze()
     # ========================================================================
+
     async def analyze(self, context: AgentContext) -> Optional[AgentDecision]:
         """
         TEMPLATE METHOD: Анализирует контекст и принимает решение.
@@ -105,6 +165,7 @@ class BaseAgent(ABC):
     # ========================================================================
     # TEMPLATE METHOD: execute()
     # ========================================================================
+
     async def execute(self, decision: AgentDecision) -> bool:
         """
         TEMPLATE METHOD: Выполняет принятое решение.
@@ -128,11 +189,13 @@ class BaseAgent(ABC):
             success = False
 
         await self._post_process(decision, success)
+
         return success
 
     # ========================================================================
     # HOOKS для analyze()
     # ========================================================================
+
     async def _validate_context(self, context: AgentContext) -> bool:
         """HOOK: Валидация контекста. По умолчанию True."""
         return True
@@ -153,6 +216,7 @@ class BaseAgent(ABC):
     # ========================================================================
     # HOOKS для execute()
     # ========================================================================
+
     async def _validate_decision(self, decision: AgentDecision) -> bool:
         """HOOK: Валидация решения. По умолчанию True."""
         return True
@@ -173,6 +237,7 @@ class BaseAgent(ABC):
     # ========================================================================
     # ОБЩИЕ МЕТОДЫ
     # ========================================================================
+
     async def get_rag_context(self, query: str, max_tokens: int = 2000) -> str:
         """Получает контекст из RAG для принятия решения."""
         try:
@@ -185,8 +250,13 @@ class BaseAgent(ABC):
     def log_decision(self, decision: AgentDecision):
         """
         Логирует решение в Decision Audit Trail.
+
         ИСПРАВЛЕНО (v4.2): observatory_state.log_ai_action() — async метод,
-        вызываем через asyncio.create_task() для fire-and-forget.
+        вызывается через asyncio.create_task() для fire-and-forget.
+
+        ИСПРАВЛЕНО (В-2): Ссылки на задачи сохраняются в _background_tasks.
+        Раньше задачи могли быть уничтожены сборщиком мусора до выполнения,
+        что приводило к RuntimeWarning в Python 3.12+ и потере логов.
         """
         self._decision_log.append(decision)
         if len(self._decision_log) > 1000:
@@ -196,7 +266,7 @@ class BaseAgent(ABC):
         # Вызываем через create_task для fire-and-forget
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(
+            task = loop.create_task(
                 observatory_state.log_ai_action(
                     agent=self.name,
                     action=decision.decision_type,
@@ -204,6 +274,13 @@ class BaseAgent(ABC):
                     result=f"Confidence: {decision.confidence:.2f}",
                 )
             )
+
+            # ИСПРАВЛЕНО (В-2): Сохраняем ссылку на задачу
+            self._background_tasks.add(task)
+
+            # Автоматически удаляем задачу из set после завершения
+            task.add_done_callback(self._remove_background_task)
+
         except RuntimeError:
             # Нет запущенного event loop — пропускаем логирование
             pass
@@ -212,6 +289,19 @@ class BaseAgent(ABC):
             f"📝 [{self.name}] Decision: {decision.decision_type} "
             f"(confidence: {decision.confidence:.2f}) - {decision.rationale[:100]}"
         )
+
+    def _remove_background_task(self, task: asyncio.Task) -> None:
+        """
+        Удаляет задачу из _background_tasks после завершения.
+        ИСПРАВЛЕНО (В-2): Вызывается через add_done_callback.
+        """
+        self._background_tasks.discard(task)
+
+        # Логируем исключения, если они были
+        if not task.cancelled() and task.exception():
+            logger.warning(
+                f"⚠️ Background task of '{self.name}' failed: {task.exception()}"
+            )
 
     async def update_outcome(self, decision: AgentDecision, outcome: str):
         """
@@ -244,7 +334,11 @@ class BaseAgent(ABC):
         Для получения истории решений:
         - orchestrator.get_recent_decisions() — in-memory cache
         - /api/v1/audit/decisions — SQLite persistence
+
+        ИСПРАВЛЕНО (В-2): Добавлена статистика по фоновым задачам.
         """
+        active_tasks = len([t for t in self._background_tasks if not t.done()])
+
         return {
             "name": self.name,
             "role": self.role,
@@ -253,4 +347,8 @@ class BaseAgent(ABC):
             "last_action": (
                 self._last_action_time.isoformat() if self._last_action_time else None
             ),
+            "background_tasks": {
+                "total": len(self._background_tasks),
+                "active": active_tasks,
+            },
         }

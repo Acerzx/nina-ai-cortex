@@ -1,9 +1,9 @@
 """
 Diagnostician Agent — диагностирует причины проблем (не просто "HFR растет", а "почему").
 Анализирует корреляции между метриками, ищет похожие кейсы в RAG, предлагает решения.
-
 ИСПРАВЛЕНО (audit 3.1): добавлен import asyncio для корректной работы
 с asyncio.TimeoutError в методе _determine_root_cause.
+ИСПРАВЛЕНО (R1): Добавлен таймаут 30 секунд для LLM запросов через asyncio.wait_for.
 """
 
 import asyncio  # ← ДОБАВЛЕНО для asyncio.TimeoutError
@@ -16,6 +16,7 @@ from app.agents.base_agent import BaseAgent, AgentDecision, AgentContext
 from app.agents.observatory_state import observatory_state
 from app.core.events import event_bus
 from app.core.rag_engine import rag_engine
+from app.core.config import settings
 
 logger = logging.getLogger("DiagnosticianAgent")
 
@@ -62,21 +63,40 @@ class DiagnosticianAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(name="Diagnostician", role="Root Cause Analysis")
-        # Пороговые значения для корреляций
-        self.correlation_thresholds = {
-            "strong": 0.7,  # |r| > 0.7 = сильная корреляция
-            "moderate": 0.5,  # |r| > 0.5 = умеренная корреляция
-            "weak": 0.3,  # |r| > 0.3 = слабая корреляция
-        }
-        # Минимальный размер выборки для статистической значимости
-        self.min_sample_size = 10
+
+        # Пороговые значения для корреляций (из settings)
+        diag_cfg = getattr(settings.thresholds, "diagnostician", None)
+        if diag_cfg:
+            self.correlation_thresholds = {
+                "strong": getattr(diag_cfg, "correlation_strong", 0.7),
+                "moderate": getattr(diag_cfg, "correlation_moderate", 0.5),
+                "weak": getattr(diag_cfg, "correlation_weak", 0.3),
+            }
+            self.min_sample_size = getattr(diag_cfg, "min_sample_size", 10)
+        else:
+            self.correlation_thresholds = {
+                "strong": 0.7,
+                "moderate": 0.5,
+                "weak": 0.3,
+            }
+            self.min_sample_size = 10
+
+        # ИСПРАВЛЕНО (R1): Таймаут для LLM запросов (секунды)
+        self._llm_timeout_seconds = getattr(
+            settings.ai_settings, "llm_request_timeout_seconds", 30.0
+        )
 
     async def initialize(self):
         """Инициализация агента диагностики."""
         await super().initialize()
+
         # Подписываемся на алерты от Watcher
         event_bus.subscribe("ALERT", self._on_alert)
+
         logger.info("✅ Diagnostician Agent initialized")
+        logger.info(f"   Correlation thresholds: {self.correlation_thresholds}")
+        logger.info(f"   Min sample size: {self.min_sample_size}")
+        logger.info(f"   LLM timeout: {self._llm_timeout_seconds}s")
 
     async def shutdown(self):
         """Корректное завершение работы агента."""
@@ -86,6 +106,7 @@ class DiagnosticianAgent(BaseAgent):
     async def _on_alert(self, data: Dict[str, Any]) -> None:
         """Обработка алерта от Watcher."""
         level = data.get("level", "INFO")
+
         # Анализируем только WARNING и CRITICAL алерты
         if level in ("WARNING", "CRITICAL"):
             await self.analyze(
@@ -136,6 +157,7 @@ class DiagnosticianAgent(BaseAgent):
 
         # Определяем проблемную метрику из контекста
         problem_metric = context.get("metric", "")
+
         if not problem_metric:
             # Если метрика не указана, анализируем все пары
             metrics_to_analyze = [
@@ -165,12 +187,14 @@ class DiagnosticianAgent(BaseAgent):
             for metric2 in all_metrics:
                 if metric1 == metric2:
                     continue
+
                 correlation = await self._calculate_correlation(metric1, metric2)
                 if correlation:
                     correlations.append(correlation)
 
         # Сортируем по силе корреляции
         correlations.sort(key=lambda c: abs(c.correlation_coefficient), reverse=True)
+
         return correlations
 
     async def _calculate_correlation(
@@ -180,6 +204,7 @@ class DiagnosticianAgent(BaseAgent):
         # Получаем историю метрик
         history1 = getattr(observatory_state.history, metric1, None)
         history2 = getattr(observatory_state.history, metric2, None)
+
         if not history1 or not history2:
             return None
 
@@ -250,6 +275,7 @@ class DiagnosticianAgent(BaseAgent):
                         "metadata": result["metadata"],
                     }
                 )
+
             return similar_cases
         except Exception as e:
             logger.error(f"Failed to search similar cases: {e}")
@@ -263,6 +289,7 @@ class DiagnosticianAgent(BaseAgent):
     ) -> Tuple[str, float, List[str]]:
         """
         Определяет root cause с помощью LLM (gemma4:31b-cloud → gemma4:e4b).
+        ИСПРАВЛЕНО (R1): Добавлен таймаут через asyncio.wait_for.
         """
         from app.agents.llm_provider import llm_provider
 
@@ -279,6 +306,7 @@ class DiagnosticianAgent(BaseAgent):
 
         if strong_correlations:
             top_correlation = strong_correlations[0]
+
             if "temperature" in [top_correlation.metric1, top_correlation.metric2]:
                 root_cause = "Температурный дрейф фокуса"
                 confidence = 0.85
@@ -301,7 +329,7 @@ class DiagnosticianAgent(BaseAgent):
                     f"(r={top_correlation.correlation_coefficient:.2f})"
                 )
 
-        # === 2. LLM АНАЛИЗ (gemma4:31b-cloud → gemma4:e4b) ===
+        # === 2. LLM АНАЛИЗ С ТАЙМАУТОМ (R1) ===
         try:
             context_parts = []
             if similar_cases:
@@ -318,6 +346,7 @@ class DiagnosticianAgent(BaseAgent):
                         for c in strong_correlations
                     )
                 )
+
             context = "\n".join(context_parts)
 
             prompt = f"""Проблема: {problem}
@@ -333,18 +362,23 @@ class DiagnosticianAgent(BaseAgent):
 УВЕРЕННОСТЬ: [число от 0 до 100]
 РЕШЕНИЕ: [одно конкретное действие]"""
 
-            response = await llm_provider.generate(
-                prompt=prompt,
-                system_prompt=(
-                    "Ты — агент диагностики проблем обсерватории. "
-                    "Отвечай кратко и по делу на русском языке."
+            # ИСПРАВЛЕНО (R1): Таймаут через asyncio.wait_for
+            response = await asyncio.wait_for(
+                llm_provider.generate(
+                    prompt=prompt,
+                    system_prompt=(
+                        "Ты — агент диагностики проблем обсерватории. "
+                        "Отвечай кратко и по делу на русском языке."
+                    ),
+                    max_tokens=400,
+                    temperature=0.2,
                 ),
-                max_tokens=400,
-                temperature=0.2,
+                timeout=self._llm_timeout_seconds,
             )
 
             if response and response.content:
                 content = response.content
+
                 if "КОРНЕВАЯ ПРИЧИНА:" in content:
                     llm_root_cause = (
                         content.split("КОРНЕВАЯ ПРИЧИНА:")[1].split("\n")[0].strip()
@@ -356,6 +390,7 @@ class DiagnosticianAgent(BaseAgent):
                         f"{'FALLBACK' if response.from_fallback else 'PRIMARY'})"
                     )
                     confidence = min(0.95, confidence + 0.15)
+
                     logger.info(
                         f"🤖 LLM root cause: {root_cause} "
                         f"(model: {response.model}, "
@@ -363,9 +398,14 @@ class DiagnosticianAgent(BaseAgent):
                     )
 
         except asyncio.TimeoutError:
-            # ← Теперь asyncio корректно импортирован (audit 3.1)
-            logger.warning("⚠️ LLM timeout, using heuristic root cause")
-            evidence.append("LLM timeout — использована эвристика")
+            # ← ИСПРАВЛЕНО (R1): Теперь корректно обрабатывается таймаут
+            logger.warning(
+                f"⚠️ LLM timeout ({self._llm_timeout_seconds}s), "
+                f"using heuristic root cause"
+            )
+            evidence.append(
+                f"LLM timeout ({self._llm_timeout_seconds}s) — использована эвристика"
+            )
         except Exception as e:
             logger.error(f"❌ LLM error: {e}")
             evidence.append(f"LLM error: {type(e).__name__}")
@@ -468,6 +508,7 @@ class DiagnosticianAgent(BaseAgent):
                 rationale=f"Root cause identified: {analysis.root_cause}",
                 confidence=analysis.confidence,
             )
+
         return None
 
     async def _perform_action(self, decision: AgentDecision) -> bool:
@@ -488,7 +529,10 @@ class DiagnosticianAgent(BaseAgent):
                     "timestamp": datetime.now().isoformat(),
                 },
             )
+
             logger.info(f"🔍 Diagnostic recommendation: {root_cause}")
             logger.info(f"   Recommended actions: {recommended_actions}")
+
             return True
+
         return False

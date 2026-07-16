@@ -1,13 +1,11 @@
 """
 Metrics Aggregator (бывший ObservatoryState) — единое состояние обсерватории.
-
 ЭТАП 2.2 (полный рефакторинг):
 - Агрегирует данные из ВСЕХ источников в единый формат
 - 5 layers приоритетов вместо dual source
 - UnifiedMetric для каждой метрики
 - Автоматический fallback при недоступности InfluxDB
 - Thread-safe через asyncio.Lock (4 locks)
-
 Архитектура приоритетов (Этап 2):
 ┌──────────────────────────────────────────────────────────────┐
 │  Layer 1: PRIMARY (InfluxDB)                                  │
@@ -34,19 +32,21 @@ Metrics Aggregator (бывший ObservatoryState) — единое состоя
 │  → LiveStack (SNR, acceptance rate)                           │
 │  → Dither Statistics (CD, GFM, Voronoi)                       │
 └──────────────────────────────────────────────────────────────┘
-
 ИСПРАВЛЕНО (рефакторинг v3):
 - MAX_POINTS вынесен в settings.metrics.history_max_points
 - active_alerts max вынесен в settings.metrics.active_alerts_max
 - ai_action_log max вынесен в settings.metrics.ai_action_log_max
 - Удалены неиспользуемые методы
-
 ИСПРАВЛЕНО (v4.0 — проблемы #9, #27):
 - Добавлены asyncio.Lock для thread-safe обновления:
-  * _metrics_lock — current_metrics
-  * _history_lock — history (тренды)
-  * _alerts_lock — active_alerts
-  * _ai_action_lock — ai_action_log
+* _metrics_lock — current_metrics
+* _history_lock — history (тренды)
+* _alerts_lock — active_alerts
+* _ai_action_lock — ai_action_log
+ИСПРАВЛЕНО (К-1):
+- get_full_state() теперь async метод с lock'ами
+- get_unified_metrics() теперь async метод с _metrics_lock
+- Устранена race condition при чтении state из нескольких потоков
 """
 
 import logging
@@ -95,13 +95,11 @@ class AIAction(BaseModel):
 class MetricsAggregator:
     """
     Metrics Aggregator — единое состояние обсерватории.
-
     ЭТАП 2.2 (рефакторинг):
     - 5 layers приоритетов источников
     - UnifiedMetric для каждой метрики
     - Thread-safe через 4 asyncio.Lock
     - Автоматический fallback при недоступности InfluxDB
-
     Обратная совместимость:
     - Алиас observatory_state сохранён
     - Все существующие методы работают как раньше
@@ -230,7 +228,6 @@ class MetricsAggregator:
         event_bus.subscribe("LIVESTACK_STATUS", self._on_livestack_status)
 
         self._subscribed = True
-
         logger.info(
             f"🧠 MetricsAggregator initialized "
             f"(primary: influxdb, fallback: prometheus, "
@@ -245,7 +242,6 @@ class MetricsAggregator:
     def _is_influxdb_stale(self) -> bool:
         """
         Проверяет, устарел ли InfluxDB (не было обновлений > threshold).
-
         Используется для активации FALLBACK режима Prometheus.
         """
         if not self._influxdb_last_update:
@@ -267,7 +263,6 @@ class MetricsAggregator:
     async def _on_influxdb_update(self, data: Dict[str, Any]):
         """
         Layer 1: InfluxDB update — PRIMARY источник.
-
         InfluxDB всегда имеет наивысший приоритет для time-series метрик.
         Обновляет current_metrics, history и unified_metrics.
         """
@@ -283,12 +278,15 @@ class MetricsAggregator:
                     MetricSource.INFLUXDB,
                     SourcePriority.PRIMARY,
                 )
+
             if "camera_cooler_power" in data:
                 self.current_metrics["camera_cooler_power"] = data[
                     "camera_cooler_power"
                 ]
+
             if "focuser_position" in data:
                 self.current_metrics["focuser_position"] = data["focuser_position"]
+
             if "focuser_temp" in data:
                 self.current_metrics["focuser_temp"] = data["focuser_temp"]
 
@@ -301,6 +299,7 @@ class MetricsAggregator:
                     MetricSource.INFLUXDB,
                     SourcePriority.PRIMARY,
                 )
+
             if "guider_rms_dec" in data and data["guider_rms_dec"] is not None:
                 self.current_metrics["rms_dec"] = data["guider_rms_dec"]
                 await self._update_unified(
@@ -309,14 +308,17 @@ class MetricsAggregator:
                     MetricSource.INFLUXDB,
                     SourcePriority.PRIMARY,
                 )
+
             if "guider_rms_total" in data:
                 self.current_metrics["rms_total"] = data["guider_rms_total"]
+
             if data.get("guider_guiding") is not None:
                 self.is_guiding_active = data["guider_guiding"]
 
             # === Mount metrics ===
             if "mount_altitude" in data:
                 self.current_metrics["mount_altitude"] = data["mount_altitude"]
+
             if "mount_azimuth" in data:
                 self.current_metrics["mount_azimuth"] = data["mount_azimuth"]
 
@@ -326,7 +328,6 @@ class MetricsAggregator:
 
             # === Filter ===
             # ИСПРАВЛЕНО (С-7): явная проверка is not None
-            # Пустая строка "" — валидное значение (например, "No Filter")
             if "filter_current" in data and data["filter_current"] is not None:
                 filter_value = data["filter_current"]
                 if isinstance(filter_value, str):
@@ -343,6 +344,7 @@ class MetricsAggregator:
                     MetricSource.INFLUXDB,
                     SourcePriority.PRIMARY,
                 )
+
             if "image_fwhm" in data and data["image_fwhm"] is not None:
                 self.current_metrics["fwhm"] = data["image_fwhm"]
                 await self._update_unified(
@@ -351,10 +353,13 @@ class MetricsAggregator:
                     MetricSource.INFLUXDB,
                     SourcePriority.PRIMARY,
                 )
+
             if "image_stars" in data:
                 self.current_metrics["star_count"] = data["image_stars"]
+
             if "image_median" in data:
                 self.current_metrics["median_adu"] = data["image_median"]
+
             if "image_eccentricity" in data:
                 self.current_metrics["eccentricity"] = data["image_eccentricity"]
 
@@ -366,14 +371,19 @@ class MetricsAggregator:
         async with self._history_lock:
             if "camera_temp" in data and data["camera_temp"] is not None:
                 self._append_history_unlocked("temperature", data["camera_temp"])
+
             if "guider_rms_ra" in data and data["guider_rms_ra"] is not None:
                 self._append_history_unlocked("rms_ra", data["guider_rms_ra"])
+
             if "guider_rms_dec" in data and data["guider_rms_dec"] is not None:
                 self._append_history_unlocked("rms_dec", data["guider_rms_dec"])
+
             if "guider_rms_total" in data:
                 self._append_history_unlocked("rms_total", data["guider_rms_total"])
+
             if "image_hfr" in data and data["image_hfr"] is not None:
                 self._append_history_unlocked("hfr", data["image_hfr"])
+
             if "image_fwhm" in data and data["image_fwhm"] is not None:
                 self._append_history_unlocked("fwhm", data["image_fwhm"])
 
@@ -381,20 +391,28 @@ class MetricsAggregator:
         async with self._metrics_lock:
             if "wx_temperature" in data:
                 self.weather["temperature"] = data["wx_temperature"]
+
             if "wx_humidity" in data:
                 self.weather["humidity"] = data["wx_humidity"]
+
             if "wx_dewpoint" in data:
                 self.weather["dewpoint"] = data["wx_dewpoint"]
+
             if "wx_cloud_cover" in data:
                 self.weather["cloud_cover"] = data["wx_cloud_cover"]
+
             if "wx_wind_speed" in data:
                 self.weather["wind_speed"] = data["wx_wind_speed"]
+
             if "wx_wind_gust" in data:
                 self.weather["wind_gust"] = data["wx_wind_gust"]
+
             if "wx_wind_direction" in data:
                 self.weather["wind_direction"] = data["wx_wind_direction"]
+
             if "wx_pressure" in data:
                 self.weather["pressure"] = data["wx_pressure"]
+
             if "wx_sky_quality" in data:
                 self.weather["sky_quality"] = data["wx_sky_quality"]
 
@@ -402,6 +420,7 @@ class MetricsAggregator:
         async with self._history_lock:
             if "wx_humidity" in data:
                 self._append_history_unlocked("humidity", data["wx_humidity"])
+
             if "wx_wind_speed" in data:
                 self._append_history_unlocked("wind_speed", data["wx_wind_speed"])
 
@@ -412,7 +431,6 @@ class MetricsAggregator:
     async def _on_prometheus_update(self, data: Dict[str, Any]):
         """
         Layer 2 & 3: Prometheus update.
-
         Layer 2 (UNIQUE): метрики, которых НЕТ в InfluxDB — всегда принимаются.
         Layer 3 (FALLBACK): дублирующие метрики — принимаются ТОЛЬКО если
         InfluxDB stale (> 30s без обновлений).
@@ -439,7 +457,6 @@ class MetricsAggregator:
 
         async with self._metrics_lock:
             # === Layer 2: UNIQUE Prometheus метрики (всегда принимаем) ===
-
             # Autofocus state (нет в InfluxDB)
             if "autofocus_running" in data:
                 self.is_autofocus_running = bool(data["autofocus_running"])
@@ -462,6 +479,7 @@ class MetricsAggregator:
                 "equipment_safety_monitor": "safety_monitor",
                 "equipment_weather": "weather",
             }
+
             for key, device in equipment_keys.items():
                 if key in data:
                     await self._update_unified(
@@ -500,12 +518,16 @@ class MetricsAggregator:
                 # Weather (fallback)
                 if data.get("wx_temp") is not None:
                     self.weather["temperature"] = data["wx_temp"]
+
                 if data.get("wx_humidity") is not None:
                     self.weather["humidity"] = data["wx_humidity"]
+
                 if data.get("wx_wind_speed") is not None:
                     self.weather["wind_speed"] = data["wx_wind_speed"]
+
                 if data.get("wx_wind_gust") is not None:
                     self.weather["wind_gust"] = data["wx_wind_gust"]
+
                 if data.get("wx_cloud_cover") is not None:
                     self.weather["cloud_cover"] = data["wx_cloud_cover"]
 
@@ -542,7 +564,6 @@ class MetricsAggregator:
             return
 
         unit = UnitRegistry.get_unit(name)
-
         self._unified_metrics[name] = UnifiedMetric(
             name=name,
             value=float(value),
@@ -561,7 +582,6 @@ class MetricsAggregator:
     async def _on_new_frame(self, data: Dict[str, Any]):
         """
         Layer 5: Per-frame enrichment from SessionWatcher.
-
         Обновляет current_metrics и history метриками кадра.
         """
         frame = data.get("frame", {})
@@ -590,39 +610,51 @@ class MetricsAggregator:
                 await self._update_unified(
                     "hfr", hfr, MetricSource.FILE_WATCHER, SourcePriority.ENRICHMENT
                 )
+
             if fwhm is not None:
                 self.current_metrics["fwhm"] = fwhm
                 await self._update_unified(
                     "fwhm", fwhm, MetricSource.FILE_WATCHER, SourcePriority.ENRICHMENT
                 )
+
             if stars is not None:
                 self.current_metrics["star_count"] = stars
+
             if rms is not None:
                 self.current_metrics["rms_total"] = rms
+
             if exposure is not None:
                 self.current_metrics["exposure_time"] = exposure
+
             if gain is not None:
                 self.current_metrics["gain"] = gain
+
             if filter_name is not None:
                 self.current_metrics["filter"] = filter_name
+
             if temp is not None:
                 self.current_metrics["camera_temp"] = temp
+
             if index is not None:
                 self.current_metrics["frame_index"] = index
 
         async with self._history_lock:
             if hfr is not None:
                 self._append_history_unlocked("hfr", hfr)
+
             if fwhm is not None:
                 self._append_history_unlocked("fwhm", fwhm)
+
             if rms is not None:
                 self._append_history_unlocked("rms_total", rms)
+
             if temp is not None:
                 self._append_history_unlocked("temperature", temp)
 
     async def _on_weather_update(self, data: Dict[str, Any]):
         """Layer 5: Weather enrichment from WeatherData.json."""
         weather = data.get("weather", {})
+
         async with self._metrics_lock:
             for key, value in weather.items():
                 if value is not None and key in self.weather:
@@ -635,9 +667,11 @@ class MetricsAggregator:
     async def _on_fits_parsed(self, data: Dict[str, Any]):
         """Layer 5: FITS header enrichment (WCS, MOONANGL, SUNANGLE)."""
         report = data.get("report", {})
+
         async with self._metrics_lock:
             if report.get("moon_angl") is not None:
                 self.astronomy["moon_angle"] = report["moon_angl"]
+
             if report.get("sun_angle") is not None:
                 self.astronomy["sun_angle"] = report["sun_angle"]
 
@@ -664,6 +698,7 @@ class MetricsAggregator:
             "timestamp": datetime.now().isoformat(),
             **data,
         }
+
         async with self._alerts_lock:
             self.active_alerts.append(alert)
             if len(self.active_alerts) > self._max_active_alerts:
@@ -682,6 +717,7 @@ class MetricsAggregator:
     async def _on_log_event(self, data: Dict[str, Any]):
         """Layer 4: Log events (guiding, autofocus, safety)."""
         event_type = data.get("event_type", "")
+
         async with self._metrics_lock:
             if event_type == "guiding_start":
                 self.is_guiding_active = True
@@ -704,71 +740,136 @@ class MetricsAggregator:
         """
         ВНУТРЕННИЙ метод: добавляет значение в историю.
         ДОЛЖЕН вызываться ТОЛЬКО под _history_lock!
+
+        ИСПРАВЛЕНО (P2): Параллельно агрегирует в SQLite через metrics_history.
+        In-memory история (100 точек) → быстрые тренды (~5 мин)
+        SQLite агрегация (по минутам) → долгосрочные тренды (24+ часов)
         """
         if value is None:
             return
+
+        # === 1. In-memory история (быстрые тренды) ===
         history_list = getattr(self.history, metric, None)
         if history_list is not None and isinstance(history_list, list):
             try:
-                history_list.append(float(value))
+                float_value = float(value)
+                history_list.append(float_value)
                 if len(history_list) > self._max_history_points:
                     history_list.pop(0)
             except (ValueError, TypeError):
-                pass
+                return
+
+        # === 2. SQLite агрегация (долгосрочные тренды) ===
+        # ИСПРАВЛЕНО (P2): Неблокирующий вызов через create_task
+        # metrics_history.append_metric() — async, но мы в sync методе под lock
+        # Создаём fire-and-forget task для агрегации
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            from app.storage.metrics_history import metrics_history
+
+            loop.create_task(metrics_history.append_metric(metric, value))
+        except RuntimeError:
+            # Нет event loop — пропускаем агрегацию
+            pass
 
     # ========================================================================
     # PUBLIC API: Trend Analysis
     # ========================================================================
 
-    def get_trend(self, metric: str, window: int = 10) -> Optional[float]:
+    async def get_trend(self, metric: str, window: int = 10) -> Optional[float]:
         """
         Вычисляет тренд метрики (наклон линейной регрессии).
-        Read-only — делает snapshot copy под блокировкой.
-        ИСПРАВЛЕНО (С-4): использует calculate_trend из core.math_utils.
+
+        ИСПРАВЛЕНО (В-1): async метод с _history_lock для thread-safe snapshot.
+        Раньше был sync методом, который читал history БЕЗ блокировки,
+        что приводило к race condition при одновременном обновлении
+        из EventBus handlers.
+
+        Args:
+            metric: Имя метрики (hfr, fwhm, rms_ra, rms_dec, temperature, etc.)
+            window: Количество последних точек для анализа
+
+        Returns:
+            Slope (наклон) или None если недостаточно данных
         """
-        history_list = getattr(self.history, metric, None)
-        if not history_list or len(history_list) < window:
-            return None
-        recent = list(history_list[-window:])
+        async with self._history_lock:
+            history_list = getattr(self.history, metric, None)
+            if not history_list or len(history_list) < window:
+                return None
+            recent = list(history_list[-window:])
         # ИСПРАВЛЕНО (С-4): единая функция из math_utils
         return calculate_trend(recent)
 
-    def get_metric_average(self, metric: str, window: int = 20) -> Optional[float]:
-        """Возвращает среднее значение метрики за последние N точек."""
-        history_list = getattr(self.history, metric, None)
-        if not history_list:
-            return None
-        recent = list(history_list[-window:])
+    async def get_metric_average(
+        self, metric: str, window: int = 20
+    ) -> Optional[float]:
+        """
+        Возвращает среднее значение метрики за последние N точек.
+
+        ИСПРАВЛЕНО (В-1): async с _history_lock.
+        """
+        async with self._history_lock:
+            history_list = getattr(self.history, metric, None)
+            if not history_list:
+                return None
+            recent = list(history_list[-window:])
         return sum(recent) / len(recent) if recent else None
 
-    def get_metric_std(self, metric: str, window: int = 20) -> Optional[float]:
-        """Возвращает стандартное отклонение метрики за последние N точек."""
+    async def get_metric_std(self, metric: str, window: int = 20) -> Optional[float]:
+        """
+        Возвращает стандартное отклонение метрики за последние N точек.
+
+        ИСПРАВЛЕНО (В-1): async с _history_lock.
+        """
         import numpy as np
 
-        history_list = getattr(self.history, metric, None)
-        if not history_list or len(history_list) < 3:
-            return None
-        recent = list(history_list[-window:])
+        async with self._history_lock:
+            history_list = getattr(self.history, metric, None)
+            if not history_list or len(history_list) < 3:
+                return None
+            recent = list(history_list[-window:])
         return float(np.std(recent))
 
-    def is_metric_degrading(self, metric: str, threshold_percent: float = 20.0) -> bool:
-        """Проверяет, деградирует ли метрика."""
-        history_list = getattr(self.history, metric, None)
-        if not history_list or len(history_list) < 10:
-            return False
-        history_copy = list(history_list)
+    async def is_metric_degrading(
+        self, metric: str, threshold_percent: float = 20.0
+    ) -> bool:
+        """
+        Проверяет, деградирует ли метрика.
+
+        ИСПРАВЛЕНО (В-1): async с _history_lock.
+        Сравнивает baseline (старые точки) с recent (новые точки).
+
+        Args:
+            metric: Имя метрики
+            threshold_percent: Порог деградации в процентах
+
+        Returns:
+            True если метрика деградирует больше порога
+        """
+        async with self._history_lock:
+            history_list = getattr(self.history, metric, None)
+            if not history_list or len(history_list) < 10:
+                return False
+            history_copy = list(history_list)
+
         baseline = (
             history_copy[-20:-10]
             if len(history_copy) >= 20
             else history_copy[: len(history_copy) // 2]
         )
         recent = history_copy[-10:]
+
         if not baseline:
             return False
+
         baseline_mean = sum(baseline) / len(baseline)
         recent_mean = sum(recent) / len(recent)
+
         if baseline_mean == 0:
             return False
+
         change_percent = ((recent_mean - baseline_mean) / baseline_mean) * 100
         return change_percent > threshold_percent
 
@@ -785,8 +886,10 @@ class MetricsAggregator:
             reason=reason,
             result=result,
         )
+
         async with self._ai_action_lock:
             self.ai_action_log.append(entry.model_dump())
+
         logger.info(f"🤖 [{agent}] {action}: {reason} -> {result}")
 
     # ========================================================================
@@ -801,9 +904,7 @@ class MetricsAggregator:
     ) -> None:
         """
         Обновляет целевые координаты для точного расчёта Meridian Flip.
-
         ИСПРАВЛЕНО (С-16): Вызывается при старте новой цели или загрузке секвенсора.
-
         Args:
             ra_deg: Right Ascension в градусах (0-360)
             dec_deg: Declination в градусах (-90 до +90)
@@ -822,28 +923,54 @@ class MetricsAggregator:
                 f"{f' ({target_name})' if target_name else ''}"
             )
 
-    def get_full_state(self) -> Dict[str, Any]:
+    async def get_full_state(self) -> Dict[str, Any]:
         """
         Возвращает полное состояние для AI-агентов и Frontend.
-        Read-only — делает snapshot под блокировками.
+        ИСПРАВЛЕНО (К-1): async метод с lock'ами для thread-safe snapshot.
+        Раньше был sync методом, который читал current_metrics, weather,
+        active_alerts и другие поля БЕЗ блокировок, что приводило к
+        race condition при одновременном обновлении из EventBus.
+        Теперь:
+        1. Snapshot current_metrics, weather, astronomy под _metrics_lock
+        2. Snapshot active_alerts, targets под _alerts_lock
+        3. Snapshot ai_action_log под _ai_action_lock
+        4. Возвращает консистентный snapshot
         """
         influxdb_stale = self._is_influxdb_stale()
         prometheus_stale = self._is_prometheus_stale()
 
-        return {
-            "metrics": dict(self.current_metrics),
-            "weather": dict(self.weather),
-            "astronomy": dict(self.astronomy),
-            "sequence": state_tracker.get_state(),
-            "safety": self.safety_status,
-            "modes": {
+        # Snapshot под _metrics_lock
+        async with self._metrics_lock:
+            metrics_snapshot = dict(self.current_metrics)
+            weather_snapshot = dict(self.weather)
+            astronomy_snapshot = dict(self.astronomy)
+            safety_snapshot = self.safety_status
+            modes_snapshot = {
                 "flat_mode": self.is_flat_mode,
                 "guiding": self.is_guiding_active,
                 "autofocus": self.is_autofocus_running,
-            },
-            "active_alerts": list(self.active_alerts),
-            "targets": list(self.active_targets),
-            "recent_ai_actions": list(self.ai_action_log)[-10:],
+            }
+            unified_count = len(self._unified_metrics)
+
+        # Snapshot под _alerts_lock
+        async with self._alerts_lock:
+            alerts_snapshot = list(self.active_alerts)
+            targets_snapshot = list(self.active_targets)
+
+        # Snapshot под _ai_action_lock
+        async with self._ai_action_lock:
+            ai_actions_snapshot = list(self.ai_action_log)[-10:]
+
+        return {
+            "metrics": metrics_snapshot,
+            "weather": weather_snapshot,
+            "astronomy": astronomy_snapshot,
+            "sequence": state_tracker.get_state(),
+            "safety": safety_snapshot,
+            "modes": modes_snapshot,
+            "active_alerts": alerts_snapshot,
+            "targets": targets_snapshot,
+            "recent_ai_actions": ai_actions_snapshot,
             "data_sources": {
                 "primary": "influxdb",
                 "influxdb_stale": influxdb_stale,
@@ -862,22 +989,26 @@ class MetricsAggregator:
                     else None
                 ),
             },
-            "unified_metrics_count": len(self._unified_metrics),
+            "unified_metrics_count": unified_count,
         }
 
-    def get_unified_metrics(self) -> Dict[str, Dict[str, Any]]:
+    async def get_unified_metrics(self) -> Dict[str, Dict[str, Any]]:
         """
         Возвращает все unified metrics в сериализованном виде.
         Для API endpoint /api/v1/metrics/unified.
+        ИСПРАВЛЕНО (К-1): async с _metrics_lock для thread-safe чтения.
         """
-        return {
-            name: metric.to_dict() for name, metric in self._unified_metrics.items()
-        }
+        async with self._metrics_lock:
+            return {
+                name: metric.to_dict() for name, metric in self._unified_metrics.items()
+            }
 
     def get_data_sources_status(self) -> Dict[str, Any]:
         """
         Возвращает статус всех источников данных.
         Для API endpoint /api/v1/metrics/sources.
+        Примечание: читает только status fields, которые обновляются
+        атомарно (timestamp объекты), поэтому lock не требуется.
         """
         return {
             "influxdb": {

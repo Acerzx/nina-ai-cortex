@@ -884,8 +884,8 @@ class DiskSpaceGate(Gate):
 class StorageWriteGate(Gate):
     """
     Проверка возможности записи в sessions_root.
-
     Создаёт тестовый файл и удаляет его.
+    ИСПРАВЛЕНО (В-4): Использует try/finally для гарантированного удаления.
     """
 
     def __init__(self):
@@ -903,29 +903,47 @@ class StorageWriteGate(Gate):
 
         # Попытка записать тестовый файл
         test_file = sessions_root / ".cortex_write_test"
+
         try:
             # Создаём файл
             test_file.write_text("test", encoding="utf-8")
-            # Удаляем файл
-            test_file.unlink()
 
+            # Если дошли сюда — запись успешна
             return self._make_result(
                 GateStatus.GO,
                 f"Write test passed: {sessions_root}",
                 {"sessions_root": str(sessions_root)},
             )
+
         except PermissionError:
             return self._make_result(
                 GateStatus.NO_GO,
                 f"Permission denied: cannot write to {sessions_root}",
                 {"sessions_root": str(sessions_root)},
             )
+
         except Exception as e:
             return self._make_result(
                 GateStatus.NO_GO,
                 f"Write test failed: {e}",
                 {"sessions_root": str(sessions_root), "error": str(e)},
             )
+
+        finally:
+            # ИСПРАВЛЕНО (В-4): Гарантированное удаление тестового файла
+            # Даже если процесс упадёт между write_text и unlink,
+            # finally блок выполнится при нормальном завершении.
+            # При SIGKILL/OOM файл может остаться, но это допустимо —
+            # следующий запуск перезапишет его.
+            try:
+                if test_file.exists():
+                    test_file.unlink()
+            except Exception as cleanup_error:
+                # Игнорируем ошибки удаления — они не критичны
+                # Файл будет перезаписан при следующем запуске
+                logger.debug(
+                    f"Could not cleanup test file {test_file}: {cleanup_error}"
+                )
 
 
 # ============================================================================

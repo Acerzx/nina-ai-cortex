@@ -311,13 +311,14 @@ class WatcherAgent(BaseAgent):
                     f"z_score={z_score:.2f}"
                 )
 
+                hfr_trend = await observatory_state.get_trend("hfr", window=10)
                 return AnomalyReport(
                     metric="HFR",
                     current_value=current_mean,
                     baseline_value=baseline_mean,
                     deviation_percent=increase_percent,
                     z_score=z_score,
-                    trend=observatory_state.get_trend("hfr", window=10),
+                    trend=hfr_trend,
                     severity="HIGH",
                     context={
                         "recent_values": recent,

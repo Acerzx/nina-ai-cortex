@@ -74,6 +74,7 @@ from app.agents.hybrid_langgraph_orchestrator import (
 # Storage
 from app.storage.disk_monitor import disk_monitor
 from app.storage.decision_audit import decision_audit
+from app.storage.metrics_history import metrics_history
 
 # v4.0 modules
 from app.core.rag_updater import rag_updater
@@ -425,6 +426,26 @@ async def lifespan(app: FastAPI):
         )
         logger.info("   ✅ RAG cleanup registered (weekly)")
 
+        # 11.6. P2: Metrics History cleanup (hourly)
+        async def metrics_history_cleanup_task():
+            try:
+                deleted = await metrics_history.cleanup_old_records()
+                if deleted > 0:
+                    logger.info(
+                        f"🗑️ Metrics History cleanup: {deleted} old records deleted"
+                    )
+            except Exception as e:
+                logger.error(f"Metrics History cleanup failed: {e}")
+
+        background_tasks.register(
+            name="metrics_history_cleanup",
+            coro=metrics_history_cleanup_task,
+            interval_seconds=3600,  # Каждый час
+            enabled=True,
+            description="Cleanup old aggregated metrics (retention: 24h)",
+        )
+        logger.info("   ✅ Metrics History cleanup registered (hourly)")
+
         logger.info(f"   ✅ {len(background_tasks._tasks)} background tasks registered")
 
         logger.info("=" * 70)
@@ -501,9 +522,10 @@ async def lifespan(app: FastAPI):
         # 8. Закрываем trigger emulator
         await trigger_emulator.close()
 
+        # 8.5. С-3: Закрываем Decision Audit Trail (финальный flush batch-буфера)
+        await decision_audit.close()
+
         # 9. ИСПРАВЛЕНО (С-15): Закрываем все HTTP клиенты через HttpClientManager
-        # Это закрывает кэшированные httpx.AsyncClient для всех сервисов:
-        # nina, ollama, prometheus, embeddings
         await http_client_manager.close_all()
 
         # НОВОЕ (К-7): 9. Закрываем thread pool executors
@@ -779,13 +801,13 @@ async def get_sequence_state(request: Request):
 @app.get("/api/v1/observatory/state", tags=["AI Agents"])
 async def get_observatory_full_state(request: Request):
     """Возвращает единое состояние обсерватории."""
-    return observatory_state.get_full_state()
+    return await observatory_state.get_full_state()
 
 
 @app.get("/api/v1/observatory/session-summary", tags=["AI Agents"])
 async def get_session_summary(request: Request):
     """Возвращает краткую сводку текущей сессии."""
-    full_state = observatory_state.get_full_state()
+    full_state = await observatory_state.get_full_state()
     summary = {
         "metrics": full_state.get("metrics", {}),
         "weather": full_state.get("weather", {}),
@@ -887,7 +909,7 @@ async def get_metrics(request: Request):
 
     trends = {}
     for metric_name in ["hfr", "fwhm", "rms_ra", "rms_dec", "temperature"]:
-        trend = observatory_state.get_trend(metric_name, window=10)
+        trend = await observatory_state.get_trend(metric_name, window=10)
         if trend is not None:
             trends[metric_name] = trend
 
@@ -930,7 +952,7 @@ async def get_unified_metrics(request: Request):
     - unit, quality, labels
     - age_seconds, is_stale
     """
-    return observatory_state.get_unified_metrics()
+    return await observatory_state.get_unified_metrics()
 
 
 @app.get("/api/v1/metrics/sources-status", tags=["Metrics"])
@@ -977,6 +999,9 @@ async def get_metrics_history(
         timestamp = now - timedelta(seconds=(len(limited_history) - i) * 3)
         timestamps.append(timestamp.isoformat())
 
+    # ИСПРАВЛЕНО (В-1): get_trend() теперь async
+    trend_value = await observatory_state.get_trend(metric, window=10)
+
     return {
         "metric": metric,
         "count": len(limited_history),
@@ -988,9 +1013,133 @@ async def get_metrics_history(
             "avg": (
                 sum(limited_history) / len(limited_history) if limited_history else None
             ),
-            "trend": observatory_state.get_trend(metric, window=10),
+            "trend": trend_value,
         },
     }
+
+
+# ============================================================================
+# METRICS HISTORY ENDPOINTS (P2: долгосрочные тренды)
+# ============================================================================
+@app.get("/api/v1/metrics/trend", tags=["Metrics"])
+async def get_metric_trend(
+    request: Request,
+    metric: str = Query(..., description="Имя метрики (hfr, fwhm, rms_ra, etc.)"),
+    window: str = Query(
+        "short",
+        description="Окно анализа: 'short' (in-memory, ~5 мин) или 'long' (SQLite, 1-24 часа)",
+    ),
+    minutes: int = Query(
+        60,
+        ge=5,
+        le=1440,
+        description="Размер окна в минутах (для window='long')",
+    ),
+):
+    """
+    Возвращает тренд метрики.
+
+    P2: Гибридная история:
+    - window='short': in-memory тренд (последние 10 точек, ~5 минут)
+    - window='long': SQLite тренд (агрегация по минутам, до 24 часов)
+    """
+    if window == "short":
+        # In-memory тренд (быстрый)
+        trend_value = await observatory_state.get_trend(metric, window=10)
+        history_list = getattr(observatory_state.history, metric, None)
+        data_points = len(history_list) if history_list else 0
+
+        return {
+            "metric": metric,
+            "window": "short",
+            "window_description": "In-memory (~5 minutes)",
+            "trend": trend_value,
+            "data_points": data_points,
+            "source": "in_memory",
+            "interpretation": (
+                "degrading"
+                if trend_value and trend_value > 0.01
+                else "improving"
+                if trend_value and trend_value < -0.01
+                else "stable"
+                if trend_value is not None
+                else "insufficient_data"
+            ),
+        }
+
+    elif window == "long":
+        # SQLite тренд (долгосрочный)
+        long_trend = await metrics_history.get_trend(metric, window_minutes=minutes)
+
+        if long_trend is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Insufficient data for long-term trend of '{metric}' "
+                f"(need at least 3 data points in {minutes} minutes)",
+            )
+
+        return {
+            "metric": metric,
+            "window": "long",
+            "window_description": f"SQLite aggregation ({minutes} minutes)",
+            "trend": long_trend.slope,
+            "r_squared": long_trend.r_squared,
+            "data_points": long_trend.data_points,
+            "first_value": long_trend.first_value,
+            "last_value": long_trend.last_value,
+            "change_percent": round(long_trend.change_percent, 2),
+            "source": "sqlite",
+            "interpretation": long_trend.interpretation,
+        }
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid window: '{window}'. Use 'short' or 'long'.",
+        )
+
+
+@app.get("/api/v1/metrics/aggregated", tags=["Metrics"])
+async def get_aggregated_metrics(
+    request: Request,
+    metric: str = Query(..., description="Имя метрики"),
+    hours: float = Query(
+        1.0,
+        ge=0.1,
+        le=24.0,
+        description="Период в часах (0.1 — 24)",
+    ),
+):
+    """
+    Возвращает агрегированные данные метрики из SQLite.
+
+    Каждая запись — среднее значение за минуту с min/max/count.
+    """
+    data = await metrics_history.get_aggregated(metric, hours=hours)
+
+    return {
+        "metric": metric,
+        "hours": hours,
+        "records_count": len(data),
+        "records": [
+            {
+                "minute": d.minute_key,
+                "avg": round(d.value, 4),
+                "min": round(d.min_value, 4),
+                "max": round(d.max_value, 4),
+                "count": d.count,
+            }
+            for d in data
+        ],
+    }
+
+
+@app.get("/api/v1/metrics/history/stats", tags=["Metrics"])
+async def get_metrics_history_stats(request: Request):
+    """
+    Возвращает статистику хранилища долгосрочных метрик.
+    """
+    return await metrics_history.get_stats()
 
 
 # ============================================================================

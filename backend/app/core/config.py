@@ -463,6 +463,8 @@ class RAGConfig(BaseModel):
 
     chunk_sizes: ChunkSizesConfig = Field(default_factory=ChunkSizesConfig)
     embedding_cache_max_size: int = 10000
+    # ИСПРАВЛЕНО (С-1): Размер батча для upsert в Qdrant
+    batch_upsert_size: int = 100
 
 
 class RAGUpdaterConfig(BaseModel):

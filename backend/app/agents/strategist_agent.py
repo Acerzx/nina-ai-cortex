@@ -1,17 +1,17 @@
 """
 Strategist Agent — оптимизирует параметры съемки для максимального качества.
 Анализирует LiveStack SNR, Dynamic Sequencer, Diagnostician рекомендации.
-
 ЭТАП 7 (делегирование):
 - Strategist теперь делегирует расчёты в ParameterOptimizer
 - Убрано дублирование формул (SNR ~ sqrt(time))
 - Strategist фокусируется на принятии решений, а не на расчётах
 - Сохранена интеграция с Diagnostician и LiveStack
-
 ИСПРАВЛЕНО (audit 4.2): Убран хардкод интервалов автофокуса.
 - Текущий интервал читается из глобальных переменных Shadow Engine
 - Пороговые значения извлекаются из settings.thresholds
 - Предложения по оптимизации учитывают реальные настройки оборудования
+ИСПРАВЛЕНО (К-2): Удалён дубликат метода _on_snr_update, который был
+определён вне класса из-за ошибки отступов.
 """
 
 import logging
@@ -45,19 +45,16 @@ class OptimizationProposal(BaseModel):
 class StrategistAgent(BaseAgent):
     """
     Агент оптимизации параметров съемки.
-
     Responsibilities:
     - Делегирует расчёты в ParameterOptimizer
     - Принимает решения на основе предложений ML/Heuristic моделей
     - Применяет оптимизации через глобальные переменные Sequencer+
     - Редактирует Dynamic Sequencer проекты
     - Отключает неоптимальные цели при плохих условиях
-
     ЭТАП 7 (делегирование):
     - Strategist больше не содержит формул расчёта
     - Все расчёты делегируются в ParameterOptimizer
     - Strategist фокусируется на принятии решений
-
     Примеры оптимизации:
     - "SNR = 15, target = 20" → "Увеличить экспозицию с 60s до 90s"
     - "Ветер с севера" → "Переключиться на цель в южном направлении"
@@ -131,6 +128,7 @@ class StrategistAgent(BaseAgent):
         logger.info("✅ Strategist Agent initialized with quality targets:")
         for key, value in self.quality_targets.items():
             logger.info(f"   - {key}: {value}")
+
         logger.info("✅ Strategist Agent autofocus config:")
         for key, value in self.autofocus_config.items():
             logger.info(f"   - {key}: {value}")
@@ -161,6 +159,41 @@ class StrategistAgent(BaseAgent):
         ):
             logger.warning(f"Low acceptance rate: {acceptance_rate:.2f}")
 
+    async def _on_snr_update(self, data: Dict[str, Any]) -> None:
+        """
+        Обработка обновления SNR от LiveStack.
+        ИСПРАВЛЕНО (К-2): единственный метод, определённый внутри класса.
+        Дубликат, который ранее был вне класса, удалён.
+        """
+        snr = data.get("snr")
+        snr_target = data.get("snr_target", self.quality_targets["snr_target"])
+
+        if snr is not None and snr < snr_target * 0.8:
+            # Делегируем расчёт в ParameterOptimizer вместо inline формулы
+            current_exposure = observatory_state.current_metrics.get(
+                "exposure_time", 60.0
+            )
+            conditions = {
+                "current_snr": snr,
+                "current_exposure": current_exposure,
+                "target_snr": snr_target,
+            }
+            suggestion = await parameter_optimizer.suggest_exposure(conditions)
+
+            if suggestion:
+                proposal = OptimizationProposal(
+                    parameter="exposure_time",
+                    current_value=current_exposure,
+                    proposed_value=suggestion.suggested_value,
+                    expected_improvement=(
+                        f"SNR увеличится с {snr:.1f} до {snr_target:.1f}"
+                    ),
+                    confidence=suggestion.confidence,
+                    rationale=suggestion.rationale,
+                    risk_level="LOW",
+                )
+                await self._propose_optimization(proposal)
+
     async def _on_diagnostic_recommendation(self, data: Dict[str, Any]) -> None:
         """Обработка рекомендаций от Diagnostician."""
         recommended_actions = data.get("recommended_actions", [])
@@ -169,16 +202,14 @@ class StrategistAgent(BaseAgent):
             if "автофокус" in action.lower() or "интервал" in action.lower():
                 # Делегируем расчёт в ParameterOptimizer
                 current_interval = self._get_current_autofocus_interval()
-
                 conditions = {
-                    "hfr_trend": observatory_state.get_trend("hfr", window=10),
+                    "hfr_trend": await observatory_state.get_trend("hfr", window=10),
                     "current_interval": current_interval,
                 }
 
                 suggestion = await parameter_optimizer.suggest_autofocus_interval(
                     conditions
                 )
-
                 if suggestion:
                     proposal = OptimizationProposal(
                         parameter="autofocus_interval",
@@ -212,7 +243,6 @@ class StrategistAgent(BaseAgent):
         }
 
         suggestion = await parameter_optimizer.suggest_exposure(conditions)
-
         if suggestion:
             return OptimizationProposal(
                 parameter="exposure_time",
@@ -226,7 +256,6 @@ class StrategistAgent(BaseAgent):
                 rationale=suggestion.rationale,
                 risk_level="LOW",
             )
-
         return None
 
     async def _analyze_target_suitability(self) -> Optional[OptimizationProposal]:
@@ -268,7 +297,6 @@ class StrategistAgent(BaseAgent):
                         ),
                         risk_level="MEDIUM",
                     )
-
         return None
 
     async def _analyze_autofocus_interval(self) -> Optional[OptimizationProposal]:
@@ -276,21 +304,18 @@ class StrategistAgent(BaseAgent):
         Делегирует анализ интервала автофокуса в ParameterOptimizer.
         """
         # Получаем тренд HFR
-        hfr_trend = observatory_state.get_trend("hfr", window=10)
-
+        hfr_trend = await observatory_state.get_trend("hfr", window=10)
         if hfr_trend is None:
             return None
 
         # Делегируем расчёт в ParameterOptimizer
         current_interval = self._get_current_autofocus_interval()
-
         conditions = {
             "hfr_trend": hfr_trend,
             "current_interval": current_interval,
         }
 
         suggestion = await parameter_optimizer.suggest_autofocus_interval(conditions)
-
         if suggestion:
             return OptimizationProposal(
                 parameter="autofocus_interval",
@@ -305,7 +330,6 @@ class StrategistAgent(BaseAgent):
                 rationale=suggestion.rationale,
                 risk_level="LOW",
             )
-
         return None
 
     def _get_current_autofocus_interval(self) -> int:
@@ -425,7 +449,6 @@ class StrategistAgent(BaseAgent):
                 logger.info(
                     f"Target switch proposed (requires Dynamic Sequencer integration)"
                 )
-
             else:
                 logger.warning(f"Unknown parameter: {proposal.parameter}")
                 success = False
@@ -453,14 +476,12 @@ class StrategistAgent(BaseAgent):
         recent_changes = [
             h for h in self._optimization_history if h["parameter"] == parameter
         ]
-
         if not recent_changes:
             return False
 
         last_change = max(recent_changes, key=lambda h: h["timestamp"])
         last_time = datetime.fromisoformat(last_change["timestamp"])
         elapsed = (datetime.now() - last_time).total_seconds()
-
         return elapsed < self._min_interval_between_changes
 
     async def _make_decision(self, context: AgentContext) -> Optional[AgentDecision]:
@@ -494,7 +515,6 @@ class StrategistAgent(BaseAgent):
                 rationale=f"Предложено {len(proposals)} оптимизаций",
                 confidence=max(p.confidence for p in proposals),
             )
-
         return None
 
     async def _perform_action(self, decision: AgentDecision) -> bool:
@@ -505,39 +525,10 @@ class StrategistAgent(BaseAgent):
         if decision.decision_type == "OPTIMIZATION_PROPOSED":
             proposals = decision.outputs.get("proposals", [])
             success_count = 0
-
             for proposal_data in proposals:
                 proposal = OptimizationProposal(**proposal_data)
                 success = await self._apply_optimization(proposal)
                 if success:
                     success_count += 1
-
             return success_count > 0
-
         return False
-
-    # В strategist_agent.py
-    async def _on_snr_update(self, data: Dict[str, Any]) -> None:
-        """Обработка обновления SNR от LiveStack."""
-        snr = data.get("snr")
-        snr_target = data.get("snr_target", self.quality_targets["snr_target"])
-
-        if snr is not None and snr < snr_target * 0.8:
-            # Расчет оптимальной экспозиции
-            current_exposure = observatory_state.current_metrics.get(
-                "exposure_time", 60.0
-            )
-            ratio = snr_target / snr
-            proposed_exposure = current_exposure * (ratio**2)
-            proposed_exposure = max(30.0, min(300.0, proposed_exposure))
-
-            proposal = OptimizationProposal(
-                parameter="exposure_time",
-                current_value=current_exposure,
-                proposed_value=proposed_exposure,
-                expected_improvement=f"SNR увеличится с {snr:.1f} до {snr_target:.1f}",
-                confidence=0.90,
-                rationale=f"SNR {snr:.1f} ниже целевого {snr_target:.1f}",
-                risk_level="LOW",
-            )
-            await self._propose_optimization(proposal)

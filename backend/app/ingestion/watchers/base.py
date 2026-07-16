@@ -2,11 +2,14 @@
 Base File Watcher — базовый класс для всех файловых вотчеров.
 ИСПРАВЛЕНО (audit 5.1): Сохранение ссылок на debounced задачи для предотвращения
 их отмены сборщиком мусора.
-
 ИСПРАВЛЕНО (С-17): Добавлен threading.Lock для защиты _pending dict от
 race condition между watchdog thread (on_modified) и asyncio event loop
 (_safe_cb). Используется threading.Lock, а не asyncio.Lock, потому что
 конфликт возникает МЕЖДУ потоками, а не внутри одного event loop.
+ИСПРАВЛЕНО (К-5): Добавлен threading.Lock для защиты _active_tasks set от
+race condition между watchdog thread (_schedule_task) и asyncio event loop
+(add_done_callback, cancel_all_pending). Set в CPython не является
+потокобезопасным для операций add/discard/iterate между потоками.
 """
 
 import asyncio
@@ -26,12 +29,13 @@ logger = logging.getLogger("BaseWatcher")
 class AsyncDebouncedEventHandler(FileSystemEventHandler):
     """
     Обработчик файловых событий с debouncing.
-
     ИСПРАВЛЕНО (audit 5.1): Добавлен набор _active_tasks для хранения
     ссылок на все активные debounced задачи.
-
     ИСПРАВЛЕНО (С-17): _pending dict защищён threading.Lock для
     thread-safe доступа между watchdog thread и asyncio event loop.
+    ИСПРАВЛЕНО (К-5): _active_tasks set защищён threading.Lock для
+    thread-safe доступа между watchdog thread (_schedule_task) и
+    asyncio event loop (add_done_callback, cancel_all_pending).
     """
 
     def __init__(self, loop, callback, target_files, debounce):
@@ -52,10 +56,17 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
         # ИСПРАВЛЕНО (audit 5.1): Хранение ссылок на активные задачи
         self._active_tasks: Set[asyncio.Task] = set()
 
+        # ИСПРАВЛЕНО (К-5): Lock для thread-safe доступа к _active_tasks
+        # Критично: _schedule_task() вызывается из watchdog thread
+        # (через loop.call_later), add_done_callback и cancel_all_pending
+        # вызываются из asyncio event loop thread.
+        # Set в CPython не является потокобезопасным для операций
+        # add/discard/iterate между потоками.
+        self._active_tasks_lock = threading.Lock()
+
     def on_modified(self, event: FileSystemEvent):
         """
         Вызывается из WATCHDOG THREAD при модификации файла.
-
         ИСПРАВЛЕНО (С-17): Доступ к _pending защищён threading.Lock,
         чтобы избежать race condition с _safe_cb() из event loop.
         """
@@ -84,21 +95,37 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
     def _schedule_task(self, path: Path):
         """
         Создаёт задачу и сохраняет ссылку на неё.
+        Вызывается из WATCHDOG THREAD через loop.call_later().
 
-        Вызывается из asyncio event loop через loop.call_later().
+        ИСПРАВЛЕНО (К-5): Доступ к _active_tasks защищён threading.Lock.
+        Раньше task.add() и add_done_callback вызывались без блокировки,
+        что приводило к race condition с cancel_all_pending() из event loop.
         """
         task = asyncio.create_task(self._safe_cb(path))
 
-        # ИСПРАВЛЕНО (audit 5.1): Сохраняем ссылку на задачу
-        self._active_tasks.add(task)
-        task.add_done_callback(self._active_tasks.discard)
+        # ИСПРАВЛЕНО (К-5): Защищённое добавление задачи в set
+        # _schedule_task вызывается из watchdog thread,
+        # cancel_all_pending — из event loop thread
+        with self._active_tasks_lock:
+            self._active_tasks.add(task)
+
+        # Используем lambda для безопасного удаления под lock
+        task.add_done_callback(lambda t: self._remove_task(t))
+
+    def _remove_task(self, task: asyncio.Task):
+        """
+        Удаляет задачу из _active_tasks после завершения.
+        Вызывается из ASYNCIO EVENT LOOP THREAD через add_done_callback.
+
+        ИСПРАВЛЕНО (К-5): Доступ к _active_tasks защищён threading.Lock.
+        """
+        with self._active_tasks_lock:
+            self._active_tasks.discard(task)
 
     async def _safe_cb(self, path: Path):
         """
         Безопасный вызов callback с обработкой ошибок.
-
         Вызывается из ASYNCIO EVENT LOOP THREAD.
-
         ИСПРАВЛЕНО (С-17): Доступ к _pending защищён threading.Lock.
         """
         try:
@@ -112,40 +139,49 @@ class AsyncDebouncedEventHandler(FileSystemEventHandler):
                     del self._pending[path.name]
 
             # ИСПРАВЛЕНО (v4.0 — проблема #51): удаляем задачу из active_tasks
+            # через _remove_task (который использует _active_tasks_lock)
             current_task = asyncio.current_task()
             if current_task:
-                self._active_tasks.discard(current_task)
+                self._remove_task(current_task)
 
     def cancel_all_pending(self):
         """
         Отменяет все pending и active задачи.
-
         Вызывается из asyncio event loop при остановке watcher'а.
 
         ИСПРАВЛЕНО (С-17): Доступ к _pending защищён threading.Lock.
-        Делаем snapshot под lock, затем отменяем timer'ы вне lock
-        (timer.cancel() — быстрая операция, но лучше не держать lock
-        во время итерации).
+        ИСПРАВЛЕНО (К-5): Доступ к _active_tasks защищён threading.Lock.
+
+        Алгоритм:
+        1. Snapshot pending timers под _pending_lock
+        2. Отмена timers вне lock (быстрая операция)
+        3. Snapshot active tasks под _active_tasks_lock
+        4. Отмена tasks вне lock (быстрая операция)
         """
-        # ИСПРАВЛЕНО (С-17): Snapshot под lock
+        # === Шаг 1: Snapshot pending timers под lock ===
         with self._pending_lock:
             pending_timers = list(self._pending.values())
             self._pending.clear()
 
-        # Отменяем timer'ы вне lock (thread-safe operation)
+        # Отмена timers вне lock (thread-safe operation)
         for timer in pending_timers:
             timer.cancel()
 
-        # Отменяем active задачи
-        for task in list(self._active_tasks):
-            if not task.done():
-                task.cancel()
+        # === Шаг 2: Snapshot active tasks под lock ===
+        # ИСПРАВЛЕНО (К-5): защищённый snapshot
+        with self._active_tasks_lock:
+            tasks_to_cancel = [t for t in self._active_tasks if not t.done()]
 
-        # Ждем завершения
-        if self._active_tasks:
-            # Не можем использовать await здесь (синхронный метод)
-            # Задачи будут отменены и завершатся асинхронно
-            logger.debug(f"Cancelling {len(self._active_tasks)} active tasks")
+        # Отмена tasks вне lock (asyncio task.cancel() — thread-safe)
+        for task in tasks_to_cancel:
+            task.cancel()
+
+        # Логируем количество отменённых задач
+        if tasks_to_cancel:
+            logger.debug(
+                f"Cancelling {len(tasks_to_cancel)} active tasks "
+                f"and {len(pending_timers)} pending timers"
+            )
 
 
 class BaseFileWatcher:
